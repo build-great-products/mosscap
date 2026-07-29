@@ -135,6 +135,34 @@ Pi persists the injected `mosscap.slack` custom message in its JSONL session. On
 
 No transaction can atomically commit both SQLite and Pi JSONL. The system therefore provides durable, idempotent delivery rather than claiming mathematical exactly-once behavior. A fresh Pi session can intentionally receive open work again; prompts and tools must consult the durable inbox.
 
+## Scheduled work
+
+Scheduling is a gateway capability: scheduled work is materialized into the same durable task ledger that backs recovery, then delivered through the active Pi binding like other work. It is never an in-memory Pi timer.
+
+```text
+mosscap schedule add --title "Follow up" --at 2026-08-01T09:00:00+12:00 --instructions "…"
+mosscap schedule add --title "Weekly review" --cron "0 9 * * 1" --timezone Pacific/Auckland --instructions "…"
+mosscap schedule list|show|enable|disable|remove
+```
+
+A schedule is exactly one of:
+
+- **one-off:** an ISO-8601 time with an explicit UTC offset, normalized and persisted as UTC;
+- **recurring:** a five-field cron expression evaluated in a required IANA timezone.
+
+The gateway transactionally materializes due schedules into open task occurrences with stable occurrence keys, then advances the schedule in the same transaction. A one-off schedule disables itself after materialization. A recurring schedule advances to its first future occurrence. The extension receives the resulting durable task, not a timer callback.
+
+### Downtime and safety
+
+- A scheduler tick and startup recovery materialize due work under the gateway's single-writer coordinator.
+- SQLite uniqueness prevents duplicate occurrences across restart or concurrent attempts.
+- Missed recurring runs are coalesced into one recovery task carrying the first/last missed instant and count; Mosscap does not surprise Pi with a burst of stale prompts.
+- Disabled schedules have no next run and do not accumulate missed work. Enabling recomputes from now.
+- A committed task remains open if Pi delivery fails, so recovery can safely redeliver it without recreating it.
+- Completed tasks never reopen. Schedule removal is blocked while durable occurrence history requires it.
+
+This keeps a useful human workflow simple: ask Pi to add a reminder or recurring review, inspect/disable it from the CLI, and trust the gateway to retain it while Pi/Zellij is offline.
+
 ## Failure and recovery
 
 | Failure | Result | Recovery |
@@ -173,9 +201,9 @@ No transaction can atomically commit both SQLite and Pi JSONL. The system theref
 
 1. **Foundation** — package, strict SQLite inbox, Slack admission/deduplication, foreground gateway, local control protocol, crash-boundary tests.
 2. **Pi bridge** — `/mosscap`, fenced binding, custom-message delivery, reconnect/reconciliation, lifecycle tests using a fake gateway.
-3. **Outbound work** — inbox and Slack commands, reply/reaction reconciliation, edits/deletes, files, unknown-outcome handling.
-4. **Operator UX** — status/doctor, Pi widget, Zellij list/attach/watch wrappers, supervisor-neutral deployment recipes.
-5. **Hardening** — lease-chaos tests, migrations/backups, version negotiation, live Slack tests, security/release review.
+3. **Outbound work and scheduling** — inbox and Slack commands, one-off/recurring schedule CRUD and materialization, reply/reaction reconciliation, edits/deletes, files, unknown-outcome handling.
+4. **Operator UX** — status/doctor, Pi widget, Zellij list/attach/watch wrappers, schedule visibility, supervisor-neutral deployment recipes.
+5. **Hardening** — lease/scheduler chaos tests, migrations/backups, version negotiation, live Slack tests, security/release review.
 
 ## Open product decisions
 
@@ -184,6 +212,7 @@ Before implementation, decide:
 1. **Takeover:** should a second Pi session require an interactive explicit takeover confirmation, or should it always be rejected until the current lease expires?
 2. **Gateway operation:** which supervisor recipes should the documentation prioritize while keeping the product supervisor-neutral?
 3. **Routing:** is a single active Pi consumer sufficient for v1, or should workspaces/channels be a first-class future route key?
+4. **Catch-up:** should missed recurring runs be coalesced by default (recommended), or is there a product need to replay every missed occurrence?
 
 ## Relationship to pi-tag-slack
 
