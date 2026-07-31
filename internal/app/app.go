@@ -8,14 +8,26 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 
+	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/identity"
+	"github.com/stayradiated/mosscap/internal/protocol"
+	"github.com/stayradiated/mosscap/internal/server"
 )
 
 const (
 	ExitSuccess     = 0
 	ExitUsage       = 2
+	ExitNotFound    = 3
+	ExitConflict    = 4
 	ExitUnsafe      = 5
+	ExitUnavailable = 6
 	ExitUnsupported = 9
 )
 
@@ -72,9 +84,9 @@ func (a App) Execute(_ context.Context, args []string) error {
 	case "doctor":
 		return a.leaf("doctor", args[1:])
 	case "gateway":
-		return a.branch("gateway", args[1:], []string{"run", "status"})
+		return a.gateway(override, args[1:])
 	case "task":
-		return a.branch("task", args[1:], []string{"create", "list", "show", "update", "open", "working", "done"})
+		return a.task(override, args[1:])
 	default:
 		return usage(fmt.Sprintf("unknown command %q", args[0]))
 	}
@@ -171,6 +183,207 @@ func (a App) configSet(override string, args []string) error {
 	}
 	return a.render(config.Redact(c), *j)
 }
+func (a App) gateway(override string, args []string) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		a.printBranchHelp("gateway", []string{"run", "status"})
+		return nil
+	}
+	if args[0] == "status" {
+		if len(args) == 2 && isHelp(args[1]) {
+			a.printLeafHelp("gateway status")
+			return nil
+		}
+		return unsupported("gateway status is not implemented in this build")
+	}
+	if args[0] != "run" {
+		return usage(fmt.Sprintf("unknown gateway command %q", args[0]))
+	}
+	fs := flag.NewFlagSet("gateway run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		a.printLeafHelp("gateway run")
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return usage("gateway run accepts no arguments")
+	}
+	loc, err := config.DefaultLocation(override)
+	if err != nil {
+		return err
+	}
+	c, err := config.Load(loc)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return unsupported("gateway run is not implemented until setup has completed")
+		}
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return server.New(c, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
+}
+
+func (a App) task(override string, args []string) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		a.printBranchHelp("task", []string{"create", "list", "show", "update", "open", "working", "done"})
+		return nil
+	}
+	cmd := args[0]
+	if cmd != "create" && cmd != "list" && cmd != "show" && cmd != "update" && cmd != "open" && cmd != "working" && cmd != "done" {
+		return usage(fmt.Sprintf("unknown task command %q", cmd))
+	}
+	fs := flag.NewFlagSet("task "+cmd, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	text := fs.String("text", "", "")
+	textFile := fs.String("text-file", "", "")
+	requestID := fs.String("request-id", "", "")
+	note := fs.String("note", "", "")
+	state := fs.String("state", "", "")
+	all := fs.Bool("all", false, "")
+	limit := fs.Int("limit", 0, "")
+	if err := fs.Parse(args[1:]); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		a.printTaskHelp(cmd)
+		return nil
+	}
+	var params any
+	mutation := cmd == "create" || cmd == "update" || cmd == "open" || cmd == "working" || cmd == "done"
+	readText := func() (string, error) {
+		if (*text == "") == (*textFile == "") {
+			return "", usage("exactly one of --text or --text-file is required")
+		}
+		if *textFile != "" {
+			b, e := os.ReadFile(*textFile)
+			if e != nil {
+				return "", e
+			}
+			return string(b), nil
+		}
+		return *text, nil
+	}
+	switch cmd {
+	case "create":
+		t, e := readText()
+		if e != nil {
+			return e
+		}
+		params = protocol.TaskCreateParams{Text: t}
+	case "update":
+		if fs.NArg() != 1 {
+			return usage("task update requires TASK")
+		}
+		t, e := readText()
+		if e != nil {
+			return e
+		}
+		params = protocol.TaskUpdateParams{Task: fs.Arg(0), Text: t}
+	case "show":
+		if fs.NArg() != 1 {
+			return usage("task show requires TASK")
+		}
+		params = protocol.TaskSelector{Task: fs.Arg(0)}
+	case "list":
+		if fs.NArg() != 0 {
+			return usage("task list accepts no arguments")
+		}
+		if *state != "" && *all {
+			return usage("--state and --all are mutually exclusive")
+		}
+		var sp *string
+		if *state != "" {
+			if *state != "open" && *state != "working" && *state != "done" {
+				return usage("invalid --state")
+			}
+			sp = state
+		}
+		params = protocol.TaskListParams{State: sp, IncludeDone: *all, Limit: *limit}
+	default:
+		if fs.NArg() != 1 {
+			return usage("task transition requires TASK")
+		}
+		st := cmd
+		params = protocol.TaskTransitionParams{Task: fs.Arg(0), State: st, Note: note}
+	}
+	if !mutation && *requestID != "" {
+		return usage("--request-id is mutation-only")
+	}
+	if mutation && *requestID == "" {
+		id, e := identity.NewGenerator(nil).NewRequestID()
+		if e != nil {
+			return e
+		}
+		*requestID = id
+	}
+	if !mutation {
+		*requestID = "req_read" + strings.ReplaceAll(cmd, ".", "_")
+	}
+	loc, e := config.DefaultLocation(override)
+	if e != nil {
+		return e
+	}
+	c, e := config.Load(loc)
+	if e != nil {
+		return e
+	}
+	cl, e := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.Protocol.MaxFrameBytes))
+	if e != nil {
+		return &commandError{ExitUnavailable, e.Error()}
+	}
+	defer cl.Close()
+	if _, e = cl.Hello(context.Background(), "req_hello_"+cmd, "cli", a.Version, nil); e != nil {
+		return remote(e)
+	}
+	b, _ := json.Marshal(params)
+	response, e := cl.Call(context.Background(), protocol.Request{ProtocolVersion: protocol.Version, RequestID: *requestID, ClientKind: "cli", ClientVersion: a.Version, Command: map[string]string{"show": "task.get", "list": "task.list", "create": "task.create", "update": "task.update", "open": "task.transition", "working": "task.transition", "done": "task.transition"}[cmd], Params: b})
+	if e != nil {
+		return remote(e)
+	}
+	if response.Error != nil {
+		return remote(&client.RemoteError{ProtocolError: *response.Error})
+	}
+	var out any
+	if e := json.Unmarshal(response.Result, &out); e != nil {
+		return e
+	}
+	if mutation {
+		out = map[string]any{"request_id": *requestID, "result": out}
+	}
+	return a.render(out, *j)
+}
+func remote(err error) error {
+	var re *client.RemoteError
+	if errors.As(err, &re) {
+		code := ExitUnsafe
+		switch re.ProtocolError.Category {
+		case "not_found":
+			code = ExitNotFound
+		case "ambiguous", "conflict":
+			code = ExitConflict
+		case "usage":
+			code = ExitUsage
+		case "unsupported":
+			code = ExitUnsupported
+		case "unavailable":
+			code = ExitUnavailable
+		}
+		return &commandError{code, re.Error()}
+	}
+	return &commandError{ExitUnavailable, err.Error()}
+}
+func (a App) printTaskHelp(cmd string) {
+	fmt.Fprintf(a.Out, "Usage: mosscap task %s [arguments]\n", cmd)
+}
+
 func (a App) render(v any, jsonOut bool) error {
 	if jsonOut {
 		b, err := json.Marshal(v)
@@ -214,7 +427,7 @@ func (a App) leaf(name string, args []string) error {
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, "Usage: mosscap [--config PATH] <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or change configuration\n  gateway     run or inspect the local gateway (not yet implemented)\n  doctor      diagnose local installation health (not yet implemented)\n  task        manage local tasks (not yet implemented)\n\nRun \"mosscap <command> --help\" for command help.\n")
+	fmt.Fprint(a.Out, "Usage: mosscap [--config PATH] <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or change configuration\n  gateway     run or inspect the local gateway\n  doctor      diagnose local installation health (not yet implemented)\n  task        manage local tasks\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)

@@ -391,6 +391,49 @@ func (s *Store) Get(ctx context.Context, selector string) (Task, error) {
 	return getTx(ctx, s.db, selector)
 }
 
+// List returns current tasks in stable updated-at/task-id order. By default done
+// tasks are excluded; an explicit state always takes precedence.
+func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool, limit int) ([]Task, error) {
+	if limit == 0 {
+		limit = 100
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("invalid task list limit")
+	}
+	q := "SELECT task_id,version,state,text,source_kind,created_at,updated_at,done_at FROM tasks"
+	args := []any{}
+	if stateFilter != nil {
+		q += " WHERE state=?"
+		args = append(args, *stateFilter)
+	} else if !includeDone {
+		q += " WHERE state IN ('open','working')"
+	}
+	q += " ORDER BY updated_at,task_id LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		var created, updated int64
+		var done sql.NullInt64
+		if err := rows.Scan(&t.ID, &t.Version, &t.State, &t.Text, &t.SourceKind, &created, &updated, &done); err != nil {
+			return nil, err
+		}
+		t.CreatedAt = time.UnixMicro(created).UTC()
+		t.UpdatedAt = time.UnixMicro(updated).UTC()
+		if done.Valid {
+			d := time.UnixMicro(done.Int64).UTC()
+			t.DoneAt = &d
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
 type queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
