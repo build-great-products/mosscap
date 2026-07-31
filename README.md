@@ -19,6 +19,18 @@ Slack / schedules / CLI
  human-owned Pi session in Zellij
 ```
 
+## Architecture lessons from worker OOM incidents
+
+The `pi-tag-slack` worker OOM incidents reinforce a few boundaries that are easy to blur:
+
+- **Mosscap is the durable control plane.** The gateway and SQLite ledger own admission, task state, leases, effects, and recovery; workers are replaceable execution capacity, not the record of work.
+- **Failure and resource domains stay separate.** The gateway, Pi session, and any worker processes must be independently bounded and observable, so a worker crash or memory spike does not take down coordination or the human's session.
+- **The gateway does not own Pi.** It may deliver visible work and report health, but it does not start, supervise, restart, select, or otherwise manage the human-owned Pi process.
+- **Bounds and evidence are operational features.** Set explicit limits for queues, payloads, files, retries, memory, and concurrency; expose backlog, leases, resource pressure, failures, and ambiguous outcomes rather than relying on process presence.
+- **Recovery must be durable and tested under faults.** Restart each boundary independently, reconcile from committed state, and exercise OOM, crash, timeout, reconnect, and disk-pressure scenarios without assuming exactly-once execution.
+
+These are architecture lessons, not new v1 behavior: [SPEC.md](SPEC.md) remains the normative implementation contract, while this README makes the resource-isolation rationale explicit.
+
 ## The everyday experience
 
 1. Start the gateway in a terminal you supervise.
