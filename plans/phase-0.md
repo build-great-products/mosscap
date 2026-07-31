@@ -21,7 +21,7 @@ Phase 0 deliberately has no Slack network client, Pi extension, delivery/effect/
 
 ## 2. Toolchain and dependencies
 
-Use module `github.com/stayradiated/mosscap` and Go 1.23 or newer. Commit `go.mod` and `go.sum`; build with `CGO_ENABLED=0`.
+Use module `github.com/stayradiated/mosscap` and the current stable Go release. Commit `go.mod` and `go.sum`; build with `CGO_ENABLED=0`.
 
 Direct dependencies (pin these initially, then let the implementation PR update only if required by the supported Go toolchain):
 
@@ -357,7 +357,7 @@ go build ./cmd/mosscap
 git diff --check
 ```
 
-Also run `govulncheck ./...` in CI (tooling, not a module dependency). Test Linux with `CGO_ENABLED=0`; add a second job using the oldest supported Go release.
+Also run `govulncheck ./...` in CI (tooling, not a module dependency). Test Linux with `CGO_ENABLED=0` on the current stable Go release.
 
 ## 9. Commit phases
 
