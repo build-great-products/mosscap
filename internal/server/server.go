@@ -39,6 +39,11 @@ type Server struct {
 	wg          sync.WaitGroup
 	closing     chan struct{}
 	closeOnce   sync.Once
+	slots       chan struct{}
+	admissionMu sync.Mutex
+	stopping    bool
+	activeMu    sync.Mutex
+	active      map[*net.UnixConn]context.CancelFunc
 	started     time.Time
 	connections atomic.Int32
 }
@@ -50,7 +55,7 @@ func New(c config.Config, version string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{Config: c, Version: version, Log: log, closing: make(chan struct{})}
+	return &Server{Config: c, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
 }
 
 // Serve validates state, obtains the singleton lock, and runs until ctx is cancelled.
@@ -78,8 +83,26 @@ func (s *Server) Serve(ctx context.Context) error {
 			_ = conn.Close()
 			continue
 		}
+		select {
+		case s.slots <- struct{}{}:
+		case <-s.closing:
+			_ = conn.Close()
+			return nil
+		}
+		s.admissionMu.Lock()
+		if s.stopping {
+			s.admissionMu.Unlock()
+			<-s.slots
+			_ = conn.Close()
+			return nil
+		}
 		s.wg.Add(1)
-		go func() { defer s.wg.Done(); s.handle(conn) }()
+		s.admissionMu.Unlock()
+		go func() {
+			defer s.wg.Done()
+			defer func() { <-s.slots }()
+			s.handle(conn)
+		}()
 	}
 }
 func (s *Server) open(ctx context.Context) error {
@@ -153,13 +176,13 @@ func (s *Server) open(ctx context.Context) error {
 // validateStartupPaths repeats setup's path checks immediately before and
 // after opening state. This closes the configuration-to-gateway race.
 func (s *Server) validateStartupPaths(c config.Config) error {
-	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
-		return fmt.Errorf("state directory: %w", err)
-	}
-	for _, path := range []string{c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir} {
-		if err := securepath.CheckExistingComponents(c.Paths.StateDir, path); err != nil {
+	for _, path := range []string{c.Paths.StateDir, c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir} {
+		if err := securepath.CheckAbsoluteComponents(path); err != nil {
 			return fmt.Errorf("state path: %w", err)
 		}
+	}
+	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
+		return fmt.Errorf("state directory: %w", err)
 	}
 	if err := securepath.CheckDir(c.Paths.TmpDir); err != nil {
 		return fmt.Errorf("temporary directory: %w", err)
@@ -168,11 +191,7 @@ func (s *Server) validateStartupPaths(c config.Config) error {
 		return fmt.Errorf("database: %w", err)
 	}
 	if c.Slack.SecretsFile != "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("secrets file home: %w", err)
-		}
-		if err := securepath.CheckExistingComponents(home, c.Slack.SecretsFile); err != nil {
+		if err := securepath.CheckAbsoluteComponents(c.Slack.SecretsFile); err != nil {
 			return fmt.Errorf("slack.secrets_file: %w", err)
 		}
 		if err := securepath.CheckFile(c.Slack.SecretsFile); err != nil {
@@ -206,14 +225,19 @@ func (s *Server) prepareEndpoint(endpoint string) error {
 func (s *Server) shutdown() {
 	s.closeOnce.Do(func() {
 		close(s.closing)
+		s.admissionMu.Lock()
+		s.stopping = true
 		if s.listener != nil {
 			_ = s.listener.Close()
 		}
+		s.admissionMu.Unlock()
 		done := make(chan struct{})
 		go func() { s.wg.Wait(); close(done) }()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
+			s.closeActive()
+			<-done
 		}
 		if s.endpoint != "" {
 			// Only remove the socket inode this process bound. A replacement must
@@ -246,10 +270,29 @@ func sameEUID(c *net.UnixConn) bool {
 	})
 	return ok
 }
+func (s *Server) closeActive() {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	for c, cancel := range s.active {
+		cancel()
+		_ = c.Close()
+	}
+}
+
 func (s *Server) handle(c *net.UnixConn) {
 	s.connections.Add(1)
 	defer s.connections.Add(-1)
 	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.activeMu.Lock()
+	s.active[c] = cancel
+	s.activeMu.Unlock()
+	defer func() {
+		s.activeMu.Lock()
+		delete(s.active, c)
+		s.activeMu.Unlock()
+		cancel()
+	}()
 	codec := protocol.NewCodec(c, c, uint32(s.Config.Protocol.MaxFrameBytes))
 	hello := false
 	for {
@@ -276,11 +319,11 @@ func (s *Server) handle(c *net.UnixConn) {
 			if r.Command != "hello" {
 				response = protocol.NewErrorResponse(r.RequestID, s.Version, "hello_required", "usage", "hello is required", false)
 			} else {
-				response = s.dispatch(r)
+				response = s.dispatch(ctx, r)
 				hello = response.Error == nil
 			}
 		} else {
-			response = s.dispatch(r)
+			response = s.dispatch(ctx, r)
 		}
 		out, err := protocol.EncodeResponse(response)
 		if err != nil {
@@ -291,7 +334,7 @@ func (s *Server) handle(c *net.UnixConn) {
 		}
 	}
 }
-func (s *Server) dispatch(r protocol.Request) protocol.Response {
+func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Response {
 	resultType := ""
 	var result any
 	var err error
@@ -301,37 +344,40 @@ func (s *Server) dispatch(r protocol.Request) protocol.Response {
 		result = protocol.HelloResult{SelectedVersion: protocol.Version, Capabilities: protocol.ServerCapabilities}
 	case "status.get":
 		resultType = "gateway_status"
-		result, err = s.status(context.Background())
+		result, err = s.status(ctx)
 	case "doctor.run":
 		resultType = "doctor_report"
-		checks := s.store.Doctor(context.Background())
+		checks := s.store.Doctor(ctx)
 		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
 	case "task.create":
 		var p protocol.TaskCreateParams
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_mutation"
-		result, err = s.store.Create(context.Background(), r.RequestID, p.Text)
+		result, err = s.store.Create(ctx, r.RequestID, p.Text)
 	case "task.get":
 		var p protocol.TaskSelector
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task"
-		result, err = s.store.Get(context.Background(), p.Task)
+		result, err = s.store.Get(ctx, p.Task)
 	case "task.list":
 		var p protocol.TaskListParams
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_list"
-		result, err = s.store.List(context.Background(), p.State, p.IncludeDone, p.Limit)
+		var tasks []store.Task
+		var next string
+		tasks, next, err = s.store.List(ctx, p.State, p.IncludeDone, p.Limit, p.Cursor)
+		result = protocol.TaskListDTO{Tasks: taskDTOs(tasks), NextCursor: next}
 	case "task.update":
 		var p protocol.TaskUpdateParams
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_mutation"
-		result, err = s.store.Update(context.Background(), r.RequestID, p.Task, p.Text)
+		result, err = s.store.Update(ctx, r.RequestID, p.Task, p.Text)
 	case "task.transition":
 		var p protocol.TaskTransitionParams
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_mutation"
-		result, err = s.store.Transition(context.Background(), r.RequestID, p.Task, task.State(p.State), p.Note)
+		result, err = s.store.Transition(ctx, r.RequestID, p.Task, task.State(p.State), p.Note)
 	default:
 		err = errors.New("unsupported command")
 	}
@@ -395,14 +441,17 @@ func dto(v any) any {
 	case store.MutationResult:
 		return mutationDTO(x)
 	case []store.Task:
-		a := make([]protocol.TaskDTO, len(x))
-		for i := range x {
-			a[i] = taskDTO(x[i])
-		}
-		return protocol.TaskListDTO{Tasks: a}
+		return protocol.TaskListDTO{Tasks: taskDTOs(x)}
 	default:
 		return v
 	}
+}
+func taskDTOs(tasks []store.Task) []protocol.TaskDTO {
+	a := make([]protocol.TaskDTO, len(tasks))
+	for i := range tasks {
+		a[i] = taskDTO(tasks[i])
+	}
+	return a
 }
 func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000Z") }
 func taskDTO(t store.Task) protocol.TaskDTO {

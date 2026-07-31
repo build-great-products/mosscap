@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -80,6 +81,42 @@ type StateEvent struct {
 }
 
 type request struct{ operation, hash string }
+
+type mutationError struct {
+	code    string
+	message string
+}
+
+func (e *mutationError) Error() string { return e.message }
+
+func invalidInput(message string) error {
+	return &mutationError{code: "invalid_input", message: message}
+}
+
+type listCursor struct {
+	UpdatedAt int64  `json:"updated_at"`
+	TaskID    string `json:"task_id"`
+}
+
+func encodeCursor(updatedAt int64, taskID string) string {
+	b, _ := json.Marshal(listCursor{UpdatedAt: updatedAt, TaskID: taskID})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func decodeCursor(cursor string) (listCursor, error) {
+	if cursor == "" {
+		return listCursor{}, nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return listCursor{}, invalidInput("invalid task list cursor")
+	}
+	var c listCursor
+	if err := json.Unmarshal(b, &c); err != nil || c.UpdatedAt < 0 || c.TaskID == "" || !strings.HasPrefix(c.TaskID, "tsk_") {
+		return listCursor{}, invalidInput("invalid task list cursor")
+	}
+	return c, nil
+}
 
 func Checksum() string { h := sha256.Sum256(migration0001); return hex.EncodeToString(h[:]) }
 
@@ -292,11 +329,16 @@ func hash(operation string, values ...string) string {
 }
 
 func (s *Store) Create(ctx context.Context, requestID, text string) (MutationResult, error) {
-	text, err := task.NormalizeText(text)
-	if err != nil {
-		return MutationResult{}, err
+	normalized, normalizeErr := task.NormalizeText(text)
+	canonical := normalized
+	if normalizeErr != nil {
+		canonical = text
 	}
-	return s.mutate(ctx, request{"task.create", hash("task.create", text)}, requestID, func(tx *sql.Tx, now int64) (MutationResult, error) {
+	return s.mutate(ctx, request{"task.create", hash("task.create", canonical)}, requestID, func(tx *sql.Tx, now int64) (MutationResult, error) {
+		if normalizeErr != nil {
+			return MutationResult{}, invalidInput(normalizeErr.Error())
+		}
+		text := normalized
 		id, err := s.ids.NewTaskID()
 		if err != nil {
 			return MutationResult{}, err
@@ -308,11 +350,16 @@ func (s *Store) Create(ctx context.Context, requestID, text string) (MutationRes
 	})
 }
 func (s *Store) Update(ctx context.Context, requestID, selector, text string) (MutationResult, error) {
-	text, err := task.NormalizeText(text)
-	if err != nil {
-		return MutationResult{}, err
+	normalized, normalizeErr := task.NormalizeText(text)
+	canonical := normalized
+	if normalizeErr != nil {
+		canonical = text
 	}
-	return s.mutate(ctx, request{"task.update", hash("task.update", selector, text)}, requestID, func(tx *sql.Tx, now int64) (MutationResult, error) {
+	return s.mutate(ctx, request{"task.update", hash("task.update", selector, canonical)}, requestID, func(tx *sql.Tx, now int64) (MutationResult, error) {
+		if normalizeErr != nil {
+			return MutationResult{}, invalidInput(normalizeErr.Error())
+		}
+		text := normalized
 		t, err := getTx(ctx, tx, selector)
 		if err != nil {
 			return MutationResult{}, err
@@ -327,13 +374,13 @@ func (s *Store) Update(ctx context.Context, requestID, selector, text string) (M
 	})
 }
 func (s *Store) Transition(ctx context.Context, requestID, selector string, target task.State, note *string) (MutationResult, error) {
-	if !target.Valid() {
-		return MutationResult{}, errors.New("invalid target state")
-	}
-	if note != nil && len(*note) > 4096 {
-		return MutationResult{}, errors.New("note exceeds 4096 characters")
-	}
 	return s.mutate(ctx, request{"task.transition", hash("task.transition", selector, string(target), value(note))}, requestID, func(tx *sql.Tx, now int64) (MutationResult, error) {
+		if !target.Valid() {
+			return MutationResult{}, invalidInput("invalid target state")
+		}
+		if note != nil && len(*note) > 4096 {
+			return MutationResult{}, invalidInput("note exceeds 4096 characters")
+		}
 		t, err := getTx(ctx, tx, selector)
 		if err != nil {
 			return MutationResult{}, err
@@ -359,6 +406,10 @@ func (s *Store) Transition(ctx context.Context, requestID, selector string, targ
 	})
 }
 func deterministicCode(err error) (string, bool) {
+	var semantic *mutationError
+	if errors.As(err, &semantic) {
+		return semantic.code, true
+	}
 	if errors.Is(err, ErrNotFound) {
 		return "not_found", true
 	}
@@ -367,12 +418,14 @@ func deterministicCode(err error) (string, bool) {
 	}
 	return "", false
 }
-func errorForCode(code string) error {
+func errorForCode(code, message string) error {
 	switch code {
 	case "not_found":
 		return ErrNotFound
 	case "ambiguous":
 		return ErrAmbiguous
+	case "invalid_input":
+		return invalidInput(message)
 	default:
 		return errors.New("prior mutation error")
 	}
@@ -394,14 +447,14 @@ func (s *Store) mutate(ctx context.Context, req request, requestID string, fn fu
 		return MutationResult{}, err
 	}
 	defer tx.Rollback()
-	var operation, inputHash, outcome, resultJSON, errorCode string
-	err = tx.QueryRowContext(ctx, "SELECT operation,input_hash,outcome,coalesce(result_json,''),coalesce(error_code,'') FROM mutation_requests WHERE request_id=?", requestID).Scan(&operation, &inputHash, &outcome, &resultJSON, &errorCode)
+	var operation, inputHash, outcome, resultJSON, errorCode, errorMessage string
+	err = tx.QueryRowContext(ctx, "SELECT operation,input_hash,outcome,coalesce(result_json,''),coalesce(error_code,''),coalesce(error_message,'') FROM mutation_requests WHERE request_id=?", requestID).Scan(&operation, &inputHash, &outcome, &resultJSON, &errorCode, &errorMessage)
 	if err == nil {
 		if operation != req.operation || inputHash != req.hash {
 			return MutationResult{}, ErrRequestConflict
 		}
 		if outcome != "success" {
-			return MutationResult{}, errorForCode(errorCode)
+			return MutationResult{}, errorForCode(errorCode, errorMessage)
 		}
 		var r MutationResult
 		if err := json.Unmarshal([]byte(resultJSON), &r); err != nil {
@@ -443,28 +496,40 @@ func (s *Store) Get(ctx context.Context, selector string) (Task, error) {
 	return getTx(ctx, s.db, selector)
 }
 
-// List returns current tasks in stable updated-at/task-id order. By default done
-// tasks are excluded; an explicit state always takes precedence.
-func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool, limit int) ([]Task, error) {
+// List returns one stable updated-at/task-id page. By default done tasks are
+// excluded; an explicit state always takes precedence.
+func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool, limit int, cursor string) ([]Task, string, error) {
 	if limit == 0 {
 		limit = 100
 	}
 	if limit < 1 || limit > 1000 {
-		return nil, errors.New("invalid task list limit")
+		return nil, "", invalidInput("invalid task list limit")
+	}
+	c, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", err
 	}
 	q := "SELECT task_id,version,state,text,source_kind,created_at,updated_at,done_at FROM tasks"
 	args := []any{}
+	conditions := []string{}
 	if stateFilter != nil {
-		q += " WHERE state=?"
+		conditions = append(conditions, "state=?")
 		args = append(args, *stateFilter)
 	} else if !includeDone {
-		q += " WHERE state IN ('open','working')"
+		conditions = append(conditions, "state IN ('open','working')")
+	}
+	if cursor != "" {
+		conditions = append(conditions, "(updated_at > ? OR (updated_at = ? AND task_id > ?))")
+		args = append(args, c.UpdatedAt, c.UpdatedAt, c.TaskID)
+	}
+	if len(conditions) > 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	q += " ORDER BY updated_at,task_id LIMIT ?"
-	args = append(args, limit)
+	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	var tasks []Task
@@ -473,7 +538,7 @@ func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool,
 		var created, updated int64
 		var done sql.NullInt64
 		if err := rows.Scan(&t.ID, &t.Version, &t.State, &t.Text, &t.SourceKind, &created, &updated, &done); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		t.CreatedAt = time.UnixMicro(created).UTC()
 		t.UpdatedAt = time.UnixMicro(updated).UTC()
@@ -483,7 +548,16 @@ func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool,
 		}
 		tasks = append(tasks, t)
 	}
-	return tasks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	var next string
+	if len(tasks) > limit {
+		last := tasks[limit-1]
+		next = encodeCursor(last.UpdatedAt.UnixMicro(), last.ID)
+		tasks = tasks[:limit]
+	}
+	return tasks, next, nil
 }
 
 type queryer interface {

@@ -32,7 +32,7 @@ func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{"status.get", "doctor.run"} {
-		r := s.dispatch(protocol.Request{RequestID: "status-" + command, Command: command})
+		r := s.dispatch(context.Background(), protocol.Request{RequestID: "status-" + command, Command: command})
 		if r.Error != nil {
 			t.Fatalf("%s: %v", command, r.Error)
 		}
@@ -132,7 +132,11 @@ func TestShutdownLeavesReplacementSocketUntouched(t *testing.T) {
 }
 
 func TestUnsupportedProtocolGetsOneTypedResponseThenClose(t *testing.T) {
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/home/admin", "mosscap-server-")
+	if err != nil {
+		t.Skipf("cannot create private test tree: %v", err)
+	}
+	defer os.RemoveAll(root)
 	state := filepath.Join(root, "state")
 	tmp := filepath.Join(state, "tmp")
 	if err := os.MkdirAll(tmp, 0700); err != nil {
@@ -267,7 +271,7 @@ func TestRestartReplaysOneDurableCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	tasks, err := db.List(context.Background(), nil, true, 10)
+	tasks, _, err := db.List(context.Background(), nil, true, 10, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -245,7 +245,7 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		if p.State != nil && *p.State != "open" && *p.State != "working" && *p.State != "done" {
 			return errors.New("invalid list state")
 		}
-		if p.Limit < 0 || p.Limit > 1000 || (p.State != nil && p.IncludeDone) {
+		if p.Limit < 0 || p.Limit > 1000 || len(p.Cursor) > 1024 || (p.State != nil && p.IncludeDone) {
 			return errors.New("invalid task list")
 		}
 	}

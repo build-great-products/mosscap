@@ -289,7 +289,7 @@ func (a App) doctorCommand(override string, args []string) error {
 	remoteResult, remoteErr := a.gatewayCall(c, "doctor.run", "req_doctor", nil)
 	if remoteErr != nil {
 		checks = append(checks, doctor.Check{Name: "gateway_diagnostics", Status: doctor.Skipped, Message: "gateway diagnostics unavailable", Action: "start mosscap gateway run"})
-		report := doctor.Report{Overall: doctor.Warn, Checks: checks}
+		report := doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
 		if err := a.render(report, *j); err != nil {
 			return err
 		}
@@ -337,19 +337,36 @@ func localDoctorChecks(loc config.Location, c config.Config) []doctor.Check {
 	} else {
 		checks = append(checks, doctor.Check{Name: "config", Status: doctor.Pass, Message: "configuration is valid"})
 	}
-	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
-		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "state directory is not private and safe", Action: "run mosscap setup or repair state directory ownership and mode"})
-	} else if err := securepath.CheckDir(c.Paths.TmpDir); err != nil {
-		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "temporary directory is not private and safe", Action: "repair temporary directory ownership and mode"})
-	} else if err := securepath.CheckFile(c.Paths.Database); err != nil {
-		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "database is not private and safe", Action: "repair database ownership and mode"})
-	} else {
-		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Pass, Message: "state paths are private and safe"})
+	paths := []string{loc.Path, c.Paths.StateDir, c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir}
+	pathsSafe := true
+	for _, path := range paths {
+		if securepath.CheckAbsoluteComponents(path) != nil {
+			pathsSafe = false
+			break
+		}
 	}
-	if _, err := os.Stat(c.Paths.StateDir); err != nil {
-		checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Warn, Message: "state directory is unavailable", Action: "run mosscap setup or restore the state directory"})
+	if !pathsSafe || securepath.CheckDir(c.Paths.StateDir) != nil || securepath.CheckDir(c.Paths.TmpDir) != nil || securepath.CheckFile(c.Paths.Database) != nil {
+		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "configured path components or state paths are not private and safe", Action: "repair configured path components, ownership, and modes"})
 	} else {
-		checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Pass, Message: "state directory is available"})
+		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Pass, Message: "configured path components and state paths are private and safe"})
+	}
+	if c.Slack.SecretsFile == "" {
+		checks = append(checks, doctor.Check{Name: "secrets_file", Status: doctor.Pass, Message: "no secrets file is configured"})
+	} else if securepath.CheckAbsoluteComponents(c.Slack.SecretsFile) != nil || securepath.CheckFile(c.Slack.SecretsFile) != nil {
+		checks = append(checks, doctor.Check{Name: "secrets_file", Status: doctor.Fail, Message: "configured secrets file or its path components are unsafe", Action: "repair secrets file ownership, mode, and path components"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "secrets_file", Status: doctor.Pass, Message: "configured secrets file is private and safe"})
+	}
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(c.Paths.StateDir, &fs); err != nil {
+		checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Warn, Message: "state filesystem space is unavailable", Action: "restore the state directory and inspect available space"})
+	} else {
+		available := uint64(fs.Bavail) * uint64(fs.Bsize)
+		if available < 10*1024*1024 {
+			checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Warn, Message: "state filesystem has less than 10 MiB available", Action: "free space before running the gateway"})
+		} else {
+			checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Pass, Message: "state filesystem has available space"})
+		}
 	}
 	// Redaction is structural: only presence booleans and a marker are exposed.
 	view := config.Redact(c)

@@ -93,6 +93,52 @@ func TestMutationsAreAtomicAndDoNotKeepOldText(t *testing.T) {
 		t.Fatalf("old audit text count=%d err=%v", n, err)
 	}
 }
+func TestMutationSemanticErrorsAreDurableAndReplayExactly(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	_, first := s.Create(ctx, "bad-create", "\x00")
+	_, replay := s.Create(ctx, "bad-create", "\x00")
+	if first == nil || replay == nil || first.Error() != replay.Error() {
+		t.Fatalf("invalid create replay: first=%v replay=%v", first, replay)
+	}
+	var outcome, code, message string
+	if err := s.DB().QueryRow("SELECT outcome, error_code, error_message FROM mutation_requests WHERE request_id='bad-create'").Scan(&outcome, &code, &message); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "error" || code != "invalid_input" || message != first.Error() {
+		t.Fatalf("stored error = %q %q %q", outcome, code, message)
+	}
+	_, err := s.Update(ctx, "missing-update", "tsk_missing", "text")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing update = %v", err)
+	}
+	_, err = s.Update(ctx, "missing-update", "tsk_missing", "text")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing update replay = %v", err)
+	}
+}
+
+func TestListPaginationUsesStableCursor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"page-one", "page-two", "page-three"} {
+		if _, err := s.Create(ctx, id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, cursor, err := s.List(ctx, nil, true, 2, "")
+	if err != nil || len(first) != 2 || cursor == "" {
+		t.Fatalf("first page = %#v cursor=%q err=%v", first, cursor, err)
+	}
+	second, next, err := s.List(ctx, nil, true, 2, cursor)
+	if err != nil || len(second) != 1 || next != "" || second[0].ID == first[0].ID || second[0].ID == first[1].ID {
+		t.Fatalf("second page = %#v next=%q err=%v", second, next, err)
+	}
+	if _, _, err := s.List(ctx, nil, true, 2, "not-a-cursor"); err == nil {
+		t.Fatal("accepted invalid cursor")
+	}
+}
+
 func TestTransitionsAndRestart(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

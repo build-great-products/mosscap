@@ -195,6 +195,32 @@ func CheckExistingComponents(home, path string) error {
 	return nil
 }
 
+// CheckAbsoluteComponents rejects symlinks and group/world writable components
+// from the filesystem root down to path's existing ancestor. Unlike
+// CheckExistingComponents it permits system-owned root components, making it
+// suitable for configured absolute paths that are not beneath the home dir.
+func CheckAbsoluteComponents(path string) error {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return errors.New("path must be absolute")
+	}
+	current := string(os.PathSeparator)
+	for _, part := range split(strings.TrimPrefix(path, string(os.PathSeparator))) {
+		current = filepath.Join(current, part)
+		info, _, err := stat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0022 != 0 {
+			return fmt.Errorf("unsafe path component %q: group/world writable", current)
+		}
+	}
+	return nil
+}
+
 func split(rel string) []string {
 	if rel == "." || rel == "" {
 		return nil
