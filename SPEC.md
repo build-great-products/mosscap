@@ -1,420 +1,580 @@
 # Mosscap v1 Specification
 
-**Status:** implementation-guiding v1 specification
+**Status:** implementation-guiding specification
+
+**Normative language:** “must”, “must not”, “should”, and “may” are requirements in descending order of strength.
+
 **Product rule:** keep coordination durable; keep the agent human-owned.
 
-Mosscap is a minimal, functional bridge from one trusted Slack conversation, local CLI requests, and schedules to one human-started interactive Pi session. A foreground gateway owns durable coordination in SQLite. A Pi extension claims work and inserts it as visible messages into the current persisted Pi session. Zellij makes that session easy for a human to observe, but is never part of correctness.
+Mosscap connects one trusted Slack channel and local CLI requests to one human-started interactive Pi session. A foreground Go gateway owns durable coordination in SQLite. A TypeScript extension inserts eligible work as visible Pi messages and triggers model processing.
 
-This document is normative for v1. [README.md](README.md) explains the product and [CORE_ETHOS.md](CORE_ETHOS.md) defines its constraints. Where those documents leave implementation choices open, the conservative defaults below apply.
+[README.md](README.md) introduces the product. [SYSTEM_MODEL.md](SYSTEM_MODEL.md) explains the design. This document is authoritative when they differ.
 
-## 1. Scope and conservative defaults
+## 1. Scope
 
 ### 1.1 Required in v1
 
-- Slack Socket Mode ingestion for one configured channel and explicitly trusted user IDs.
-- Admission of direct bot mentions from trusted users in that channel, including mentions in an existing thread.
-- SQLite-first event acknowledgement, source-event deduplication, revisioned tasks, schedules, delivery leases, consumer fencing, and an outbound-effect ledger.
-- One active Pi leader, explicitly claimed through `/mosscap`; a takeover fences and disconnects the previous leader.
-- Visible delivery into the human-owned Pi session, including recovery summaries and meaningful revision diffs with timestamps.
-- Explicit task lifecycle, explicit outbound Slack actions, and inspectable ambiguous delivery/effect outcomes with no automatic retry.
-- File transfer in both directions for a broad safe set of files, subject to explicit limits and validation.
-- Bounded local retention and coalescing of missed recurring schedule runs.
-- A foreground gateway, local CLI, Pi extension, and optional Zellij convenience commands.
+- One Go `mosscap` executable containing a foreground gateway and short-lived CLI commands.
+- Slack Socket Mode ingestion for exactly one configured workspace and channel.
+- Admission of direct bot mentions from explicitly trusted Slack user IDs.
+- Automatic creation of one generic task for every admitted Slack message.
+- Local task creation and explicit task state management.
+- SQLite-first Slack acknowledgement and source-event deduplication.
+- One explicitly opted-in Pi delivery leader with generation fencing, leases, persisted delivery keys, and recovery.
+- Visible task delivery that immediately triggers model processing.
+- Explicit single-channel Slack history, thread, send, edit, delete, reaction, and file operations.
+- Durable outbound Slack intents with conclusive or ambiguous outcomes.
+- Lazy incoming file download and direct outgoing upload using temporary bytes.
+- A private, versioned local protocol used by the CLI and extension.
+- Explicit inspection and requeue/retry for exceptional delivery and Slack outcomes.
+- An explicit root-level purge command for old finalized history.
 
 ### 1.2 Not required in v1
 
 - Starting, supervising, selecting, resetting, or stopping Pi.
-- Headless agents, subagents, implicit routing, multi-consumer work sharing, or autonomous model selection.
-- A daemon installer, mandatory supervisor, browser UI, or Zellij integration for correctness.
-- Backup, restore, database migration, downgrade, or cross-version compatibility guarantees. A v1 binary may refuse an unknown schema. Operators may copy files while the gateway is stopped, but that is not a supported restore contract.
+- Headless agents, subagents, agent pools, or automatic model selection.
+- More than one Slack workspace or channel.
+- Task priority, assignment, tags, dependencies, or due dates.
+- Historical task text, immutable revisions, or reliably retained diffs.
+- Permanent storage, deduplication, or archival of file bytes.
+- Automatic task progress posts or reactions.
+- Automatic retry after a possibly submitted Pi delivery or Slack operation.
+- Automatic retention or background deletion of durable metadata.
+- Per-task deletion or effect cancellation.
+- Browser UI, installed service, mandatory supervisor, backup, restore, import, export, or cross-version migration guarantees.
 - End-to-end exactly-once execution.
-- Automatic retry of an ambiguous Slack effect or an ambiguous Pi delivery.
-- A required tombstone/delete step after resolution. Deletion is optional administrative cleanup.
-
-### 1.3 Conservative defaults resolving ambiguity
-
-1. **Conversation:** exactly one Slack channel ID is configured. A thread in that channel remains part of the same trusted conversation.
-2. **Admission:** a new task is admitted only from a non-bot user whose immutable Slack user ID is trusted and whose message text contains the configured bot user mention. Channel membership, display names, `@channel`, and messages merely replying to the bot are insufficient.
-3. **Edits:** an edit that adds a direct bot mention from a trusted user in the configured channel admits the message as a new task. An edit to an already admitted Slack message creates a new revision of the same task. Deleted source messages are recorded as revisions but do not silently resolve or delete tasks.
-4. **Meaningful edit:** normalized text changed, attachment/file identity changed, or the source was deleted. Changes only to Slack transport metadata are ignored. Whitespace normalization is limited to line endings and trailing spaces; content is otherwise preserved.
-5. **Leadership:** `/mosscap` requests takeover by default after showing the current holder. Successful takeover increments a fencing generation and actively closes the previous extension connection. No concurrent leader grace period exists.
-6. **Resolution:** `respond` records and attempts a response; a task becomes `responded` only after its Slack effect is confirmed (or immediately for a local task with `--no-slack`). Resolution is a separate explicit action unless `task respond --resolve` is used. A tombstone is never required.
-7. **Retries:** transient connection establishment may reconnect with bounded backoff. Committed task delivery and submitted Slack effects are not automatically retried after an ambiguous outcome. An operator must inspect and issue an explicit retry/requeue command.
-8. **Files:** regular files are accepted regardless of extension or MIME type except known dangerous local filesystem types; limits, hashes, and explicit destinations provide the boundary. Content is not interpreted as trusted.
-9. **Retention:** keep open task history and unresolved effects. Prune old closed-task revisions, events, delivery attempts, cached files, and confirmed effects by age/size as specified below. Retention is housekeeping, not backup.
 
 ## 2. Architecture and authority
 
 ```text
-Slack Socket Mode ─┐
-CLI ───────────────┼──> foreground gateway ───> SQLite ledger
-schedules ─────────┘             │                    │
-                                 │ private protocol   │ source of truth
-                                 ▼                    │
-                           Pi extension               │
-                                 │                    │
-                                 ▼                    │
-                       human-owned Pi session <───────┘
-                           (usually in Zellij)
+Slack ───────┐
+             ├──> foreground gateway ───> SQLite ledger
+CLI ─────────┘              │
+                            │ private local protocol
+                            ▼
+                       Pi extension
+                            │
+                            ▼
+                  human-owned Pi session
 ```
 
 ### 2.1 Gateway
 
-The gateway is the only writer to the SQLite ledger and owns:
+The gateway is the only normal writer to the SQLite coordination ledger. It owns:
 
-- Slack authentication, admission, event acknowledgement, and deduplication;
-- task and revision transitions;
-- schedule calculation and materialization;
-- consumer generation, leases, and delivery reconciliation;
-- outbound Slack effect creation and execution;
-- retention; and
-- a private, versioned local protocol for the CLI and Pi extension.
+- Slack connection, validation, admission, acknowledgement, and deduplication;
+- task creation, content replacement, versioning, and state transitions;
+- delivery leadership, generations, leases, and outcomes;
+- Slack effect preparation, execution, and reconciliation;
+- durable file metadata and temporary transfer lifecycle;
+- mutation request deduplication;
+- purge execution; and
+- the local protocol server.
 
-It runs in the foreground and exits non-zero on unsafe configuration, inaccessible state, unsupported schema, or inability to bind the local endpoint.
+It runs in the foreground. It must exit non-zero when configuration or state permissions are unsafe, the schema is unsupported, SQLite cannot be opened safely, or the local endpoint cannot be bound.
 
-### 2.2 Pi extension
+### 2.2 CLI
 
-The extension owns only integration with the current Pi process/session:
+The CLI is a gateway client. Except for `setup` and offline-safe configuration changes, it must not write SQLite directly.
 
-- explicit opt-in and opt-out;
-- leadership claim and heartbeat;
-- rendering incoming work as distinct visible Pi messages;
-- persisting delivery keys in Pi session data when the Pi extension API permits;
-- reporting persisted, rejected, or uncertain insertion outcomes; and
-- compact connection/binding/backlog status.
+Every mutation must use a client-generated request ID. Human-readable output is the default. `--json` must emit stable typed objects without decorative text.
 
-It must not start Pi, choose model settings, scrape terminal output, inject keystrokes, infer task state from model text, or execute Slack effects directly.
+### 2.3 Pi extension
 
-### 2.3 CLI
+The TypeScript extension owns only integration with its current Pi process. It must:
 
-The CLI is a client of the gateway protocol. With the exception of `setup` and offline-safe config reads/writes when the gateway is stopped, it must not write SQLite directly. Every mutating command prints the resulting durable identifier and state. Human-readable output is default; `--json` emits stable machine-readable objects.
+- require explicit runtime opt-in through `/mosscap`;
+- claim, maintain, and release delivery leadership;
+- insert work as visible custom messages in the persisted Pi session;
+- immediately trigger model processing when idle;
+- queue delivery as a follow-up when Pi is already processing;
+- persist the delivery key in the same custom-message entry;
+- confirm persisted, rejected, or uncertain insertion outcomes; and
+- show compact connection, leader, and backlog status.
 
-### 2.4 Zellij
+It must not connect to Slack, write SQLite, infer task state from conversation text, inject terminal keystrokes, scrape terminal output, or manage Pi's process, model, or thinking level.
 
-Zellij commands are convenience wrappers around installed `zellij` commands. Zellij has no lease, delivery, task, or completion authority. Failure or absence of Zellij cannot affect gateway correctness.
+### 2.4 SQLite
 
-## 3. Local layout and configuration
+SQLite is authoritative for coordination state. Pi JSONL, Slack messages and reactions, logs, and terminal output are projections.
 
-Defaults follow XDG locations:
+The gateway must enable foreign keys and WAL mode and use a bounded busy timeout. Transactions listed in this specification must be atomic.
+
+## 3. Configuration and local state
+
+### 3.1 Default paths
+
+Use XDG locations:
 
 ```text
 $XDG_CONFIG_HOME/mosscap/config.toml
 $XDG_STATE_HOME/mosscap/mosscap.sqlite3
 $XDG_STATE_HOME/mosscap/control.sock
-$XDG_STATE_HOME/mosscap/files/
+$XDG_STATE_HOME/mosscap/tmp/
 ```
 
-If XDG variables are unset, use `~/.config` and `~/.local/state`. Config and state directories must be owned by the effective user and mode `0700`; config, database, and credential-bearing files must be `0600`; the Unix socket must be under the state directory and mode `0600`. Symlinked roots, group/world-writable ancestors below the user's home, non-owner files, and socket paths in shared temporary directories are rejected.
+Fallbacks are `~/.config` and `~/.local/state` when the corresponding XDG variable is unset.
 
-Required configuration:
+Configuration and state roots must be owned by the effective user and mode `0700`. Credential-bearing regular files and the database must be `0600`. The socket must be under the private state root and mode `0600`.
 
-- Slack app token and bot token, preferably supplied by environment or a `0600` secrets file;
-- workspace/team ID, bot user ID, one channel ID;
+Mosscap must reject symlinked roots, non-owner files, group/world-writable paths below the user's home, and endpoints in shared temporary directories.
+
+### 3.2 Required configuration
+
+- Slack app token and bot token, supplied by environment or an owner-readable secrets file;
+- workspace/team ID;
+- bot user ID;
+- exactly one channel ID;
 - at least one trusted immutable Slack user ID; and
 - state and endpoint paths.
 
-Optional configuration and v1 defaults:
+Slack operation commands never accept a workspace or channel argument. Changing the configured channel is an offline configuration operation, not a per-command routing option.
+
+### 3.3 Defaults
 
 | Setting | Default |
 | --- | --- |
 | delivery lease | 60 seconds |
 | leader heartbeat / expiry | 10 / 30 seconds |
-| Slack reconnect backoff | exponential, 1–60 seconds with jitter |
-| max incoming or outgoing file | 100 MiB per file |
-| max files per task/effect | 20 |
-| file cache budget | 2 GiB |
-| closed-history retention | 30 days |
-| transport/event retention | 14 days after all references close |
-| confirmed-effect retention | 30 days |
-| schedule lookback | unlimited, but coalesced per schedule |
+| Slack reconnect backoff | exponential 1–60 seconds with jitter |
 | SQLite busy timeout | 5 seconds |
+| maximum file size | 100 MiB |
+| maximum files per Slack operation | 20 |
+| temporary download lifetime | 24 hours |
+| local protocol maximum frame | 1 MiB |
 
-Secrets are redacted by `config show` and all logs. `setup` initializes the current schema only in an empty/new state root; it does not import another installation.
+`config show` must redact secrets. Logs and diagnostic output must never contain tokens.
 
-## 4. Durable data model
+### 3.4 Setup and compatibility
 
-Identifiers are opaque, URL-safe strings with type prefixes where shown. Times are UTC RFC 3339 with microsecond precision in output and integer microseconds in storage. Every mutable row has `created_at` and `updated_at`. Foreign keys and WAL mode are enabled.
+`mosscap setup` creates or validates private paths and initializes the current schema only in new or empty state. It does not start the gateway or Pi.
 
-### 4.1 Core records
+A v1 binary may refuse an unknown schema or protocol version. It must never silently reinterpret unknown task, delivery, or effect states.
 
-#### `source_events`
+## 4. Durable records
 
-- `event_id` (Slack event ID or derived stable envelope identity, unique)
-- `team_id`, `channel_id`, `message_ts`, `thread_ts`, `user_id`
-- `event_kind` (`message`, `message_changed`, `message_deleted`, `file_shared`)
-- `received_at`, `slack_event_at`, `payload_json`
-- `admission` (`admitted`, `duplicate`, `ignored_untrusted`, `ignored_channel`, `ignored_unmentioned`, `ignored_bot`, `malformed`)
-- optional `task_id`, `revision_id`
+Identifiers are opaque URL-safe strings with type prefixes. Output timestamps are UTC RFC 3339 with microsecond precision; storage uses integer microseconds. Mutable rows have `created_at` and `updated_at`.
 
-The original payload is retained only within transport retention. Durable task revisions retain the normalized source needed after payload pruning.
+### 4.1 Tasks
 
-#### `tasks`
+A task contains:
 
-- `task_id` (`tsk_…`)
-- `origin` (`slack`, `local`, `schedule`)
-- `state` (`open`, `working`, `responded`, `resolved`)
-- title and current revision pointer
-- optional source channel/message/thread identity or schedule ID
-- `opened_at`, optional `working_at`, `responded_at`, `resolved_at`
-- optional assignee/working note
-- `deleted_at` only for optional tombstoning
+- `task_id` (`tsk_…`), unique;
+- `version`, a positive monotonically increasing integer;
+- `state`: `open`, `working`, or `done`;
+- current `text`;
+- `source_kind`: `slack` or `local`;
+- optional Slack source reference;
+- `created_at`, `updated_at`, and optional `done_at`.
 
-Deleted tasks are hidden by default but retained until normal closed-history pruning. A deleted task cannot be delivered or mutated except by an explicit administrative undelete if implemented; undelete is not required in v1.
+A Slack source reference contains:
 
-#### `task_revisions`
+- source event ID;
+- team and channel ID, retained for integrity even though configured globally;
+- author user ID;
+- message timestamp;
+- thread timestamp;
+- permalink when available;
+- latest accepted Slack event timestamp; and
+- optional source deletion timestamp.
 
-- `revision_id` (`rev_…`), `task_id`, monotonic `revision_number`
-- `kind` (`created`, `source_edit`, `source_deleted`, `local_update`, `progress`, `response`, `reopened`, `resolved`)
-- normalized title/instructions/body snapshot
-- structured attachment/file references
-- actor (`slack:<user_id>`, `local:<uid>`, `schedule:<id>`, `system`)
-- source timestamp and committed timestamp
-- optional `previous_revision_id`, textual unified diff, and change summary
+Tasks contain only current text. Previous text and task revisions are not retained.
 
-Revisions are immutable. Current task content is derived from the latest applicable revision and cached on `tasks` only transactionally.
+`version` increments whenever current text or source attachment metadata meaningfully changes. State-only transitions do not increment content version.
 
-#### `task_events`
+### 4.2 Source events
 
-An append-only transition/audit stream: event ID, task ID, prior/new state, actor, reason, command request ID, and committed timestamp. It provides lifecycle history independent of revision content.
+A source-event record contains:
 
-#### `consumers`
+- unique Slack event or derived envelope identity;
+- workspace, channel, message, thread, and user identity when available;
+- event kind and Slack event timestamp;
+- received and committed timestamps;
+- admission result;
+- optional task ID; and
+- only the bounded normalized metadata needed for deduplication and audit.
 
-- stable Pi session identity and connection identity
-- current generation, state (`connected`, `disconnected`, `fenced`)
-- claimed/heartbeat/disconnected timestamps
-- Pi session display metadata, never credentials or transcript
+Full Slack envelopes and message bodies must not be retained after normalization. The current task contains the admitted current text.
 
-A singleton `leader` row stores current consumer ID, generation, and lease expiry.
+Admission results include at least:
 
-#### `deliveries`
+```text
+admitted
+duplicate
+ignored_workspace
+ignored_channel
+ignored_untrusted
+ignored_unmentioned
+ignored_bot
+ignored_stale
+malformed
+```
 
-- `delivery_id` (`dlv_…`), task ID, revision ID, consumer ID, generation
-- stable `delivery_key = hash(task_id, revision_id, Pi session identity)`
-- state and timestamps
-- lease token/expiry, attempt count
-- optional diagnostic and operator decision
+### 4.3 Task state events
 
-The unique delivery key prevents duplicate insertion into the same persisted Pi session. A new explicitly opted-in Pi session can receive current open work again under new keys.
+State transitions are append-only audit records containing task ID, prior and new state, actor, optional note, request ID, and committed timestamp. They do not store historical task text.
 
-#### `effects`
+### 4.4 Consumers and leader
 
-- `effect_id` (`eff_…`), idempotency key (unique), optional task ID
-- kind (`send`, `edit`, `delete`, `react`, `unreact`, `file_upload`, `agents_progress`)
-- exact target and normalized request payload
-- state, attempt count, submitted/confirmed timestamps
-- Slack response identifiers and diagnostic
-- optional `supersedes_effect_id`
+A consumer records Pi session ID, Pi session file identity, connection ID, generation, connection state, and timestamps. It may include non-sensitive display metadata but never transcript content or credentials.
 
-#### `files`
+A singleton leader record stores current consumer ID, generation, and lease expiry.
 
-- `file_id` (`fil_…`), direction (`from_slack`, `to_slack`, `local_task`)
-- source metadata, original name, declared/detected MIME, size, SHA-256
-- cache path, state (`metadata`, `available`, `missing`, `rejected`, `expired`)
-- Slack identity/permalink where applicable and timestamps
+### 4.5 Deliveries
 
-#### `schedules` and `schedule_runs`
+A delivery records:
 
-A schedule stores title, instructions, enabled state, one-off timestamp or five-field cron plus IANA timezone, next due time, and last evaluated time. A run stores scheduled interval boundaries, materialized task, coalesced count, and committed time. A uniqueness constraint on schedule and due interval prevents duplicate materialization.
+- delivery ID (`dlv_…`);
+- task ID and content version;
+- consumer and Pi session identity;
+- leader generation;
+- stable key derived from task ID, version, and Pi session ID;
+- state, attempt count, and timestamps;
+- lease token and expiry while applicable; and
+- bounded diagnostics and operator decisions.
 
-### 4.2 Transactions and request deduplication
+The delivery does not need to retain old task text. Before insertion starts, the gateway supplies the task's current complete content for the leased version. If that version is no longer current, the stale lease is rejected and the current version becomes eligible.
 
-Each local protocol mutation carries a client-generated request ID. The gateway stores request/result pairs so a client reconnect can retrieve the original result without duplicating a mutation. The following are single SQLite transactions:
+### 4.6 Effects
 
-- event deduplication + admission + task/revision creation before Slack acknowledgement;
-- any task state transition + audit event;
-- schedule run claim + task materialization + next-run update;
-- effect intent creation before network submission;
-- leadership generation increment + old leader fencing;
-- delivery lease transition and final acknowledgement.
+An effect records:
 
-SQLite is authoritative. Logs, Slack reactions, Pi JSONL, and terminal output are projections only.
+- effect ID (`eff_…`);
+- unique idempotency key;
+- optional related task ID;
+- operation kind;
+- exact configured-channel target and normalized request metadata;
+- payload hash, including file hash where applicable;
+- state and attempt count;
+- prepared, submitted, and completed timestamps;
+- Slack response identifiers;
+- bounded diagnostic; and
+- optional predecessor effect ID for explicit retries.
 
-## 5. Task lifecycle and revisions
+Effect kinds are:
+
+```text
+send
+edit
+delete
+react
+unreact
+file_upload
+```
+
+### 4.7 Files
+
+A file record stores metadata only:
+
+- file ID (`fil_…`);
+- direction (`from_slack` or `to_slack`);
+- Slack file identity and permalink when applicable;
+- original name;
+- declared MIME type;
+- size and SHA-256 when known;
+- related task or effect;
+- transfer state and diagnostic; and
+- timestamps.
+
+A temporary path may be recorded only while the path is live. Temporary paths are not durable file identity.
+
+### 4.8 Request deduplication
+
+Every local mutation carries a request ID. The gateway stores its typed result so reconnecting clients can retrieve the original outcome without repeating the mutation.
+
+Request records have an expiry eligibility timestamp. Expiry does not delete them automatically; it only makes finalized records eligible for explicit purge.
+
+## 5. Task behavior
 
 ### 5.1 State machine
 
 ```text
-create/admit ──> open ──working──> working ──respond──> responded ──resolve──> resolved
-                   │                    │                    │
-                   ├────respond─────────┘                    │
-                   └────────────────resolve──────────────────┘
-
-resolved ──reopen──> open
-responded ──reopen──> open
+open ─────> working ─────> done
+  ▲             │             │
+  └─────────────┴─────────────┘
 ```
 
 Rules:
 
 - Creation always yields `open`.
-- `working` is idempotent when already working; a changed note still creates a revision/event.
-- `respond` creates an effect for Slack-origin work. State remains unchanged while the effect is `prepared` or `submitted`; confirmed response moves it to `responded`. Ambiguous/failed response does not.
-- A local or scheduled task without a Slack target requires either `--no-slack` to record a response or an explicit target; `--no-slack` moves it to `responded` transactionally.
-- `resolve` is explicit and valid from `open`, `working`, or `responded`; it records a reason. It does not require a response or delete/tombstone.
-- `reopen` is explicit from `responded` or `resolved`, creates a revision, and returns to `open`.
-- Source edits update content but never move lifecycle state. If an edit arrives after response/resolution, it remains visible as a new revision and marks the task as having an unread revision; it does not automatically reopen.
-- Optional `delete` is valid only with `--force` for non-resolved work. It is administrative tombstoning, not normal completion.
+- `working` is idempotent when already working.
+- `done` is idempotent when already done and sets `done_at` on the first transition.
+- `open` is valid from `working` or `done`; from `done` it clears `done_at`.
+- An optional transition note is audit metadata, not task text.
+- Slack activity never changes task state.
+- Task state never causes Slack activity.
+- There is no per-task delete or tombstone operation.
 
-### 5.2 Meaningful revisions and visible diffs
+### 5.2 Local tasks
 
-For every meaningful source edit, the gateway stores the full normalized revision plus a bounded unified diff against the previous revision. The Pi extension renders a separate visible message containing:
+`task create` creates a task with `source_kind=local`. Its complete text is supplied by `--text` or `--text-file`.
 
-- task ID and revision number;
-- Slack author and source timestamp;
-- gateway receipt/commit timestamp;
-- prior revision number;
-- concise change summary;
-- unified diff for textual changes; and
-- added/removed/changed file metadata.
+`task update` replaces current text and increments version only when normalized text changes.
 
-Diffs are capped at 200 KiB and 2,000 lines in a delivery. If capped, the visible message says so and gives `mosscap task show TASK --revision REV` for full content. Timestamp labels must distinguish Slack event time from gateway commit time. A delete revision visibly says the source was deleted and preserves prior durable content for inspection.
+### 5.3 Slack-origin tasks
 
-Edits received before initial Pi delivery are not collapsed invisibly: normal delivery may show only the latest full content, but it must include a revision timeline and meaningful diffs since admission. Once a revision has been delivered, each later meaningful revision receives its own delivery.
+Every admitted Slack message creates exactly one task. The complete normalized message text becomes task text. The source reference points to the originating message and thread.
 
-## 6. Slack admission and acknowledgement
+An admitted thread reply is a separate task only when that reply itself directly mentions the bot.
 
-For each Socket Mode envelope, the gateway:
+### 5.4 Slack edits
 
-1. validates envelope shape and workspace identity;
-2. begins a transaction and deduplicates the event identity;
-3. checks configured channel, non-bot sender, explicit trusted user ID, and direct bot mention for initial admission;
-4. normalizes message/thread/file metadata and creates or updates the task revision;
-5. commits; then
-6. acknowledges the Slack envelope.
+A meaningful edit to an already admitted source message replaces the task's current text or attachment metadata and increments version. Meaningful comparison normalizes line endings and trailing spaces but otherwise preserves content.
 
-Known duplicates are also acknowledged after the existing committed result is found. Malformed events are recorded when safely identifiable and acknowledged to prevent a poison loop. A database commit failure is not acknowledged; Slack may redeliver.
+Events older than the source's latest accepted Slack event timestamp must not roll current content backward. They are recorded as `ignored_stale`.
 
-Thread identity is `thread_ts` when present, otherwise the admitted message's `message_ts`. An admitted initial message maps to exactly one task. Edits map by channel plus message timestamp. Replies from trusted users are not separate tasks unless they directly mention the bot; when they directly mention it, v1 conservatively creates a separate task linked to the same thread.
+When the gateway still has both old and new text in memory and the active Pi consumer is connected, it may include a bounded best-effort unified diff in the live update. The diff is not written to SQLite. Failure or reconnect delivers the latest complete text without a diff.
 
-“Durable receipt” begins only after the gateway receives and commits the event. Socket Mode cannot guarantee receipt while the gateway is offline beyond Slack's own behavior.
+An edit that first adds a direct bot mention is admitted as a new task if all other checks pass.
+
+### 5.5 Slack deletion
+
+Deleting an admitted source message must not erase, complete, or delete the task. The gateway records source deletion metadata, increments version, and delivers a visible notice containing the preserved current task text and deleted-source status.
+
+## 6. Slack admission
+
+For each Socket Mode envelope, the gateway must:
+
+1. validate envelope shape and configured workspace;
+2. begin a SQLite transaction;
+3. deduplicate source identity;
+4. evaluate configured channel, human sender, trusted immutable user ID, and direct bot mention;
+5. normalize current text, thread identity, and file metadata;
+6. create or update the task and source-event result;
+7. commit; then
+8. acknowledge the Slack envelope.
+
+Known duplicates are acknowledged only after finding their committed result. A database commit failure is not acknowledged. Safely identifiable malformed events are recorded and acknowledged to prevent poison redelivery loops.
+
+Initial admission requires all of:
+
+- configured workspace and channel;
+- non-bot sender;
+- explicit trusted user ID; and
+- literal direct mention of the configured bot user.
+
+Display name, channel membership, `@channel`, and merely replying in a bot thread do not establish admission.
+
+Thread identity is `thread_ts` when present, otherwise the source message timestamp.
+
+Durable receipt begins only after the gateway receives and commits the envelope. Mosscap makes no claim that Socket Mode retains events indefinitely while the gateway is offline.
 
 ## 7. Pi leadership and delivery
 
-### 7.1 Claim and fencing
+### 7.1 Opt-in
 
-`/mosscap` connects to the private endpoint, authenticates as the same OS user, presents protocol/Pi session metadata and persisted delivery keys, then requests leadership. The gateway atomically increments the singleton generation and assigns it to that consumer. If a leader exists:
+The extension must not connect for work until the user runs `/mosscap` in that Pi process. Opt-in is process-runtime state and is not automatically restored merely because a session file was previously opted in.
 
-- the extension shows its non-sensitive identity and asks for confirmation unless `/mosscap --takeover` was explicit;
-- on confirmation, the gateway marks the old consumer `fenced`, invalidates all its leases, sends a disconnect/fenced frame, and closes its connection;
-- every subsequent delivery acknowledgement and mutation from an extension must carry the current generation; stale generations are rejected.
+The extension must refuse delivery when Pi reports an in-memory or otherwise non-persisted session.
 
-`/mosscap off` releases leadership if current and disconnects without closing tasks. A heartbeat lapse expires the leader, but a new extension must still opt in explicitly.
+### 7.2 Claim and takeover
 
-### 7.2 Delivery state machine
+The extension presents protocol version, extension version, Pi session ID, session-file identity, and persisted Mosscap delivery keys.
 
-```text
-pending -> leased -> inserting -> persisted
-                    |      |          |
-                    |      +-> uncertain
-                    +--------> rejected
-leased --expiry before insertion report--> pending
-uncertain --operator requeue--> pending
-rejected  --operator requeue--> pending
-```
+If no valid leader exists, the gateway atomically increments the generation and grants leadership.
 
-- `pending`: durable and eligible for current leader.
-- `leased`: gateway issued a token for a specific generation; no insertion started report yet.
-- `inserting`: extension reported it began Pi insertion.
-- `persisted`: extension confirmed the visible message and delivery key were persisted in the Pi session.
-- `uncertain`: connection/process failed after insertion began but before persistence could be confirmed. It is never automatically redelivered.
-- `rejected`: Pi API rejected insertion or the extension refused malformed/oversized content. It is inspectable and not automatically retried.
+If another leader exists, `/mosscap` shows its non-sensitive identity and asks for confirmation. `/mosscap --takeover` is explicit confirmation. On takeover the gateway atomically:
 
-A lease may automatically return to pending only if it expires while still `leased`, because the extension has not reported insertion started. Expiry from `inserting` becomes `uncertain`. An operator uses `delivery inspect` and `delivery requeue --reason ...` after checking the Pi session. Requeue creates a new attempt while retaining history.
+- increments generation;
+- marks the old consumer fenced;
+- invalidates its outstanding leases;
+- grants the new consumer leadership; and
+- sends a fenced notification before closing the old connection when possible.
 
-### 7.3 Visible message contract
+Every extension acknowledgement carries generation and lease token. Stale values are rejected.
 
-Each injected `mosscap.slack`, `mosscap.local`, or `mosscap.schedule` message contains, in human-readable and structured metadata:
+Takeover fences gateway delivery authority only. It must warn that the old Pi process and already-running tools are not stopped.
 
-- stable task/revision/delivery IDs and delivery key;
-- origin, author/schedule, Slack thread link when available;
-- source and committed timestamps;
-- lifecycle state and current working note;
-- full current instructions within message limits, with an explicit CLI retrieval command if truncated;
-- revision timeline/diff as required above; and
-- file names, sizes, hashes, and safe retrieval commands.
+`/mosscap off` releases leadership when current and disconnects without changing tasks.
 
-The message must be visible in ordinary Pi conversation history. Hidden context-only injection does not satisfy delivery.
-
-### 7.4 Recovery handshake and summary
-
-On every opt-in/reconnect, the extension sends its persisted delivery keys and last observed gateway generation. The gateway reconciles them, then inserts one visible recovery summary before normal backlog delivery. The summary includes:
-
-- disconnect/reconnect time window when known;
-- counts by task state and delivery state;
-- current leader identity/generation;
-- open tasks ordered by oldest unresolved activity;
-- for each open task, latest revision number, state, last source and commit timestamps, and whether it changed since this Pi session last persisted it;
-- all `uncertain`/`rejected` deliveries and `ambiguous`/`failed` effects requiring inspection; and
-- coalesced schedule-run counts.
-
-After the summary, the gateway delivers the latest revision of every open task not persisted in this Pi session. It also delivers a compact sequence of meaningful diffs from the session's last persisted revision to latest. Closed tasks are included only when they have an unresolved delivery/effect or changed after the session's last known revision.
-
-## 8. Outbound Slack effects
-
-### 8.1 Effect state machine
+### 7.3 Delivery states
 
 ```text
-prepared -> submitted -> confirmed
-               |  |
-               |  +-> ambiguous
-               +----> failed
-prepared -> cancelled
-ambiguous/failed --explicit retry--> new prepared effect superseding prior
+pending → leased → inserting → persisted
+              │         ├────→ uncertain
+              │         └────→ rejected
+              └──────────────→ pending  (expiry before insertion start)
 ```
 
-- `prepared`: intent and idempotency key committed before I/O.
-- `submitted`: request transmission began.
-- `confirmed`: Slack returned a conclusive success and identifiers are recorded.
-- `failed`: conclusive rejection, such as invalid target or permission denial.
-- `ambiguous`: timeout/disconnect/invalid response after submission may have reached Slack.
-- `cancelled`: intent was cancelled before submission.
+- `pending`: current task version is eligible for the leader.
+- `leased`: gateway issued a generation-bound lease; insertion has not started.
+- `inserting`: extension reported insertion start.
+- `persisted`: extension confirmed the visible custom message and delivery key are in Pi JSONL.
+- `uncertain`: insertion may have occurred but persistence cannot be confirmed.
+- `rejected`: Pi rejected insertion or the extension rejected invalid content.
 
-There is no automatic retry after `submitted`. Reconnect logic may resume polling/receiving but cannot repeat a consequential API call. `effect inspect` prints the target, payload hash, timestamps, Slack identifiers, and a concrete inspection command. `effect retry --reason ...` always creates a new linked effect and requires `--confirm-duplicate-risk` for an ambiguous predecessor.
+A lease may return automatically to pending only when it expires in `leased`. Expiry, disconnect, or process failure from `inserting` becomes `uncertain`.
 
-Where Slack supports a client idempotency token for an operation, Mosscap supplies the effect key, but still records ambiguous outcomes honestly.
+`uncertain` and `rejected` are never automatically requeued. Explicit requeue creates a new attempt while preserving prior diagnostics.
 
-### 8.2 Agents API progress and fallback
+### 7.4 Visible message
 
-If configured and available, Mosscap may project task progress through Slack's Agents API as `agents_progress` effects. This is optional and never authoritative. Capability is detected at startup/doctor and failures do not block task transitions or ordinary replies.
+Each work message contains in visible text and structured details:
 
-Fallback behavior is deterministic:
+- task, version, delivery ID, and delivery key;
+- current state and complete current text within Pi message limits;
+- local or Slack origin;
+- Slack author, message/thread reference, and permalink when applicable;
+- source and gateway commit timestamps;
+- source-deleted status;
+- attachment metadata and retrieval commands; and
+- a CLI retrieval command when content is truncated.
 
-1. If Agents API progress is available, send/update the progress projection as an explicit recorded effect.
-2. Otherwise, use a configured status reaction for coarse states when supported.
-3. Otherwise, record progress only in the task ledger; `task update` output states that no Slack projection was made.
+Slack content must be clearly delimited as untrusted data. Tokens and raw Slack envelopes must never appear.
 
-Mosscap must not post repetitive fallback thread messages automatically. A user can explicitly send one. Progress effects use the same no-automatic-retry and ambiguity rules as all Slack effects.
+The extension must use a custom message with `display: true` so it is visible and participates in model context. Hidden context injection does not satisfy delivery. The delivery key must be stored in that same custom message's structured details.
 
-## 9. File passing
+When idle, the extension submits the custom message with immediate turn triggering. When Pi is already processing, it queues the message as a follow-up that starts after the current agent run settles. It must not interrupt tool calls in progress.
 
-### 9.1 Incoming Slack files
+A `message_end` observation and matching persisted session entry are required before reporting `persisted`. Merely calling Pi's fire-and-forget send API is insufficient.
 
-For admitted tasks, the gateway records file metadata in the admission transaction. It downloads bytes using authenticated Slack APIs only after commit, to a random temporary name under the private file root, while enforcing the configured byte limit. It computes SHA-256 while streaming, `fsync`s, and atomically renames to a content-addressed path. Redirects are restricted to HTTPS and an allowlist appropriate to Slack file hosts; credentials are never forwarded elsewhere.
+### 7.5 Session-wide deduplication
 
-A file too large, unavailable, or disallowed remains a visible metadata reference with state and reason; it does not prevent text task admission. Download failures that are conclusively transient may be retried only before any bytes are exposed as available; an operator can explicitly retry later.
+On startup of an opted-in connection, the extension scans all Mosscap custom-message entries in the persisted session file, including entries outside the active branch, and reports their delivery keys.
 
-### 9.2 Local and outgoing files
+Keys are session-wide. Moving to another conversation branch does not make a task version eligible for duplicate insertion into the same Pi session.
 
-`task create/update --file PATH` and `slack file --file PATH` accept regular files only. The CLI/gateway reject directories, devices, FIFOs, sockets, symlinks, paths outside operator-readable access, sparse files whose logical size exceeds the limit, and files that change identity/size while being copied. Files are copied into private storage and hashed before a task/effect references them; the original path is informational only.
+### 7.6 Recovery
 
-A wide set of file types is supported, including text, source, images, audio, video, archives, PDFs, office documents, and opaque binary data. Extension and MIME are metadata, not a trust decision. Executable bits are stripped in cache, extracted archives are never automatic, and downloaded content is never executed or rendered as trusted HTML by Mosscap.
+After claim or reconnect, the gateway reconciles reported keys before issuing new leases. The extension first displays a recovery message containing:
 
-`file get FILE_ID --output PATH` uses exclusive creation by default; `--force` is required to overwrite a regular file. Stdout streaming requires explicit `--stdout` and never mixes with status output. Outgoing upload confirmation records Slack's file ID and permalink.
+- current leader generation;
+- task counts by state;
+- current `open` and `working` tasks ordered by oldest update;
+- tasks whose current version has not been persisted in this Pi session;
+- uncertain or rejected deliveries; and
+- ambiguous or failed effects.
 
-## 10. Schedules
+The recovery message triggers one model turn. The gateway then makes the latest content version of each eligible non-done task available for normal delivery. It does not reconstruct historical text or diffs.
 
-A one-off schedule uses an RFC 3339 timestamp with explicit offset. A recurring schedule uses a five-field cron expression and an IANA timezone. Cron evaluation follows wall time in that timezone:
+A newly opted-in Pi session may receive current non-done work again under keys derived from its new session ID.
 
-- nonexistent DST local times are skipped;
-- repeated local times run once, at the first occurrence;
-- due instants are stored as UTC.
+## 8. Slack reads and effects
 
-The gateway evaluates schedules on startup and at least once per minute. For a recurring schedule with one or more missed due instants, it creates exactly one task/run containing earliest missed due, latest missed due, and count. It then advances `next_due_at` beyond now in the same transaction. A one-off missed while down creates one ordinary task on recovery.
+### 8.1 Single-channel rule
 
-Runs are never merged across distinct schedules. A schedule disabled before recovery does not materialize missed runs. `remove` disables future runs and tombstones schedule configuration but never deletes already materialized tasks.
+Every Slack command implicitly operates on the configured channel. No command accepts a channel or workspace selector. Message and thread targets are validated as belonging to that channel before mutation.
 
-## 11. CLI and Pi commands
+### 8.2 Read operations
 
-All commands support `--help`; read commands support `--json`; identifiers may be abbreviated only when unambiguous. Mutations support `--request-id`. Destructive or duplicate-risk commands require the flags shown.
+`slack history` and `slack thread` perform bounded reads and do not create effects. They return message timestamps, thread identity, author IDs, text, reactions, and file metadata needed for later explicit operations.
+
+Read results are not persisted as task state or long-term cache.
+
+### 8.3 Effect states
+
+```text
+prepared → submitted → confirmed
+                       ├────→ failed
+                       └────→ ambiguous
+```
+
+- `prepared`: exact intent and idempotency key committed before network I/O.
+- `submitted`: transmission may have begun.
+- `confirmed`: Slack returned conclusive success and identifiers were stored.
+- `failed`: Slack conclusively rejected the operation.
+- `ambiguous`: timeout, disconnect, or malformed response after submission means Slack may have applied it.
+
+A `prepared` effect may be submitted by the gateway. On startup, a safely unsubmitted prepared effect remains eligible. A `submitted` effect without conclusive result becomes `ambiguous`; it is never resubmitted automatically.
+
+Where Slack accepts a client idempotency token, Mosscap supplies the effect key without weakening ambiguous-outcome handling.
+
+### 8.4 Explicit retry
+
+`effect retry` creates a new prepared effect linked to its predecessor. It never mutates the predecessor into a new attempt.
+
+Retry of an ambiguous predecessor requires `--confirm-duplicate-risk`. Retry of a file upload also requires the current local file to match the predecessor's recorded size and SHA-256; otherwise the operator must issue a new upload command.
+
+There is no effect cancellation operation.
+
+### 8.5 Independence from tasks
+
+Effects may optionally reference a task for audit, but:
+
+- replying or reacting does not change task state;
+- marking a task done does not create an effect; and
+- task source identity supplies a convenient thread target, not implicit permission to act.
+
+## 9. File transfer
+
+### 9.1 General rules
+
+Mosscap stores durable metadata and outcomes, not durable file bytes. It accepts broad file types and treats extension and MIME type as untrusted metadata.
+
+All transfers enforce configured size and count limits. Mosscap must never execute downloaded content, extract archives automatically, or render bytes as trusted HTML.
+
+### 9.2 Incoming Slack files
+
+Admission stores Slack file identity and metadata but does not download bytes.
+
+`file get FILE_ID --output PATH` causes the gateway to fetch the file using authenticated Slack APIs into a random private temporary file while enforcing the byte limit and computing SHA-256. After complete validation, the CLI places it at the requested path atomically.
+
+Output creation is exclusive by default. `--force` may replace only an existing regular file using race-safe replacement.
+
+`file get FILE_ID` without `--output` returns a private temporary path and its expiry time. The gateway may remove temporary files after expiry or on restart. Callers must move anything they need to retain.
+
+Redirects are allowed only over HTTPS to Slack-approved file hosts. Slack credentials must never be forwarded to another host.
+
+Unavailable or oversized files remain visible metadata and produce a typed error without affecting the task.
+
+### 9.3 Outgoing files
+
+`slack send --file` and `slack file` accept regular files only. They reject directories, devices, FIFOs, sockets, symlinks, sparse files whose logical size exceeds the limit, unreadable paths, and files that change identity or size during validation and upload.
+
+Before submission, the gateway records path metadata, size, and SHA-256 in the prepared effect. It uploads the validated bytes without retaining a permanent copy.
+
+If the process restarts before a prepared upload is submitted, the gateway must revalidate size and hash before using the path. A mismatch conclusively fails that effect rather than uploading different bytes.
+
+Confirmed upload records Slack file ID and permalink. Ambiguous upload follows normal effect rules.
+
+### 9.4 Temporary files
+
+Temporary files use generated names under the private state root, mode `0600`, and atomic creation. User-provided filenames never determine temporary paths.
+
+Expired temporary bytes are the only data Mosscap may delete automatically. Their durable metadata remains until explicit purge.
+
+## 10. Purge
+
+Mosscap performs no automatic retention of durable metadata.
+
+The root command is:
+
+```text
+mosscap purge --before RFC3339 --dry-run
+mosscap purge --before RFC3339 --confirm
+```
+
+Exactly one of `--dry-run` or `--confirm` is required. The cutoff is an absolute UTC-capable RFC 3339 timestamp.
+
+Purge may remove finalized records older than the cutoff:
+
+- `done` tasks;
+- state events and source records owned only by purged tasks;
+- persisted delivery history owned only by purged tasks;
+- confirmed effects owned only by purged tasks;
+- old confirmed standalone effects;
+- old ignored or duplicate source-event records;
+- expired request-deduplication results;
+- old disconnected or fenced consumer records;
+- unreferenced file metadata and expired temporary files; and
+- unused SQLite pages through safe maintenance.
+
+Purge must preserve:
+
+- `open` or `working` tasks;
+- connected consumers and current leadership;
+- pending, leased, or inserting deliveries;
+- uncertain or rejected deliveries;
+- prepared, submitted, failed, or ambiguous effects;
+- live request-deduplication records;
+- any record referenced by retained state; and
+- configuration, trust, and credentials.
+
+If a done task references an unresolved delivery or effect, the task and required graph are skipped. Dry-run and confirmed output must group eligible, skipped, and removed counts by record type. Confirmed purge must be transactional in bounded batches and leave referential integrity valid after interruption.
+
+## 11. CLI and extension commands
+
+All commands support `--help`. Read commands support `--json`. Identifiers may be abbreviated only when unambiguous. Mutations accept `--request-id`.
 
 ```text
 mosscap setup
@@ -428,234 +588,250 @@ mosscap trust list
 mosscap trust add SLACK_USER_ID
 mosscap trust remove SLACK_USER_ID
 
-mosscap task create --title TEXT --instructions TEXT [--file PATH ...]
-mosscap task list [--state open|working|responded|resolved] [--all]
-mosscap task show TASK [--revision REV] [--history]
-mosscap task update TASK [--title TEXT] [--instructions TEXT] [--note TEXT] [--file PATH ...]
+mosscap task create (--text TEXT|--text-file PATH)
+mosscap task list [--state open|working|done] [--all] [--json]
+mosscap task show TASK [--json]
+mosscap task update TASK (--text TEXT|--text-file PATH)
+mosscap task open TASK [--note TEXT]
 mosscap task working TASK [--note TEXT]
-mosscap task respond TASK (--text TEXT|--text-file PATH) [--file PATH ...] [--channel ID --thread TS] [--no-slack] [--resolve]
-mosscap task resolve TASK --reason TEXT
-mosscap task reopen TASK --reason TEXT
-mosscap task delete TASK --reason TEXT [--force]
+mosscap task done TASK [--note TEXT]
 
 mosscap delivery list [--state pending|leased|inserting|persisted|uncertain|rejected]
 mosscap delivery inspect DELIVERY
 mosscap delivery requeue DELIVERY --reason TEXT
 
-mosscap effect list [--state prepared|submitted|confirmed|ambiguous|failed|cancelled]
+mosscap effect list [--state prepared|submitted|confirmed|ambiguous|failed]
 mosscap effect inspect EFFECT
 mosscap effect retry EFFECT --reason TEXT [--confirm-duplicate-risk]
-mosscap effect cancel EFFECT --reason TEXT
 
 mosscap slack history [--limit N]
 mosscap slack thread THREAD_TS
-mosscap slack send --channel ID [--thread TS] (--text TEXT|--text-file PATH) [--file PATH ...]
-mosscap slack edit MESSAGE_TS (--text TEXT|--text-file PATH)
-mosscap slack delete MESSAGE_TS --reason TEXT
-mosscap slack react MESSAGE_TS EMOJI
-mosscap slack unreact MESSAGE_TS EMOJI
-mosscap slack file --channel ID [--thread TS] --file PATH [--comment TEXT]
+mosscap slack send [--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK]
+mosscap slack edit MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK]
+mosscap slack delete MESSAGE_TS --reason TEXT [--task TASK]
+mosscap slack react MESSAGE_TS EMOJI [--task TASK]
+mosscap slack unreact MESSAGE_TS EMOJI [--task TASK]
+mosscap slack file [--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK]
 
 mosscap file show FILE_ID
-mosscap file get FILE_ID (--output PATH|--stdout) [--force]
-mosscap file retry FILE_ID --reason TEXT
+mosscap file get FILE_ID [--output PATH] [--force]
 
-mosscap schedule add --title TEXT --at RFC3339 --instructions TEXT
-mosscap schedule add --title TEXT --cron CRON --timezone IANA --instructions TEXT
-mosscap schedule list
-mosscap schedule show SCHEDULE
-mosscap schedule enable SCHEDULE
-mosscap schedule disable SCHEDULE
-mosscap schedule remove SCHEDULE --reason TEXT
-
-mosscap zellij list
-mosscap zellij attach SESSION
-mosscap zellij watch SESSION
+mosscap purge --before RFC3339 (--dry-run|--confirm)
 ```
+
+`--task` adds an audit relationship only. It does not derive a destination, change task state, or grant permission.
 
 Pi extension commands:
 
 ```text
-/mosscap                 # inspect holder, confirm if needed, claim/take over, recover
-/mosscap --takeover      # explicit takeover without interactive holder confirmation
-/mosscap status          # connection, generation, backlog, exceptional states
-/mosscap off             # release leadership and disconnect
+/mosscap
+/mosscap --takeover
+/mosscap status
+/mosscap off
 ```
 
-The extension may expose task/effect CLI shortcuts, but v1 correctness and acceptance do not depend on them.
+Stable exit categories are:
 
-Exit codes are stable categories: `0` success, `2` usage, `3` not found, `4` conflict/stale generation, `5` unsafe configuration/permissions, `6` gateway unavailable, `7` external operation failed, `8` ambiguous outcome, and `9` unsupported schema/protocol.
+| Code | Meaning |
+| --- | --- |
+| 0 | success |
+| 2 | usage error |
+| 3 | not found |
+| 4 | conflict or stale generation |
+| 5 | unsafe configuration or permissions |
+| 6 | gateway unavailable |
+| 7 | conclusive external operation failure |
+| 8 | ambiguous outcome |
+| 9 | unsupported schema or protocol |
 
-## 12. Status, diagnostics, and logs
+## 12. Local protocol
 
-`gateway status` reports endpoint/database identity, schema/protocol version, Slack state, last received/committed event, current leader/generation/heartbeat, task counts, delivery counts, effect counts, schedule next wake, and retention usage. It is unhealthy if the database is unwritable, endpoint is unavailable, scheduler is stalled, Slack reconnect exceeded its bounded status threshold, or unresolved exceptional states exist; ambiguous outcomes are explicitly listed rather than hidden in a generic unhealthy bit.
+The gateway exposes a versioned 32-bit-length-prefixed JSON protocol over the private Unix socket. File bytes are never placed in JSON frames; clients exchange file IDs and private temporary transfer references.
 
-`doctor` is non-destructive and checks configuration, redaction, ownership/modes, SQLite integrity/read-write transaction, local endpoint, Slack auth/channel/bot identity, trusted IDs, required scopes, optional Agents API capability, Pi extension/protocol compatibility, Zellij availability (advisory), and storage limits. It never sends a Slack message or takes leadership.
+Every request includes protocol version, request ID, client kind, and client version. Every response includes request ID, server version, and either a typed result or typed error.
 
-Structured logs include request/event/task/effect/delivery IDs and timestamps but exclude tokens, full Slack payloads, message bodies, and file bytes by default. `--verbose` may include metadata, not secrets or content.
+Required capabilities:
 
-## 13. Failure and recovery
+- handshake and capability negotiation;
+- status and health;
+- mutation request deduplication;
+- task, Slack, effect, delivery, file, trust, and purge operations;
+- leader claim, release, heartbeat, generation fencing, and server disconnect;
+- delivery lease, insertion-start, persisted, rejected, and uncertain reports; and
+- bounded server notifications for newly eligible task versions and fencing.
+
+Unknown fields may be ignored only within a declared compatible version. Unknown enum values fail safe. Frames larger than the configured maximum are rejected before allocation of an unbounded payload.
+
+Per-connection outbound queues are bounded. A slow client is disconnected without discarding durable work.
+
+The server authenticates same-user clients through private filesystem permissions and peer credentials where supported. The same-user boundary is not protection from a compromised account.
+
+## 13. Status, diagnostics, and logs
+
+`gateway status` reports:
+
+- database and endpoint identity;
+- schema and protocol versions;
+- Slack connection and bounded reconnect state;
+- last received and committed source event;
+- current delivery leader, generation, and heartbeat age;
+- task counts by state;
+- delivery and effect counts by state;
+- temporary-file count and bytes;
+- SQLite file size; and
+- exceptional outcomes requiring inspection.
+
+Action-required outcomes such as ambiguous effects are reported separately from process health so a supervisor does not restart a healthy gateway repeatedly.
+
+`doctor` is non-destructive. It checks configuration, redaction, path ownership and modes, SQLite integrity and a rolled-back write test, local endpoint compatibility, Slack authentication and configured-channel access, bot identity, trusted IDs, required scopes, Pi extension compatibility, and storage availability. It never sends a Slack message, downloads a file, or takes leadership.
+
+Structured logs include request, source-event, task, effect, and delivery IDs with timestamps. They exclude tokens, full message bodies, raw Slack payloads, and file bytes. Verbose mode may include bounded metadata but never secrets.
+
+## 14. Failure and recovery
 
 | Failure | Required behavior |
 | --- | --- |
-| Gateway exits | SQLite transactions preserve committed work; clients reconnect after restart. |
-| Slack disconnects | Bounded reconnect with jitter; event deduplication handles redelivery; no claim of receipt while offline. |
-| Database full/corrupt | Stop admitting/acknowledging new work, fail closed, report exact diagnostic; do not auto-repair. |
-| Pi/SSH/Zellij exits before insertion | Unstarted lease returns to pending after expiry. |
-| Pi exits during insertion | Delivery becomes uncertain; inspect, then explicitly requeue if appropriate. |
-| Extension reconnects | Reconcile persisted keys, present recovery summary/latest revisions, then resume leases. |
-| New Pi takes over | Increment fence, disconnect old leader, reject stale acknowledgements. |
-| Slack effect times out after submit | Mark ambiguous; never automatic retry. |
-| Incoming file fails | Keep task and metadata visible; file has explicit failed/missing state and retry command. |
-| Clock moves | Use monotonic time for leases/heartbeats and UTC instants for durable timestamps; scheduler recalculates without duplicate run rows. |
-| Process killed during retention | Batched transactions and referential checks leave live records intact; retry housekeeping later. |
+| Gateway exits | Committed SQLite state remains; clients reconnect after restart. |
+| Slack disconnects | Reconnect with bounded jitter; deduplicate redelivery; make no claim of receipt while offline. |
+| Database full or corrupt | Stop admitting and acknowledging new work, fail closed, and report exact diagnostics; do not auto-repair. |
+| Pi exits before insertion start | Expired lease returns to pending. |
+| Pi exits after insertion start | Delivery becomes uncertain; never redeliver automatically. |
+| Extension reconnects | Reconcile session-wide persisted keys before recovery and new leases. |
+| New Pi takes over | Increment generation, fence old delivery connection, and reject stale acknowledgements. |
+| Slack operation times out after submit | Mark ambiguous; never retry automatically. |
+| Lazy file download fails | Keep metadata and task intact; return a typed retriable or conclusive error. |
+| Outgoing file changes | Fail the effect; never upload bytes that differ from the prepared hash. |
+| Clock moves | Use monotonic time for live leases and UTC wall time for durable timestamps. |
+| Purge is interrupted | Retain referential integrity; safely rerun later. |
 
-Startup performs schema compatibility and SQLite quick checks, expires dead leadership, changes `inserting` deliveries owned by dead connections to `uncertain`, releases only never-started expired leases, evaluates schedules, and resumes Slack. It does not resubmit effects left `submitted`; these become or remain `ambiguous` pending inspection.
-
-## 14. Retention and disk bounds
-
-Retention runs in small batches and never removes:
-
-- non-resolved tasks or their revisions/files;
-- the latest revision and lifecycle audit needed to understand a retained task;
-- unresolved (`prepared`, `submitted`, `ambiguous`, `failed`) effects;
-- `uncertain` or `rejected` delivery history;
-- active schedules and run uniqueness data needed to prevent duplication; or
-- files referenced by any retained live record.
-
-After the configured ages, Mosscap may prune raw Slack payloads, superseded revisions of resolved tasks, confirmed/cancelled effects, persisted delivery attempts, disabled schedule details, and unreferenced cached files. Before deleting file bytes it marks them expired transactionally; missing bytes remain honestly represented.
-
-The file cache uses least-recently-used eviction among eligible unreferenced/closed items to remain under 2 GiB. If live referenced content alone exceeds the budget, Mosscap does not delete it: it rejects further file caching with a visible `storage_limit` result while continuing text admission. SQLite has no hard byte cap because live durable work cannot be safely discarded; age pruning and status warnings at configurable thresholds provide a simple bounded-growth policy. The default warns at 512 MiB and blocks optional raw payload/file metadata expansion at 1 GiB while preserving minimal task admission.
-
-No compaction, copy, export, import, backup, restore, or migration workflow is guaranteed in v1.
+Startup must check schema compatibility and SQLite integrity, expire dead leadership, convert inserting deliveries owned by dead connections to uncertain, release only never-started expired leases, classify unresolved submitted effects as ambiguous, remove expired temporary bytes, bind the local endpoint, and connect to Slack.
 
 ## 15. Security boundaries
 
-- A trusted Slack user is authorized to send instructions and files to a fully capable local Pi session. Trust must therefore use immutable user IDs and be explicit.
-- The configured channel, user allowlist, workspace, and direct mention are admission checks, not a sandbox.
-- Slack message content, filenames, MIME labels, file bytes, schedule text, and task text are untrusted data. They are clearly delimited in visible messages and never interpreted as Mosscap protocol commands.
-- The Unix socket authenticates same-user local clients through filesystem permissions and peer credentials where supported. Same-user processes are trusted; the socket is not protection from a compromised account.
-- Pi and its tools retain whatever local authority the human gave them. Mosscap adds no OS sandbox and must not imply one.
-- Zellij watch/attach access is outside Mosscap's security boundary.
-- Tokens are least-scope, redacted, never included in Pi messages, and not persisted in SQLite payloads.
-- Outbound targets are shown before/with effects. Slack-origin text cannot silently invoke CLI verbs; an agent or human must explicitly execute them.
-- File cache paths are generated, not derived directly from filenames. Reads/writes defend against traversal, symlink races, and replacement races.
+- While `/mosscap` is active, a trusted Slack user's admitted mention automatically triggers model processing in a fully capable local Pi session.
+- Trust is based only on configured workspace, configured channel, immutable user allowlist, non-bot sender, and direct bot mention.
+- These checks are authorization gates, not a sandbox.
+- Slack text, task text, filenames, MIME labels, and file bytes are untrusted data and must be visibly delimited from Mosscap control metadata.
+- Slack-origin text cannot directly invoke local protocol commands. Pi may choose to act on it with the authority the human gave Pi; that is the intended trust boundary.
+- The local socket trusts same-user clients and does not defend against compromise of that OS account.
+- Tokens use least Slack scope, are redacted, never enter SQLite source payloads, and never enter Pi messages.
+- All Slack writes are explicit CLI operations with visible targets and durable intents.
+- File handling defends against traversal, symlink races, replacement races, oversized data, unsafe redirects, and non-regular local inputs.
+- Purge is irreversible, requires an explicit cutoff and confirmation, and reports what it removed.
 
-## 16. Local integration protocol
+## 16. Invariants
 
-Use a versioned framed protocol over the private Unix socket. JSON messages with a 32-bit length prefix are sufficient for v1; files transfer through gateway-managed IDs rather than inline frames. Every request includes protocol version, request ID, client kind/version, and claimed session identity. Every response includes request ID, server version, durable result IDs, and a typed error.
+1. An identifiable Slack envelope is acknowledged only after its admission or deduplication result commits.
+2. One admitted Slack source message maps to at most one task.
+3. Every task stores one current text value and a monotonic content version; stale Slack edits cannot roll it backward.
+4. Task state changes and Slack operations are independent and explicit.
+5. SQLite is the sole coordination authority.
+6. At most one unexpired delivery-leader generation is valid; stale generations cannot acknowledge leases.
+7. A delivery is persisted only after visible insertion and the delivery key are observed in Pi's persisted session.
+8. A delivery that may have been inserted but cannot be confirmed is uncertain, never silently pending.
+9. A Slack effect intent commits before submission.
+10. A possibly submitted unconfirmed Slack effect is ambiguous and is never retried automatically.
+11. File bytes are temporary; durable records contain identity, metadata, hashes, and outcomes only.
+12. Automatic deletion is limited to expired temporary bytes; durable metadata requires explicit purge.
+13. Purge never removes live tasks or unresolved delivery/effect evidence.
+14. No Mosscap component starts or owns Pi.
 
-Required protocol capabilities:
+## 17. Implementation sequence
 
-- health/status and capability negotiation;
-- CLI request/result deduplication;
-- leadership claim/release, generation fencing, heartbeat, and server-initiated disconnect;
-- backlog/recovery summary query;
-- lease, insertion-started, persisted, rejected, and uncertain delivery messages;
-- task/effect/file/schedule operations; and
-- streaming notifications for newly eligible revisions and state changes.
+### Phase 0: storage and local tasks
 
-Protocol mismatch fails explicitly with supported versions. Unknown fields are ignored only within a declared compatible protocol version; unknown state enum values fail safe. The gateway applies backpressure with bounded per-connection queues and disconnects a slow client without losing durable work.
+- Go executable and internal gateway/client separation.
+- Private XDG layout, configuration, SQLite schema, typed errors, and request IDs.
+- Foreground local protocol server.
+- Task create, list, show, update, and state commands.
+- Status and doctor foundations.
 
-Pi integration must use supported extension APIs for visible custom/user messages and persisted extension state. If the installed Pi version cannot confirm visible persistence, `doctor` marks it incompatible rather than degrading to key injection or claiming delivery.
+**Gate:** local tasks and request-deduplicated mutations survive gateway restart.
 
-## 17. Invariants
+### Phase 1: Slack admission and operations
 
-1. An eligible Slack event is acknowledged only after its admission/deduplication result is committed.
-2. One admitted source message maps to at most one task; revisions are unique and monotonic per task.
-3. SQLite is the sole task/effect authority; Pi, Slack projections, logs, and Zellij are not.
-4. At most one unexpired leader generation is valid. Stale generations cannot acknowledge or mutate delivery state.
-5. A delivery is `persisted` only after the extension confirms both visible insertion and persisted delivery key.
-6. An insertion that might have occurred but cannot be confirmed is `uncertain`, never silently pending.
-7. An outbound effect intent is durable before submission; a possibly submitted unconfirmed effect is `ambiguous`, never automatically retried.
-8. Resolving a task is explicit and never requires deletion/tombstoning.
-9. Meaningful source edits remain revisioned and visibly deliverable with source and commit timestamps.
-10. Schedule recovery creates at most one coalesced run per schedule evaluation gap.
-11. Retention never deletes state required to understand open work or inspect unresolved ambiguity.
-12. Files are content-hashed, size-bounded regular files in private storage; user-provided names never choose cache paths.
-13. No component other than the human starts or owns Pi.
+- Socket Mode connection and strict single-channel admission.
+- Commit-before-ack deduplication, source edits, deletions, and file metadata.
+- Single-channel reads and durable Slack effects.
+- Deterministic fake Slack tests for redelivery, transaction failure, stale edits, and pre/post-submit timeout.
 
-## 18. Phased implementation
+**Gate:** an eligible mention creates exactly one task and no ambiguous effect is automatically retried.
 
-### Phase 0: skeleton and storage
+### Phase 2: Pi delivery
 
-- CLI executable, config validation, private XDG layout, SQLite schema, request IDs, typed errors, logging, `setup`, `status`, and `doctor` foundations.
-- Task/revision/event CRUD and lifecycle commands.
-- Tests: unsafe permissions, transaction rollback, request deduplication, lifecycle and schema constraints.
+- TypeScript extension and compatibility checks.
+- Explicit opt-in, takeover, heartbeat, leases, visible custom messages, immediate turns, and persisted keys.
+- Recovery and exceptional delivery inspection/requeue.
+- Tests with two fake extension clients plus a Pi integration harness.
 
-**Gate:** local tasks survive gateway restart and all invariants that do not require Slack/Pi pass.
+**Gate:** only the current generation receives delivery authority, and crash timing produces pending versus uncertain as specified.
 
-### Phase 1: Slack admission and effects
+### Phase 3: temporary files and purge
 
-- Socket Mode connection, strict admission, commit-before-ack, deduplication, edits/deletes, source thread identity.
-- Explicit Slack effects and ambiguous-state handling; history/thread reads.
-- Tests with a deterministic fake Slack server for redelivery, commit failure, timeout-before/after submit, and edit ordering.
+- Lazy Slack download, direct outgoing upload, validation, hashes, and temporary expiry.
+- Root purge dry-run, confirmation, bounded batches, and referential checks.
+- Tests for oversized, changing, sparse, symlinked, interrupted, and unavailable files.
 
-**Gate:** an eligible mention creates exactly one durable task; no ambiguous effect is automatically retried.
+**Gate:** bidirectional transfer works without permanent byte storage, and purge cannot remove live or unresolved state.
 
-### Phase 2: Pi extension, leadership, and delivery
+### Phase 4: operational completion
 
-- Versioned local protocol, `/mosscap`, takeover fencing/disconnect, heartbeats, leases, visible messages, persisted keys, exceptional delivery states.
-- Recovery summary, latest revision delivery, and visible timestamped diffs.
-- Tests with two fake extensions and a Pi extension integration harness.
+- Complete diagnostics, structured logging, packaging, and operator documentation.
+- End-to-end fault matrix and manual use in a real interactive Pi session.
 
-**Gate:** two consumers cannot act concurrently; kill/reconnect scenarios produce pending versus uncertain exactly as specified.
-
-### Phase 3: schedules and files
-
-- One-off/cron scheduling with timezone/DST rules and coalesced recovery.
-- Incoming download, local ingest, outgoing upload, hashes, safe retrieval, cache budget and retention.
-- Tests for downtime gaps, DST boundaries, oversized/changing/symlink files, interrupted download, and cache pressure.
-
-**Gate:** missed runs coalesce without loss of context; broad regular-file passing works without traversal or unbounded cache growth.
-
-### Phase 4: operational polish
-
-- Complete status/doctor, optional Agents API progress with fallback, Zellij wrappers, retention batches, compatibility diagnostics, packaging and operator documentation.
-- End-to-end fault matrix and manual usability pass in a real interactive Pi/Zellij session.
-
-**Gate:** all acceptance criteria below pass and no omitted v1 feature has become an implicit dependency.
-
-## 19. Acceptance criteria
+## 18. Acceptance criteria
 
 ### Admission and tasks
 
-1. A trusted user's direct bot mention in the configured channel is committed before Socket Mode acknowledgement and appears once after duplicate delivery.
-2. Wrong-channel, untrusted, bot-authored, and unmentioned messages do not create tasks and have inspectable admission reasons.
-3. A meaningful Slack edit creates a monotonic immutable revision; Pi shows author, source/commit timestamps, and a diff. Metadata-only edits do not.
-4. `open -> working -> responded -> resolved`, direct resolve, reopen, and optional delete obey the state machine. A resolved task requires no tombstone.
+1. A trusted human's direct bot mention in the configured channel commits before acknowledgement and creates exactly one `open` task after duplicate delivery.
+2. Wrong-workspace, wrong-channel, untrusted, bot-authored, and unmentioned messages create no tasks and have inspectable admission results.
+3. Local task creation produces the same task shape without Slack source metadata.
+4. `open`, `working`, and `done` transitions obey the state machine and never post to Slack.
+5. A meaningful current Slack edit replaces task text, increments version, and cannot be rolled back by a later-arriving older event.
+6. No historical task text is available after replacement; a connected Pi may receive a best-effort live diff.
+7. Source deletion preserves task text and state while making deletion visible.
 
-### Human ownership and leadership
+### Pi delivery
 
-5. Mosscap never starts Pi. Running `/mosscap` in a human-started Pi session is required to receive work.
-6. A second explicit takeover increments generation, closes/fences the first connection, and rejects a delayed acknowledgement from it.
-7. Zellij can be absent without affecting task delivery correctness; attach/watch never mutate state.
+8. Mosscap never starts Pi; explicit `/mosscap` in a persisted human-started session is required.
+9. Delivered work is a distinct visible custom message containing a key in the same session entry and triggers a model turn immediately or as a follow-up.
+10. A crash before insertion start returns the lease to pending; a crash after insertion start yields uncertain with no automatic retry.
+11. A takeover increments generation, fences the previous delivery connection, and rejects its delayed acknowledgement without claiming to stop its Pi process.
+12. Reconnect reconciles all session-wide keys and presents current non-done work and exceptional outcomes.
 
-### Delivery and recovery
+### Slack operations
 
-8. Work appears as a distinct visible Pi message with stable IDs and persists a delivery key.
-9. A crash before insertion-start returns the lease to pending; a crash after insertion-start produces `uncertain` and no automatic retry.
-10. Reconnect/new opt-in presents a visible recovery summary and latest open revisions/diffs before ordinary new backlog.
-11. Explicit inspection and requeue retain prior delivery attempt history.
+13. No Slack command accepts a channel or workspace selector; all targets are validated against the configured channel.
+14. Send, edit, delete, react, unreact, and upload commit an exact durable intent before network submission.
+15. A simulated post-submit timeout becomes ambiguous and restart performs no duplicate API call.
+16. Explicit retry creates a linked effect and requires duplicate-risk confirmation after ambiguity.
+17. Slack activity never changes task state, even when an effect references a task.
 
-### Slack effects and progress
+### Files and purge
 
-12. Every send/edit/delete/react/unreact/file/progress request has a durable intent before network submission and a conclusive or ambiguous outcome afterward.
-13. A simulated post-submit timeout creates `ambiguous`; restart performs no duplicate API call. Explicit retry records a linked new effect and duplicate-risk confirmation.
-14. Agents API progress is used only when supported; otherwise reaction or ledger-only fallback works without blocking task progress.
-
-### Schedules, files, and retention
-
-15. One-off schedules survive restart. Multiple missed recurring instants create one task with correct count/range, including tested DST behavior.
-16. Text, image, PDF, archive, and opaque binary files pass within limits with correct SHA-256; oversized, symlinked, changing, or unavailable files fail visibly without losing the task.
-17. Cache pressure evicts only eligible data; live/open task files and unresolved inspection records remain. Raw/history pruning leaves retained tasks understandable.
+18. Incoming files are metadata-only until requested and can be downloaded to an explicit destination or expiring temporary path.
+19. Outgoing text, image, PDF, archive, and opaque binary files upload within limits without retaining a permanent copy.
+20. Oversized, symlinked, sparse, changing, unavailable, or unsafe-redirect files fail visibly without losing their task or effect evidence.
+21. Purge dry-run groups eligible and skipped records without mutation.
+22. Confirmed purge removes eligible old finalized history but preserves live tasks and every unresolved delivery or effect.
 
 ### Operations and security
 
-18. Unsafe state ownership/modes, unsupported schema/protocol, and incompatible Pi persistence APIs fail closed with actionable diagnostics.
-19. `status` exposes Slack, database, leader, backlog, schedule, storage, delivery, and effect states; `doctor` is non-destructive and redacts secrets.
-20. Kill/restart tests for gateway, extension, Slack connection, and Zellij satisfy the failure table without hidden terminal inference or claims of exactly-once execution.
+23. Unsafe path ownership or modes, unsupported schema/protocol, and incompatible Pi persistence APIs fail closed with actionable diagnostics.
+24. Status distinguishes gateway health from operator-action-required ambiguity and reports SQLite and temporary-byte usage.
+25. Doctor is non-destructive and secret-safe.
+26. Gateway, Slack, extension, and file-transfer fault tests satisfy the recovery table without terminal inference or exactly-once claims.
 
-## 20. Definition of v1 complete
+## 19. Definition of v1 complete
 
-V1 is complete when all acceptance criteria pass in automated tests where feasible and the remaining Pi/Zellij/Slack interactions pass a documented manual test. The release documentation must state the security boundary, offline receipt limitation, ambiguity inspection procedure, retention behavior, and absence of backup/restore/migration guarantees. Any implementation shortcut that makes terminal output, Slack reactions, or a transcript authoritative is a release blocker.
+V1 is complete when all acceptance criteria pass in automated tests where feasible and remaining Slack/Pi interactions pass a documented manual test. Release documentation must state:
+
+- the trusted-user and same-user security boundaries;
+- that opted-in Slack mentions automatically trigger Pi;
+- the Socket Mode offline receipt limitation;
+- uncertain-delivery and ambiguous-effect inspection procedures;
+- temporary file behavior;
+- irreversible purge behavior; and
+- the absence of backup, restore, and migration guarantees.
+
+Any implementation that makes terminal output, Slack reactions, or Pi conversation claims authoritative task state is a release blocker.
