@@ -119,6 +119,12 @@ func TestSetupCreatesPrivateXDGLayout(t *testing.T) {
 	if _, err := Load(loc); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := Setup(loc); err != nil {
+		t.Fatalf("idempotent setup: %v", err)
+	}
+	if _, err := os.Stat(got.Paths.Database); err != nil {
+		t.Fatalf("database not created: %v", err)
+	}
 	info, err := os.Stat(got.Paths.TmpDir)
 	if err != nil {
 		t.Fatal(err)

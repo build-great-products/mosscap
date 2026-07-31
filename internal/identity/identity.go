@@ -24,6 +24,9 @@ func NewGenerator(reader io.Reader) Generator {
 	return Generator{reader: reader}
 }
 
+// IsZero reports whether the generator has not been initialized.
+func (g Generator) IsZero() bool { return g.reader == nil }
+
 // NewID returns prefix followed by 128 random bits encoded as raw base64url.
 func (g Generator) NewID(prefix string) (string, error) {
 	if prefix == "" {

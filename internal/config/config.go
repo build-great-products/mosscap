@@ -2,6 +2,7 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/stayradiated/mosscap/internal/securepath"
+	"github.com/stayradiated/mosscap/internal/store"
 )
 
 const FileName = "config.toml"
@@ -143,7 +145,7 @@ func Validate(c Config) error {
 	return nil
 }
 
-// Setup creates a private default configuration and state layout. It deliberately does not create a ledger.
+// Setup creates a private configuration/state layout and initializes its new ledger.
 func Setup(loc Location) (Config, error) {
 	def, err := Default(loc)
 	if err != nil {
@@ -162,7 +164,7 @@ func Setup(loc Location) (Config, error) {
 		if err := writeAtomic(loc.Path, def); err != nil {
 			return Config{}, err
 		}
-		return def, nil
+		return initializeLedger(def)
 	} else if err != nil {
 		return Config{}, err
 	}
@@ -180,6 +182,32 @@ func Setup(loc Location) (Config, error) {
 		if err := securepath.CheckFile(c.Slack.SecretsFile); err != nil {
 			return Config{}, fmt.Errorf("slack.secrets_file: %w", err)
 		}
+	}
+	return initializeLedger(c)
+}
+
+func initializeLedger(c Config) (Config, error) {
+	busy, err := time.ParseDuration(c.Database.BusyTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	var s *store.Store
+	if _, err := os.Lstat(c.Paths.Database); errors.Is(err, os.ErrNotExist) {
+		s, err = store.Initialize(context.Background(), c.Paths.Database, store.Options{BusyTimeout: busy})
+	} else if err == nil {
+		if err := securepath.CheckFile(c.Paths.Database); err != nil {
+			return Config{}, fmt.Errorf("database: %w", err)
+		}
+		s, err = store.Open(context.Background(), c.Paths.Database, store.Options{BusyTimeout: busy})
+	}
+	if err != nil {
+		return Config{}, fmt.Errorf("initialize ledger: %w", err)
+	}
+	if err := s.Close(); err != nil {
+		return Config{}, err
+	}
+	if err := securepath.CheckFile(c.Paths.Database); err != nil {
+		return Config{}, fmt.Errorf("database: %w", err)
 	}
 	return c, nil
 }
