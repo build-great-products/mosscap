@@ -43,6 +43,23 @@ func TestInitializeAndOpenCompatibility(t *testing.T) {
 		t.Fatal("foreign database opened")
 	}
 }
+func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+	s, err := Initialize(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, path, Options{}); !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("Open gapped migration: %v", err)
+	}
+}
 func TestMutationsAreAtomicAndDoNotKeepOldText(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

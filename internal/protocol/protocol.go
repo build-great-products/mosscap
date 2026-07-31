@@ -215,10 +215,15 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		if len(p.SupportedVersions) == 0 || len(p.SupportedVersions) > 16 || len(p.Capabilities) > 32 {
 			return errors.New("invalid hello parameters")
 		}
+		supported := false
 		for _, v := range p.SupportedVersions {
 			if v <= 0 {
 				return errors.New("invalid hello version")
 			}
+			supported = supported || v == Version
+		}
+		if !supported {
+			return errors.New("unsupported hello version")
 		}
 	case *TaskCreateParams:
 		if p.Text == "" {

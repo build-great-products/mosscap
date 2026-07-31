@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,58 @@ func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
 	}
 	if before != after {
 		t.Fatalf("doctor/status changed durable counts: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestShutdownLeavesReplacementSocketUntouched(t *testing.T) {
+	root, err := os.MkdirTemp("/home/admin", "mosscap-server-")
+	if err != nil {
+		t.Skipf("cannot create private test tree: %v", err)
+	}
+	defer os.RemoveAll(root)
+	state := filepath.Join(root, "state")
+	for _, p := range []string{state, filepath.Join(state, "tmp")} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := config.Config{Version: 1, Paths: config.Paths{StateDir: state, Database: filepath.Join(state, "ledger.sqlite"), Endpoint: filepath.Join(state, "control.sock"), TmpDir: filepath.Join(state, "tmp")}, Database: config.Database{BusyTimeout: "1s"}, Protocol: config.Protocol{MaxFrameBytes: 65536}}
+	db, err := store.Initialize(context.Background(), c.Paths.Database, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := New(c, "test", nil)
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if info, err := os.Lstat(c.Paths.Endpoint); err == nil && info.Mode()&os.ModeSocket != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("gateway did not bind endpoint")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.Remove(c.Paths.Endpoint); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := net.ListenUnix("unix", &net.UnixAddr{Name: c.Paths.Endpoint, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(c.Paths.Endpoint); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("replacement socket removed or changed: info=%v err=%v", info, err)
 	}
 }
 

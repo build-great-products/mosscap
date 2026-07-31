@@ -70,6 +70,7 @@ func TestFrameRejectsBadLengthsAndUTF8(t *testing.T) {
 }
 func TestStrictDecode(t *testing.T) {
 	cases := [][]byte{
+		[]byte(`{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"x","command":"hello","params":{"supported_versions":[2],"capabilities":[]}}`),
 		[]byte(`{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"x","command":"hello","params":{"supported_versions":[1],"capabilities":[]},"unknown":1}`),
 		[]byte(`{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"x","command":"hello","params":{"supported_versions":[1],"capabilities":[]}} {}`),
 		[]byte(`{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"x","command":"hello","params":null}`),

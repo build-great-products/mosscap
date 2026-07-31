@@ -379,7 +379,7 @@ func (a App) task(override string, args []string) error {
 	state := fs.String("state", "", "")
 	all := fs.Bool("all", false, "")
 	limit := fs.Int("limit", 0, "")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
 		return usage(err.Error())
 	}
 	if *h {
@@ -490,6 +490,28 @@ func (a App) task(override string, args []string) error {
 	}
 	return a.render(out, *j)
 }
+
+// reorderTaskFlags allows the documented TASK-before-flags form while keeping
+// the standard library flag parser for all option validation.
+func reorderTaskFlags(args []string) []string {
+	valueFlags := map[string]bool{"--text": true, "--text-file": true, "--request-id": true, "--note": true, "--state": true, "--limit": true}
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if valueFlags[arg] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return append(flags, positionals...)
+}
+
 func remote(err error) error {
 	var re *client.RemoteError
 	if errors.As(err, &re) {

@@ -266,12 +266,12 @@ func (s *Store) compatible(ctx context.Context) error {
 	if app != ApplicationID || version != SchemaVersion {
 		return fmt.Errorf("%w: application_id or version", ErrIncompatibleSchema)
 	}
+	var migrationVersion, n int
 	var checksum string
-	var n int
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*), coalesce(max(checksum), '') FROM schema_migrations").Scan(&n, &checksum); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*), coalesce(max(version), 0), coalesce(max(checksum), '') FROM schema_migrations").Scan(&n, &migrationVersion, &checksum); err != nil {
 		return fmt.Errorf("%w: migration table: %v", ErrIncompatibleSchema, err)
 	}
-	if n != 1 || checksum != Checksum() {
+	if n != 1 || migrationVersion != SchemaVersion || checksum != Checksum() {
 		return fmt.Errorf("%w: migration history", ErrIncompatibleSchema)
 	}
 	var check string

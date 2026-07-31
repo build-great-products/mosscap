@@ -34,6 +34,8 @@ type Server struct {
 	listener    *net.UnixListener
 	lock        *os.File
 	endpoint    string
+	socketDev   uint64
+	socketIno   uint64
 	wg          sync.WaitGroup
 	closing     chan struct{}
 	closeOnce   sync.Once
@@ -126,11 +128,24 @@ func (s *Server) open(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Closing a UnixListener otherwise unlinks its current pathname, which could
+	// be a socket another process installed after ours was removed.
+	l.SetUnlinkOnClose(false)
 	if err := os.Chmod(c.Paths.Endpoint, 0600); err != nil {
 		_ = l.Close()
 		return err
 	}
-	s.listener, s.endpoint, s.started = l, c.Paths.Endpoint, time.Now()
+	info, err := os.Lstat(c.Paths.Endpoint)
+	if err != nil {
+		_ = l.Close()
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || info.Mode()&os.ModeSocket == 0 {
+		_ = l.Close()
+		return errors.New("gateway endpoint changed while binding")
+	}
+	s.listener, s.endpoint, s.socketDev, s.socketIno, s.started = l, c.Paths.Endpoint, uint64(st.Dev), st.Ino, time.Now()
 	s.Log.Info("gateway listening", "endpoint", s.endpoint)
 	return nil
 }
@@ -168,7 +183,13 @@ func (s *Server) shutdown() {
 		case <-time.After(5 * time.Second):
 		}
 		if s.endpoint != "" {
-			_ = os.Remove(s.endpoint)
+			// Only remove the socket inode this process bound. A replacement must
+			// remain untouched even though the containing directory is private.
+			if info, err := os.Lstat(s.endpoint); err == nil {
+				if st, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode()&os.ModeSocket != 0 && uint64(st.Dev) == s.socketDev && st.Ino == s.socketIno {
+					_ = os.Remove(s.endpoint)
+				}
+			}
 		}
 		if s.store != nil {
 			_, _ = s.store.DB().Exec("PRAGMA wal_checkpoint(PASSIVE)")
