@@ -3,42 +3,40 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+
+	"github.com/stayradiated/mosscap/internal/config"
 )
 
 const (
 	ExitSuccess     = 0
 	ExitUsage       = 2
+	ExitUnsafe      = 5
 	ExitUnsupported = 9
 )
 
-// App is the command dispatcher. Command implementations are added behind this
-// tree in later phases; this phase intentionally performs no configuration or
-// durable-state work.
 type App struct {
 	Out     io.Writer
 	Err     io.Writer
 	Version string
 }
 
-// Run dispatches one Mosscap command and returns its stable process exit code.
 func (a App) Run(ctx context.Context, args []string) int {
 	if err := a.Execute(ctx, args); err != nil {
-		var commandErr *commandError
-		if errors.As(err, &commandErr) {
-			fmt.Fprintln(a.Err, commandErr.Error())
-			return commandErr.code
+		var ce *commandError
+		if errors.As(err, &ce) {
+			fmt.Fprintln(a.Err, ce.Error())
+			return ce.code
 		}
 		fmt.Fprintln(a.Err, err)
-		return ExitUsage
+		return ExitUnsafe
 	}
 	return ExitSuccess
 }
-
-// Execute dispatches one Mosscap command.
 func (a App) Execute(_ context.Context, args []string) error {
 	if a.Out == nil {
 		a.Out = io.Discard
@@ -49,9 +47,9 @@ func (a App) Execute(_ context.Context, args []string) error {
 	if a.Version == "" {
 		a.Version = "devel"
 	}
-
+	var override string
 	var err error
-	args, err = stripGlobalConfig(args)
+	args, override, err = stripGlobalConfig(args)
 	if err != nil {
 		return usage(err.Error())
 	}
@@ -66,12 +64,13 @@ func (a App) Execute(_ context.Context, args []string) error {
 		fmt.Fprintln(a.Out, a.Version)
 		return nil
 	}
-
 	switch args[0] {
-	case "setup", "doctor":
-		return a.leaf(args[0], args[1:])
+	case "setup":
+		return a.setup(override, args[1:])
 	case "config":
-		return a.branch("config", args[1:], []string{"show", "set"})
+		return a.config(override, args[1:])
+	case "doctor":
+		return a.leaf("doctor", args[1:])
 	case "gateway":
 		return a.branch("gateway", args[1:], []string{"run", "status"})
 	case "task":
@@ -80,7 +79,114 @@ func (a App) Execute(_ context.Context, args []string) error {
 		return usage(fmt.Sprintf("unknown command %q", args[0]))
 	}
 }
-
+func (a App) setup(override string, args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", false, "")
+	help := fs.Bool("help", false, "")
+	fs.BoolVar(help, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *help {
+		fmt.Fprintln(a.Out, "Usage: mosscap setup [--json]\n\nCreate or validate private configuration and state directories.")
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return usage("setup accepts no arguments")
+	}
+	loc, err := config.DefaultLocation(override)
+	if err != nil {
+		return err
+	}
+	c, err := config.Setup(loc)
+	if err != nil {
+		return err
+	}
+	return a.render(config.Redact(c), *jsonOut)
+}
+func (a App) config(override string, args []string) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		a.printBranchHelp("config", []string{"show", "set"})
+		return nil
+	}
+	switch args[0] {
+	case "show":
+		return a.configShow(override, args[1:])
+	case "set":
+		return a.configSet(override, args[1:])
+	default:
+		return usage(fmt.Sprintf("unknown config command %q", args[0]))
+	}
+}
+func (a App) configShow(override string, args []string) error {
+	fs := flag.NewFlagSet("config show", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		fmt.Fprintln(a.Out, "Usage: mosscap config show [--json]")
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return usage("config show accepts no arguments")
+	}
+	loc, err := config.DefaultLocation(override)
+	if err != nil {
+		return err
+	}
+	c, err := config.Load(loc)
+	if err != nil {
+		return err
+	}
+	return a.render(config.Redact(c), *j)
+}
+func (a App) configSet(override string, args []string) error {
+	fs := flag.NewFlagSet("config set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		fmt.Fprintln(a.Out, "Usage: mosscap config set KEY VALUE [--json]\n\nChanges are permitted only while the configured gateway is offline.")
+		return nil
+	}
+	if fs.NArg() != 2 {
+		return usage("config set requires KEY and VALUE")
+	}
+	loc, err := config.DefaultLocation(override)
+	if err != nil {
+		return err
+	}
+	c, err := config.Set(loc, fs.Arg(0), fs.Arg(1))
+	if err != nil {
+		return err
+	}
+	return a.render(config.Redact(c), *j)
+}
+func (a App) render(v any, jsonOut bool) error {
+	if jsonOut {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(a.Out, string(b))
+		return nil
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.Out, string(b))
+	return nil
+}
 func (a App) branch(name string, args, children []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		a.printBranchHelp(name, children)
@@ -93,12 +199,11 @@ func (a App) branch(name string, args, children []string) error {
 	}
 	return usage(fmt.Sprintf("unknown %s command %q", name, args[0]))
 }
-
 func (a App) leaf(name string, args []string) error {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	help := flags.Bool("help", false, "show help")
-	flags.BoolVar(help, "h", false, "show help")
+	help := flags.Bool("help", false, "")
+	flags.BoolVar(help, "h", false, "")
 	if err := flags.Parse(args); err != nil {
 		return usage(err.Error())
 	}
@@ -108,23 +213,9 @@ func (a App) leaf(name string, args []string) error {
 	}
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
-
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, `Usage: mosscap [--config PATH] <command> [arguments]
-
-Mosscap is a durable local work coordinator.
-
-Commands:
-  setup       initialize private local state (not yet implemented)
-  config      inspect or change configuration (not yet implemented)
-  gateway     run or inspect the local gateway (not yet implemented)
-  doctor      diagnose local installation health (not yet implemented)
-  task        manage local tasks (not yet implemented)
-
-Run "mosscap <command> --help" for command help.
-`)
+	fmt.Fprint(a.Out, "Usage: mosscap [--config PATH] <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or change configuration\n  gateway     run or inspect the local gateway (not yet implemented)\n  doctor      diagnose local installation health (not yet implemented)\n  task        manage local tasks (not yet implemented)\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
-
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)
 	for _, child := range children {
@@ -132,7 +223,6 @@ func (a App) printBranchHelp(name string, children []string) {
 	}
 	fmt.Fprintf(a.Out, "\nRun \"mosscap %s <command> --help\" for command help.\n", name)
 }
-
 func (a App) printLeafHelp(name string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s [arguments]\n\n", name)
 	fmt.Fprintln(a.Out, "This command is reserved for a later implementation phase.")
@@ -144,27 +234,28 @@ type commandError struct {
 }
 
 func (e *commandError) Error() string { return e.message }
-
-func usage(message string) error       { return &commandError{code: ExitUsage, message: "usage: " + message} }
-func unsupported(message string) error { return &commandError{code: ExitUnsupported, message: message} }
-
-func isHelp(arg string) bool { return arg == "--help" || arg == "-h" || arg == "help" }
-
-// stripGlobalConfig recognizes the global testability/config-location option.
-// Configuration loading is intentionally deferred to the configuration phase.
-func stripGlobalConfig(args []string) ([]string, error) {
+func usage(m string) error            { return &commandError{ExitUsage, "usage: " + m} }
+func unsupported(m string) error      { return &commandError{ExitUnsupported, m} }
+func isHelp(a string) bool            { return a == "--help" || a == "-h" || a == "help" }
+func stripGlobalConfig(args []string) ([]string, string, error) {
+	var path string
 	for len(args) > 0 {
 		switch {
 		case args[0] == "--config":
 			if len(args) < 2 || args[1] == "" {
-				return nil, errors.New("--config requires a path")
+				return nil, "", errors.New("--config requires a path")
 			}
+			path = args[1]
 			args = args[2:]
 		case len(args[0]) > len("--config=") && args[0][:len("--config=")] == "--config=":
+			path = args[0][len("--config="):]
+			if path == "" {
+				return nil, "", errors.New("--config requires a path")
+			}
 			args = args[1:]
 		default:
-			return args, nil
+			return args, path, nil
 		}
 	}
-	return args, nil
+	return args, path, nil
 }

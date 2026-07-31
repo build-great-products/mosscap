@@ -62,11 +62,11 @@ func TestVersionAndUnimplementedCommand(t *testing.T) {
 	if got, want := stdout.String(), "v1.2.3\n"; got != want {
 		t.Fatalf("version = %q, want %q", got, want)
 	}
-	if got := a.Run(context.Background(), []string{"setup"}); got != ExitUnsupported {
-		t.Fatalf("setup exit = %d, want %d", got, ExitUnsupported)
+	if got := a.Run(context.Background(), []string{"gateway", "run"}); got != ExitUnsupported {
+		t.Fatalf("gateway run exit = %d, want %d", got, ExitUnsupported)
 	}
 	if !strings.Contains(stderr.String(), "not implemented") {
-		t.Fatalf("setup stderr = %q", stderr.String())
+		t.Fatalf("gateway stderr = %q", stderr.String())
 	}
 }
 
