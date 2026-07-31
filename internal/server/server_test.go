@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,39 @@ import (
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/store"
 )
+
+func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
+	c := config.Config{Version: 1, Paths: config.Paths{Database: filepath.Join(t.TempDir(), "ledger.sqlite"), Endpoint: "/private/control.sock"}}
+	db, err := store.Initialize(context.Background(), c.Paths.Database, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Create(context.Background(), "status-create", "TOKEN_CANARY_must_not_escape"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Config: c, Version: "test", store: db, endpoint: c.Paths.Endpoint, started: time.Now().Add(-time.Second)}
+	before, err := db.Counts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"status.get", "doctor.run"} {
+		r := s.dispatch(protocol.Request{RequestID: "status-" + command, Command: command})
+		if r.Error != nil {
+			t.Fatalf("%s: %v", command, r.Error)
+		}
+		if strings.Contains(string(r.Result), "TOKEN_CANARY") {
+			t.Fatalf("%s leaked secret canary: %s", command, r.Result)
+		}
+	}
+	after, err := db.Counts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("doctor/status changed durable counts: before=%+v after=%+v", before, after)
+	}
+}
 
 func TestRestartReplaysOneDurableCreate(t *testing.T) {
 	root, err := os.MkdirTemp("/home/admin", "mosscap-server-")

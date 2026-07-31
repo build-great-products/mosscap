@@ -11,12 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/doctor"
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/securepath"
+	"github.com/stayradiated/mosscap/internal/status"
 	"github.com/stayradiated/mosscap/internal/store"
 	"github.com/stayradiated/mosscap/internal/task"
 	"golang.org/x/sys/unix"
@@ -24,16 +27,18 @@ import (
 
 // Server owns one open ledger and its Unix endpoint.
 type Server struct {
-	Config    config.Config
-	Version   string
-	Log       *slog.Logger
-	store     *store.Store
-	listener  *net.UnixListener
-	lock      *os.File
-	endpoint  string
-	wg        sync.WaitGroup
-	closing   chan struct{}
-	closeOnce sync.Once
+	Config      config.Config
+	Version     string
+	Log         *slog.Logger
+	store       *store.Store
+	listener    *net.UnixListener
+	lock        *os.File
+	endpoint    string
+	wg          sync.WaitGroup
+	closing     chan struct{}
+	closeOnce   sync.Once
+	started     time.Time
+	connections atomic.Int32
 }
 
 func New(c config.Config, version string, log *slog.Logger) *Server {
@@ -125,7 +130,7 @@ func (s *Server) open(ctx context.Context) error {
 		_ = l.Close()
 		return err
 	}
-	s.listener, s.endpoint = l, c.Paths.Endpoint
+	s.listener, s.endpoint, s.started = l, c.Paths.Endpoint, time.Now()
 	s.Log.Info("gateway listening", "endpoint", s.endpoint)
 	return nil
 }
@@ -188,6 +193,8 @@ func sameEUID(c *net.UnixConn) bool {
 	return ok
 }
 func (s *Server) handle(c *net.UnixConn) {
+	s.connections.Add(1)
+	defer s.connections.Add(-1)
 	defer c.Close()
 	codec := protocol.NewCodec(c, c, uint32(s.Config.Protocol.MaxFrameBytes))
 	hello := false
@@ -229,6 +236,14 @@ func (s *Server) dispatch(r protocol.Request) protocol.Response {
 	case "hello":
 		resultType = "hello"
 		result = protocol.HelloResult{SelectedVersion: protocol.Version, Capabilities: protocol.ServerCapabilities}
+	case "status.get":
+		resultType = "gateway_status"
+		result, err = s.status(context.Background())
+	case "doctor.run":
+		resultType = "doctor_report"
+		checks := s.store.Doctor(context.Background())
+		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
+		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
 	case "task.create":
 		var p protocol.TaskCreateParams
 		_ = json.Unmarshal(r.Params, &p)
@@ -266,6 +281,32 @@ func (s *Server) dispatch(r protocol.Request) protocol.Response {
 	}
 	return protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: resultType, Result: b}
 }
+func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
+	counts, err := s.store.Counts(ctx)
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	dbSize, err := fileSize(s.Config.Paths.Database)
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	walSize, err := fileSize(s.Config.Paths.Database + "-wal")
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, PID: os.Getpid(), Database: s.Config.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "not_implemented", SlackCapability: "not_implemented", PiCapability: "not_implemented"}, nil
+}
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
 func errorResponse(id, version string, err error) protocol.Response {
 	code, category := "unavailable", "unavailable"
 	switch {

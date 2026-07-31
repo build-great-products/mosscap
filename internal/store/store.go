@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/stayradiated/mosscap/internal/clock"
+	"github.com/stayradiated/mosscap/internal/doctor"
 	"github.com/stayradiated/mosscap/internal/identity"
+	"github.com/stayradiated/mosscap/internal/status"
 	"github.com/stayradiated/mosscap/internal/task"
 	_ "modernc.org/sqlite"
 )
@@ -153,6 +155,56 @@ func open(ctx context.Context, path string, opt Options) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB  { return s.db } // for diagnostics and store tests.
+
+// Counts returns current inventory without task contents.
+func (s *Store) Counts(ctx context.Context) (status.Counts, error) {
+	var c status.Counts
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FILTER (WHERE state='open'), count(*) FILTER (WHERE state='working'), count(*) FILTER (WHERE state='done') FROM tasks").Scan(&c.Open, &c.Working, &c.Done); err != nil {
+		return c, err
+	}
+	err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM mutation_requests").Scan(&c.RequestRecords)
+	return c, err
+}
+
+// Doctor runs read-only verification plus a deliberately rolled-back write
+// probe. The probe only creates a temporary table, then rolls back, and cannot
+// create durable domain rows.
+func (s *Store) Doctor(ctx context.Context) []doctor.Check {
+	checks := make([]doctor.Check, 0, 4)
+	var integrity string
+	if err := s.db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+		checks = append(checks, doctor.Check{Name: "sqlite_integrity", Status: doctor.Fail, Message: "SQLite integrity check failed", Action: "restore a known-good ledger; do not auto-repair"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "sqlite_integrity", Status: doctor.Pass, Message: "SQLite integrity check passed"})
+	}
+	if err := s.pragmas(ctx); err != nil {
+		checks = append(checks, doctor.Check{Name: "sqlite_pragmas", Status: doctor.Fail, Message: "SQLite required pragmas are not active", Action: "stop the gateway and inspect the ledger filesystem"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "sqlite_pragmas", Status: doctor.Pass, Message: "SQLite required pragmas are active"})
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err == nil {
+		_, err = tx.ExecContext(ctx, "CREATE TEMP TABLE mosscap_doctor_probe (value INTEGER)")
+		if err == nil {
+			_, err = tx.ExecContext(ctx, "INSERT INTO mosscap_doctor_probe(value) VALUES(1)")
+		}
+		rollErr := tx.Rollback()
+		if err == nil {
+			err = rollErr
+		}
+	}
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "sqlite_rollback_write", Status: doctor.Fail, Message: "SQLite rolled-back write probe failed", Action: "check free space and ledger write permissions"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "sqlite_rollback_write", Status: doctor.Pass, Message: "SQLite rolled-back write probe passed"})
+	}
+	if err := s.compatible(ctx); err != nil {
+		checks = append(checks, doctor.Check{Name: "schema_compatibility", Status: doctor.Fail, Message: "ledger schema is incompatible", Action: "run the matching Mosscap version or restore a compatible ledger"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "schema_compatibility", Status: doctor.Pass, Message: "ledger schema is compatible"})
+	}
+	return checks
+}
 
 func (s *Store) pragmas(ctx context.Context) error {
 	for i := 0; i < 4; i++ {

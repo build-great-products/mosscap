@@ -16,8 +16,10 @@ import (
 
 	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/doctor"
 	"github.com/stayradiated/mosscap/internal/identity"
 	"github.com/stayradiated/mosscap/internal/protocol"
+	"github.com/stayradiated/mosscap/internal/securepath"
 	"github.com/stayradiated/mosscap/internal/server"
 )
 
@@ -82,7 +84,7 @@ func (a App) Execute(_ context.Context, args []string) error {
 	case "config":
 		return a.config(override, args[1:])
 	case "doctor":
-		return a.leaf("doctor", args[1:])
+		return a.doctorCommand(override, args[1:])
 	case "gateway":
 		return a.gateway(override, args[1:])
 	case "task":
@@ -189,11 +191,7 @@ func (a App) gateway(override string, args []string) error {
 		return nil
 	}
 	if args[0] == "status" {
-		if len(args) == 2 && isHelp(args[1]) {
-			a.printLeafHelp("gateway status")
-			return nil
-		}
-		return unsupported("gateway status is not implemented in this build")
+		return a.gatewayStatus(override, args[1:])
 	}
 	if args[0] != "run" {
 		return usage(fmt.Sprintf("unknown gateway command %q", args[0]))
@@ -226,6 +224,138 @@ func (a App) gateway(override string, args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return server.New(c, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
+}
+
+func (a App) gatewayStatus(override string, args []string) error {
+	fs := flag.NewFlagSet("gateway status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		fmt.Fprintln(a.Out, "Usage: mosscap gateway status [--json]")
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return usage("gateway status accepts no arguments")
+	}
+	loc, err := config.DefaultLocation(override)
+	if err != nil {
+		return err
+	}
+	c, err := config.Load(loc)
+	if err != nil {
+		return err
+	}
+	result, err := a.gatewayCall(c, "status.get", "req_status", nil)
+	if err != nil {
+		return err
+	}
+	return a.render(result, *j)
+}
+
+func (a App) doctorCommand(override string, args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		fmt.Fprintln(a.Out, "Usage: mosscap doctor [--json]\n\nRun non-destructive local and gateway diagnostics.")
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return usage("doctor accepts no arguments")
+	}
+	loc, err := config.DefaultLocation(override)
+	if err != nil {
+		return err
+	}
+	c, err := config.Load(loc)
+	if err != nil {
+		return err
+	}
+	checks := localDoctorChecks(loc, c)
+	remoteResult, remoteErr := a.gatewayCall(c, "doctor.run", "req_doctor", nil)
+	if remoteErr != nil {
+		checks = append(checks, doctor.Check{Name: "gateway_diagnostics", Status: doctor.Skipped, Message: "gateway diagnostics unavailable", Action: "start mosscap gateway run"})
+		report := doctor.Report{Overall: doctor.Warn, Checks: checks}
+		if err := a.render(report, *j); err != nil {
+			return err
+		}
+		return &commandError{ExitUnavailable, "gateway diagnostics unavailable"}
+	}
+	b, _ := json.Marshal(remoteResult)
+	var remote doctor.Report
+	if err := json.Unmarshal(b, &remote); err != nil {
+		return err
+	}
+	checks = append(checks, remote.Checks...)
+	return a.render(doctor.Report{Overall: doctor.Overall(checks), Checks: checks}, *j)
+}
+
+func (a App) gatewayCall(c config.Config, command, requestID string, params any) (any, error) {
+	cl, err := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.Protocol.MaxFrameBytes))
+	if err != nil {
+		return nil, &commandError{ExitUnavailable, err.Error()}
+	}
+	defer cl.Close()
+	if _, err = cl.Hello(context.Background(), "req_hello_"+strings.ReplaceAll(command, ".", "_"), "cli", a.Version, nil); err != nil {
+		return nil, remote(err)
+	}
+	if params == nil {
+		params = protocol.EmptyParams{}
+	}
+	b, _ := json.Marshal(params)
+	response, err := cl.Call(context.Background(), protocol.Request{ProtocolVersion: protocol.Version, RequestID: requestID, ClientKind: "cli", ClientVersion: a.Version, Command: command, Params: b})
+	if err != nil {
+		return nil, remote(err)
+	}
+	if response.Error != nil {
+		return nil, remote(&client.RemoteError{ProtocolError: *response.Error})
+	}
+	var out any
+	if err := json.Unmarshal(response.Result, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+func localDoctorChecks(loc config.Location, c config.Config) []doctor.Check {
+	checks := []doctor.Check{}
+	if err := config.Validate(c); err != nil {
+		checks = append(checks, doctor.Check{Name: "config", Status: doctor.Fail, Message: "configuration is invalid", Action: "fix config.toml"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "config", Status: doctor.Pass, Message: "configuration is valid"})
+	}
+	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
+		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "state directory is not private and safe", Action: "run mosscap setup or repair state directory ownership and mode"})
+	} else if err := securepath.CheckDir(c.Paths.TmpDir); err != nil {
+		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "temporary directory is not private and safe", Action: "repair temporary directory ownership and mode"})
+	} else if err := securepath.CheckFile(c.Paths.Database); err != nil {
+		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Fail, Message: "database is not private and safe", Action: "repair database ownership and mode"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Pass, Message: "state paths are private and safe"})
+	}
+	if _, err := os.Stat(c.Paths.StateDir); err != nil {
+		checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Warn, Message: "state directory is unavailable", Action: "run mosscap setup or restore the state directory"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Pass, Message: "state directory is available"})
+	}
+	// Redaction is structural: only presence booleans and a marker are exposed.
+	view := config.Redact(c)
+	if view.Slack.SecretsFile == "<configured>" || view.Slack.SecretsFile == "<unset>" {
+		checks = append(checks, doctor.Check{Name: "secret_redaction", Status: doctor.Pass, Message: "diagnostics redact configured secrets"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "secret_redaction", Status: doctor.Fail, Message: "secret redaction is unsafe", Action: "repair configuration"})
+	}
+	_ = loc
+	return checks
 }
 
 func (a App) task(override string, args []string) error {
@@ -427,7 +557,7 @@ func (a App) leaf(name string, args []string) error {
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, "Usage: mosscap [--config PATH] <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or change configuration\n  gateway     run or inspect the local gateway\n  doctor      diagnose local installation health (not yet implemented)\n  task        manage local tasks\n\nRun \"mosscap <command> --help\" for command help.\n")
+	fmt.Fprint(a.Out, "Usage: mosscap [--config PATH] <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or change configuration\n  gateway     run or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  task        manage local tasks\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)
