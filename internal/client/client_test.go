@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"testing"
 
@@ -49,6 +50,31 @@ func TestHelloThenCall(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestHelloReturnsTypedUnsupportedVersion(t *testing.T) {
+	server, conn := net.Pipe()
+	defer server.Close()
+	defer conn.Close()
+	c := &Client{conn: conn, codec: protocol.NewCodec(conn, conn, 1024)}
+	go func() {
+		codec := protocol.NewCodec(server, server, 1024)
+		payload, err := codec.ReadFrame()
+		if err != nil {
+			return
+		}
+		req, err := protocol.DecodeRequest(payload)
+		if err != nil {
+			return
+		}
+		out, _ := protocol.EncodeResponse(protocol.NewErrorResponse(req.RequestID, "test", "unsupported_protocol_version", "unsupported", "protocol version is unsupported", false))
+		_ = codec.WriteFrame(out)
+	}()
+	_, err := c.Hello(context.Background(), "req_hello", "cli", "test", nil)
+	var remote *RemoteError
+	if !errors.As(err, &remote) || remote.ProtocolError.Category != "unsupported" {
+		t.Fatalf("Hello error = %#v", err)
+	}
+}
+
 func request(command, id string) protocol.Request {
 	return protocol.Request{ProtocolVersion: protocol.Version, RequestID: id, ClientKind: "cli", ClientVersion: "test", Command: command, Params: []byte(`{}`)}
 }

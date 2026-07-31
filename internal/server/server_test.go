@@ -49,6 +49,36 @@ func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
 	}
 }
 
+func TestGatewayStartupRejectsReplacedIntermediateComponent(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	nested := filepath.Join(state, "nested")
+	tmp := filepath.Join(state, "tmp")
+	for _, p := range []string{nested, tmp} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := config.Config{Version: 1, Paths: config.Paths{StateDir: state, Database: filepath.Join(nested, "ledger.sqlite"), Endpoint: filepath.Join(nested, "control.sock"), TmpDir: tmp}, Database: config.Database{BusyTimeout: "1s"}, Protocol: config.Protocol{MaxFrameBytes: 65536}}
+	db, err := store.Initialize(context.Background(), c.Paths.Database, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup := nested + ".original"
+	if err := os.Rename(nested, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(backup, nested); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(c, "test", nil).Serve(context.Background()); err == nil {
+		t.Fatal("gateway accepted a replaced intermediate symlink")
+	}
+}
+
 func TestShutdownLeavesReplacementSocketUntouched(t *testing.T) {
 	root, err := os.MkdirTemp("/home/admin", "mosscap-server-")
 	if err != nil {
@@ -98,6 +128,57 @@ func TestShutdownLeavesReplacementSocketUntouched(t *testing.T) {
 	}
 	if info, err := os.Lstat(c.Paths.Endpoint); err != nil || info.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("replacement socket removed or changed: info=%v err=%v", info, err)
+	}
+}
+
+func TestUnsupportedProtocolGetsOneTypedResponseThenClose(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	tmp := filepath.Join(state, "tmp")
+	if err := os.MkdirAll(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	c := config.Config{Version: 1, Paths: config.Paths{StateDir: state, Database: filepath.Join(state, "ledger.sqlite"), Endpoint: filepath.Join(state, "control.sock"), TmpDir: tmp}, Database: config.Database{BusyTimeout: "1s"}, Protocol: config.Protocol{MaxFrameBytes: 65536}}
+	db, err := store.Initialize(context.Background(), c.Paths.Database, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- New(c, "test", nil).Serve(ctx) }()
+	var conn net.Conn
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		conn, err = net.Dial("unix", c.Paths.Endpoint)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+	}
+	defer conn.Close()
+	codec := protocol.NewCodec(conn, conn, 65536)
+	if err := codec.WriteFrame([]byte(`{"protocol_version":2,"request_id":"req_old","client_kind":"cli","client_version":"test","command":"hello","params":{"supported_versions":[2],"capabilities":[]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := codec.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := protocol.DecodeResponse(payload)
+	if err != nil || response.Error == nil || response.Error.Code != "unsupported_protocol_version" || response.Error.Category != "unsupported" {
+		t.Fatalf("response = %#v, %v", response, err)
+	}
+	if _, err := codec.ReadFrame(); err == nil {
+		t.Fatal("server kept incompatible connection open")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

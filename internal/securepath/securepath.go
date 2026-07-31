@@ -4,6 +4,7 @@ package securepath
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -57,6 +58,10 @@ func CheckFile(path string) error {
 	if err != nil {
 		return err
 	}
+	return checkFileInfo(path, info, st)
+}
+
+func checkFileInfo(path string, info fs.FileInfo, st *syscall.Stat_t) error {
 	if err := checkOwnerMode(path, info, st, 0600, false); err != nil {
 		return err
 	}
@@ -67,6 +72,95 @@ func CheckFile(path string) error {
 		return fmt.Errorf("unsafe path %q: hard-linked file", path)
 	}
 	return nil
+}
+
+// OpenFileNoFollow opens path without following a final symlink. Callers must
+// subsequently use CheckOpenFile to verify that the pathname was not replaced.
+func OpenFileNoFollow(path string, flag int, perm fs.FileMode) (*os.File, error) {
+	fd, err := syscall.Open(path, flag|syscall.O_NOFOLLOW, uint32(perm))
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+// CheckOpenFile verifies an already-open private file and confirms that path
+// still names that same inode after it was opened.
+func CheckOpenFile(path string, f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot verify ownership of %q", path)
+	}
+	if err := checkFileInfo(path, info, st); err != nil {
+		return err
+	}
+	current, currentST, err := stat(path)
+	if err != nil {
+		return err
+	}
+	if uint64(st.Dev) != uint64(currentST.Dev) || st.Ino != currentST.Ino || current.Mode() != info.Mode() {
+		return fmt.Errorf("unsafe path %q: changed while opening", path)
+	}
+	return nil
+}
+
+// ReadRegularFile reads at most limit bytes from a non-symlink regular file.
+// It rejects pathname replacement and size changes during the read.
+func ReadRegularFile(path string, limit int64) ([]byte, error) {
+	return readRegularFile(path, limit, nil)
+}
+
+// readRegularFile has a test seam at the post-read revalidation boundary.
+func readRegularFile(path string, limit int64, afterRead func()) ([]byte, error) {
+	if limit < 0 {
+		return nil, errors.New("invalid file size limit")
+	}
+	f, err := OpenFileNoFollow(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	before, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	beforeST, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("unsafe input file %q: not a regular file", path)
+	}
+	if before.Size() > limit {
+		return nil, fmt.Errorf("input file %q exceeds size limit", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("input file %q exceeds size limit", path)
+	}
+	if afterRead != nil {
+		afterRead()
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	afterST, ok := after.Sys().(*syscall.Stat_t)
+	if !ok || beforeST.Dev != afterST.Dev || beforeST.Ino != afterST.Ino || before.Size() != after.Size() || int64(len(b)) != after.Size() {
+		return nil, fmt.Errorf("unsafe input file %q: changed while reading", path)
+	}
+	current, currentST, err := stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(beforeST.Dev) != uint64(currentST.Dev) || beforeST.Ino != currentST.Ino || current.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("unsafe input file %q: replaced while reading", path)
+	}
+	return b, nil
 }
 
 // CheckExistingComponents rejects symlinks and group/world writable components

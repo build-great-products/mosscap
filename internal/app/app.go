@@ -21,6 +21,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/securepath"
 	"github.com/stayradiated/mosscap/internal/server"
+	"github.com/stayradiated/mosscap/internal/store"
 )
 
 const (
@@ -47,6 +48,9 @@ func (a App) Run(ctx context.Context, args []string) int {
 			return ce.code
 		}
 		fmt.Fprintln(a.Err, err)
+		if errors.Is(err, store.ErrIncompatibleSchema) {
+			return ExitUnsupported
+		}
 		return ExitUnsafe
 	}
 	return ExitSuccess
@@ -388,14 +392,23 @@ func (a App) task(override string, args []string) error {
 	}
 	var params any
 	mutation := cmd == "create" || cmd == "update" || cmd == "open" || cmd == "working" || cmd == "done"
+	var loaded config.Config
 	readText := func() (string, error) {
 		if (*text == "") == (*textFile == "") {
 			return "", usage("exactly one of --text or --text-file is required")
 		}
 		if *textFile != "" {
-			b, e := os.ReadFile(*textFile)
+			loc, e := config.DefaultLocation(override)
 			if e != nil {
 				return "", e
+			}
+			loaded, e = config.Load(loc)
+			if e != nil {
+				return "", e
+			}
+			b, e := securepath.ReadRegularFile(*textFile, int64(loaded.Protocol.MaxFrameBytes))
+			if e != nil {
+				return "", fmt.Errorf("--text-file: %w", e)
 			}
 			return string(b), nil
 		}
@@ -457,13 +470,27 @@ func (a App) task(override string, args []string) error {
 	if !mutation {
 		*requestID = "req_read" + strings.ReplaceAll(cmd, ".", "_")
 	}
-	loc, e := config.DefaultLocation(override)
-	if e != nil {
-		return e
+	c := loaded
+	if c.Paths.Endpoint == "" {
+		loc, e := config.DefaultLocation(override)
+		if e != nil {
+			return e
+		}
+		c, e = config.Load(loc)
+		if e != nil {
+			return e
+		}
 	}
-	c, e := config.Load(loc)
-	if e != nil {
-		return e
+	b, _ := json.Marshal(params)
+	request := protocol.Request{ProtocolVersion: protocol.Version, RequestID: *requestID, ClientKind: "cli", ClientVersion: a.Version, Command: map[string]string{"show": "task.get", "list": "task.list", "create": "task.create", "update": "task.update", "open": "task.transition", "working": "task.transition", "done": "task.transition"}[cmd], Params: b}
+	if *textFile != "" {
+		encoded, encodeErr := protocol.EncodeRequest(request)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if len(encoded) > c.Protocol.MaxFrameBytes {
+			return usage("--text-file exceeds the protocol frame limit")
+		}
 	}
 	cl, e := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.Protocol.MaxFrameBytes))
 	if e != nil {
@@ -473,8 +500,7 @@ func (a App) task(override string, args []string) error {
 	if _, e = cl.Hello(context.Background(), "req_hello_"+cmd, "cli", a.Version, nil); e != nil {
 		return remote(e)
 	}
-	b, _ := json.Marshal(params)
-	response, e := cl.Call(context.Background(), protocol.Request{ProtocolVersion: protocol.Version, RequestID: *requestID, ClientKind: "cli", ClientVersion: a.Version, Command: map[string]string{"show": "task.get", "list": "task.list", "create": "task.create", "update": "task.update", "open": "task.transition", "working": "task.transition", "done": "task.transition"}[cmd], Params: b})
+	response, e := cl.Call(context.Background(), request)
 	if e != nil {
 		return remote(e)
 	}

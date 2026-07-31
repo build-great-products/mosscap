@@ -3,8 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/stayradiated/mosscap/internal/client"
+	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
 func TestHelpAtEveryCommandNode(t *testing.T) {
@@ -67,6 +71,14 @@ func TestVersionAndUnimplementedCommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not implemented") {
 		t.Fatalf("gateway stderr = %q", stderr.String())
+	}
+}
+
+func TestUnsupportedRemoteMapsToExit9(t *testing.T) {
+	err := remote(&client.RemoteError{ProtocolError: protocol.Error{Code: "unsupported_protocol_version", Category: "unsupported", Message: "protocol version is unsupported"}})
+	var command *commandError
+	if !errors.As(err, &command) || command.code != ExitUnsupported {
+		t.Fatalf("remote error = %#v", err)
 	}
 }
 

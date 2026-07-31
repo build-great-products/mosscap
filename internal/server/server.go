@@ -87,17 +87,11 @@ func (s *Server) open(ctx context.Context) error {
 	if err := config.Validate(c); err != nil {
 		return err
 	}
-	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
-		return fmt.Errorf("state directory: %w", err)
-	}
-	if err := securepath.CheckDir(c.Paths.TmpDir); err != nil {
-		return fmt.Errorf("temporary directory: %w", err)
-	}
-	if err := securepath.CheckFile(c.Paths.Database); err != nil {
-		return fmt.Errorf("database: %w", err)
+	if err := s.validateStartupPaths(c); err != nil {
+		return err
 	}
 	lockPath := filepath.Join(c.Paths.StateDir, "gateway.lock")
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := securepath.OpenFileNoFollow(lockPath, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
@@ -105,7 +99,7 @@ func (s *Server) open(ctx context.Context) error {
 		_ = f.Close()
 		return err
 	}
-	if err := securepath.CheckFile(lockPath); err != nil {
+	if err := securepath.CheckOpenFile(lockPath, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -117,6 +111,12 @@ func (s *Server) open(ctx context.Context) error {
 	busy, _ := time.ParseDuration(c.Database.BusyTimeout)
 	db, err := store.Open(ctx, c.Paths.Database, store.Options{BusyTimeout: busy})
 	if err != nil {
+		return err
+	}
+	// SQLite opens by pathname, so repeat the complete check after open to
+	// detect a replacement between validation and database initialization.
+	if err := s.validateStartupPaths(c); err != nil {
+		_ = db.Close()
 		return err
 	}
 	s.store = db
@@ -149,6 +149,39 @@ func (s *Server) open(ctx context.Context) error {
 	s.Log.Info("gateway listening", "endpoint", s.endpoint)
 	return nil
 }
+
+// validateStartupPaths repeats setup's path checks immediately before and
+// after opening state. This closes the configuration-to-gateway race.
+func (s *Server) validateStartupPaths(c config.Config) error {
+	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
+		return fmt.Errorf("state directory: %w", err)
+	}
+	for _, path := range []string{c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir} {
+		if err := securepath.CheckExistingComponents(c.Paths.StateDir, path); err != nil {
+			return fmt.Errorf("state path: %w", err)
+		}
+	}
+	if err := securepath.CheckDir(c.Paths.TmpDir); err != nil {
+		return fmt.Errorf("temporary directory: %w", err)
+	}
+	if err := securepath.CheckFile(c.Paths.Database); err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	if c.Slack.SecretsFile != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("secrets file home: %w", err)
+		}
+		if err := securepath.CheckExistingComponents(home, c.Slack.SecretsFile); err != nil {
+			return fmt.Errorf("slack.secrets_file: %w", err)
+		}
+		if err := securepath.CheckFile(c.Slack.SecretsFile); err != nil {
+			return fmt.Errorf("slack.secrets_file: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *Server) prepareEndpoint(endpoint string) error {
 	info, err := os.Lstat(endpoint)
 	if errors.Is(err, os.ErrNotExist) {
@@ -227,6 +260,15 @@ func (s *Server) handle(c *net.UnixConn) {
 		}
 		r, err := protocol.DecodeRequest(payload)
 		if err != nil {
+			// A version mismatch is the one malformed-request case for which the
+			// peer needs a typed response. It can then map the incompatibility to
+			// exit 9 rather than treating it as a transport outage.
+			if r.ProtocolVersion != protocol.Version {
+				response := protocol.NewErrorResponse(r.RequestID, s.Version, "unsupported_protocol_version", "unsupported", "protocol version is unsupported", false)
+				if out, encodeErr := protocol.EncodeResponse(response); encodeErr == nil {
+					_ = codec.WriteFrame(out)
+				}
+			}
 			return
 		}
 		var response protocol.Response
