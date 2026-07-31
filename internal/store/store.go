@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,8 +177,7 @@ func open(ctx context.Context, path string, opt Options) (*Store, error) {
 	if opt.IDs.IsZero() {
 		opt.IDs = identity.NewGenerator(nil)
 	}
-	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=foreign_keys(ON)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(" + fmt.Sprint(opt.BusyTimeout.Milliseconds()) + ")"
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", sqliteDSN(path, opt.BusyTimeout))
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +190,20 @@ func open(ctx context.Context, path string, opt Options) (*Store, error) {
 	}
 	return s, nil
 }
+
+// sqliteDSN encodes path as a URI path, so URI delimiters in a configured
+// filesystem name cannot alter SQLite's connection options.
+func sqliteDSN(path string, busyTimeout time.Duration) string {
+	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	q := url.Values{}
+	q.Add("_pragma", "foreign_keys(ON)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "synchronous(NORMAL)")
+	q.Add("_pragma", "busy_timeout("+fmt.Sprint(busyTimeout.Milliseconds())+")")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB  { return s.db } // for diagnostics and store tests.
 

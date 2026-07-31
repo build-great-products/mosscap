@@ -43,6 +43,33 @@ func TestInitializeAndOpenCompatibility(t *testing.T) {
 		t.Fatal("foreign database opened")
 	}
 }
+func TestDatabasePathWithSQLiteQuerySyntaxIsLiteral(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger?mode=memory")
+	s, err := Initialize(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, "literal-path", "durable"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		t.Fatalf("literal database path = %v, %v", info, err)
+	}
+	s, err = Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatalf("reopen literal database: %v", err)
+	}
+	defer s.Close()
+	tasks, _, err := s.List(ctx, nil, true, 10, "")
+	if err != nil || len(tasks) != 1 || tasks[0].Text != "durable" {
+		t.Fatalf("literal database contents = %#v, %v", tasks, err)
+	}
+}
+
 func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")

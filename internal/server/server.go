@@ -28,6 +28,7 @@ import (
 // Server owns one open ledger and its Unix endpoint.
 type Server struct {
 	Config      config.Config
+	ConfigPath  string
 	Version     string
 	Log         *slog.Logger
 	store       *store.Store
@@ -48,14 +49,14 @@ type Server struct {
 	connections atomic.Int32
 }
 
-func New(c config.Config, version string, log *slog.Logger) *Server {
+func New(c config.Config, configPath, version string, log *slog.Logger) *Server {
 	if version == "" {
 		version = "devel"
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{Config: c, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
+	return &Server{Config: c, ConfigPath: configPath, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
 }
 
 // Serve validates state, obtains the singleton lock, and runs until ctx is cancelled.
@@ -176,6 +177,12 @@ func (s *Server) open(ctx context.Context) error {
 // validateStartupPaths repeats setup's path checks immediately before and
 // after opening state. This closes the configuration-to-gateway race.
 func (s *Server) validateStartupPaths(c config.Config) error {
+	if err := securepath.CheckAbsoluteComponents(s.ConfigPath); err != nil {
+		return fmt.Errorf("config path: %w", err)
+	}
+	if err := securepath.CheckFile(s.ConfigPath); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	for _, path := range []string{c.Paths.StateDir, c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir} {
 		if err := securepath.CheckAbsoluteComponents(path); err != nil {
 			return fmt.Errorf("state path: %w", err)

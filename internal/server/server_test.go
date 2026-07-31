@@ -16,6 +16,27 @@ import (
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
+func newTestServer(t *testing.T, c config.Config) *Server {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, ".mosscap-server-config-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(path, []byte("test config"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return New(c, path, "test", nil)
+}
+
 func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
 	c := config.Config{Version: 1, Paths: config.Paths{Database: filepath.Join(t.TempDir(), "ledger.sqlite"), Endpoint: "/private/control.sock"}}
 	db, err := store.Initialize(context.Background(), c.Paths.Database, store.Options{})
@@ -49,6 +70,62 @@ func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
 	}
 }
 
+func TestGatewayStartupRejectsUnsafeConfigAncestors(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		unsafe func(root, configDir string) error
+	}{
+		{"group_writable", func(root, _ string) error { return os.Chmod(root, 0770) }},
+		{"symlink", func(_, configDir string) error {
+			real := configDir + ".real"
+			if err := os.Rename(configDir, real); err != nil {
+				return err
+			}
+			return os.Symlink(real, configDir)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := os.MkdirTemp(home, ".mosscap-config-ancestor-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(root)
+			if err := os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			state, configDir := filepath.Join(root, "state"), filepath.Join(root, "config")
+			if err := os.MkdirAll(filepath.Join(state, "tmp"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(configDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			c := config.Config{Version: 1, Paths: config.Paths{StateDir: state, Database: filepath.Join(state, "ledger.sqlite"), Endpoint: filepath.Join(state, "control.sock"), TmpDir: filepath.Join(state, "tmp")}, Database: config.Database{BusyTimeout: "1s"}, Protocol: config.Protocol{MaxFrameBytes: 65536}}
+			db, err := store.Initialize(context.Background(), c.Paths.Database, store.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(configDir, "config.toml")
+			if err := os.WriteFile(configPath, []byte("test config"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.unsafe(root, configDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := New(c, configPath, "test", nil).Serve(context.Background()); err == nil {
+				t.Fatal("gateway accepted unsafe config ancestor")
+			}
+		})
+	}
+}
+
 func TestGatewayStartupRejectsReplacedIntermediateComponent(t *testing.T) {
 	root := t.TempDir()
 	state := filepath.Join(root, "state")
@@ -74,7 +151,7 @@ func TestGatewayStartupRejectsReplacedIntermediateComponent(t *testing.T) {
 	if err := os.Symlink(backup, nested); err != nil {
 		t.Fatal(err)
 	}
-	if err := New(c, "test", nil).Serve(context.Background()); err == nil {
+	if err := newTestServer(t, c).Serve(context.Background()); err == nil {
 		t.Fatal("gateway accepted a replaced intermediate symlink")
 	}
 }
@@ -100,7 +177,7 @@ func TestShutdownLeavesReplacementSocketUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := New(c, "test", nil)
+	s := newTestServer(t, c)
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx) }()
 	deadline := time.Now().Add(3 * time.Second)
@@ -153,7 +230,7 @@ func TestUnsupportedProtocolGetsOneTypedResponseThenClose(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- New(c, "test", nil).Serve(ctx) }()
+	go func() { done <- newTestServer(t, c).Serve(ctx) }()
 	var conn net.Conn
 	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		conn, err = net.Dial("unix", c.Paths.Endpoint)
@@ -236,7 +313,7 @@ func TestRestartReplaysOneDurableCreate(t *testing.T) {
 	start := func() (context.CancelFunc, chan error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- New(c, "test", nil).Serve(ctx) }()
+		go func() { done <- newTestServer(t, c).Serve(ctx) }()
 		deadline := time.Now().Add(3 * time.Second)
 		for {
 			cl, e := client.Dial(context.Background(), c.Paths.Endpoint, 65536)

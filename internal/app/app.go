@@ -227,7 +227,7 @@ func (a App) gateway(override string, args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return server.New(c, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
+	return server.New(c, loc.Path, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
 }
 
 func (a App) gatewayStatus(override string, args []string) error {
