@@ -204,6 +204,7 @@ type Stream struct {
 	mu           sync.Mutex
 	receives     []ReceiveStep
 	receiveCalls int
+	receiving    bool
 	closeCalls   int
 	closed       bool
 	done         chan struct{}
@@ -229,8 +230,19 @@ func (s *Stream) Receive(ctx context.Context) (slackapi.Envelope, error) {
 		s.mu.Unlock()
 		return slackapi.Envelope{}, io.ErrClosedPipe
 	}
+	if s.receiving {
+		s.mu.Unlock()
+		return slackapi.Envelope{}, slackapi.ErrConcurrentReceive
+	}
+	s.receiving = true
 	s.receiveCalls++
 	s.notifyLocked()
+	defer func() {
+		s.mu.Lock()
+		s.receiving = false
+		s.notifyLocked()
+		s.mu.Unlock()
+	}()
 	if len(s.receives) == 0 {
 		done := s.done
 		s.mu.Unlock()
