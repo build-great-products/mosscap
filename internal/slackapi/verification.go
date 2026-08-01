@@ -7,7 +7,10 @@ import "context"
 // required bot scopes are granted, and that configured trusted identities are
 // active humans in that workspace. Returned errors contain no supplied IDs.
 func Verify(ctx context.Context, web Web, request VerificationRequest) (VerificationResult, error) {
-	if web == nil || ValidateTeamID(request.TeamID) != nil || ValidateUserID(request.BotUserID) != nil || ValidateChannelID(request.ChannelID) != nil {
+	if web == nil || ValidateChannelID(request.ChannelID) != nil {
+		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
+	}
+	if (request.TeamID != "" && ValidateTeamID(request.TeamID) != nil) || (request.BotUserID != "" && ValidateUserID(request.BotUserID) != nil) {
 		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
 	}
 	if len(request.TrustedUserIDs) > MaxFiles {
@@ -28,18 +31,23 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 	if err != nil {
 		return VerificationResult{}, err
 	}
-	if identity.TeamID != request.TeamID {
+	teamID := identity.TeamID
+	botUserID := identity.BotUserID
+	if request.TeamID != "" && identity.TeamID != request.TeamID {
 		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticTeamMismatch, "", nil)
 	}
-	if identity.BotUserID != request.BotUserID {
+	if request.BotUserID != "" && identity.BotUserID != request.BotUserID {
 		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticBotMismatch, "", nil)
 	}
+	if ValidateTeamID(teamID) != nil || ValidateUserID(botUserID) != nil {
+		return VerificationResult{}, NewExternalError(ReasonInvalidResponse, DiagnosticMalformedResponse, "", nil)
+	}
 
-	team, err := web.Team(ctx, request.TeamID)
+	team, err := web.Team(ctx, teamID)
 	if err != nil {
 		return VerificationResult{}, err
 	}
-	if team.ID != request.TeamID {
+	if team.ID != teamID {
 		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticTeamMismatch, "", nil)
 	}
 
@@ -47,7 +55,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 	if err != nil {
 		return VerificationResult{}, err
 	}
-	if channel.ID != request.ChannelID || channel.TeamID != request.TeamID {
+	if channel.ID != request.ChannelID || channel.TeamID != teamID {
 		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticTeamMismatch, "", nil)
 	}
 	if err := VerifyChannel(channel); err != nil {
@@ -78,7 +86,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 		if err != nil {
 			return VerificationResult{}, err
 		}
-		if user.ID != userID || user.TeamID != request.TeamID || user.Bot || user.Deactivated {
+		if user.ID != userID || user.TeamID != teamID || user.Bot || user.Deactivated {
 			return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticUserNotFound, "", nil)
 		}
 		result.Users = append(result.Users, user)

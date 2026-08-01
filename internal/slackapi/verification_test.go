@@ -18,7 +18,7 @@ func TestVerifyProvesCompleteRuntimeAuthority(t *testing.T) {
 		fake.Step{Operation: fake.User, Request: "U012USR", Result: slackapi.User{ID: "U012USR", TeamID: "T012ABC"}},
 	)
 	result, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{
-		TeamID: "T012ABC", BotUserID: "U012BOT", ChannelID: "C012ABC", TrustedUserIDs: []string{"U012USR"},
+		ChannelID: "C012ABC", TrustedUserIDs: []string{"U012USR"},
 	})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
