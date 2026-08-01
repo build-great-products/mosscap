@@ -66,6 +66,16 @@ func TestStartFailureLeavesNoSnapshotAndSecretsSafe(t *testing.T) {
 	}
 	_ = r.Close()
 }
+func TestSafeErrorRendersMissingScopesRemediation(t *testing.T) {
+	err := safeError(slackapi.NewMissingScopesError([]slackapi.Scope{
+		slackapi.ScopeUsersRead, slackapi.ScopeChannelsHistory, slackapi.ScopeAppMentionsRead,
+	}))
+	const want = "Slack app is missing required bot OAuth scopes: app_mentions:read, channels:history, users:read. Add them in Slack app OAuth & Permissions, reinstall/re-authorize the app, then restart or gateway reload."
+	if err == nil || err.Error() != want {
+		t.Fatalf("safeError = %q, want %q", err, want)
+	}
+}
+
 func TestStartGatesEnvelopeHandlingUntilActivation(t *testing.T) {
 	c := validConfig(t)
 	ack, ackRecorder := fake.NewAckRecorder(nil)

@@ -2,6 +2,8 @@ package slackapi_test
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stayradiated/mosscap/internal/slackapi"
@@ -73,6 +75,49 @@ func TestVerifyRejectsIdentityScopeAndUserMismatch(t *testing.T) {
 			failure := slackapi.Classify(err, slackapi.FailureRead)
 			if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != test.code {
 				t.Fatalf("failure = %#v (%v)", failure, err)
+			}
+		})
+	}
+}
+
+func TestVerifyReportsSortedRequiredMissingScopesSafely(t *testing.T) {
+	tests := []struct {
+		name    string
+		private bool
+		want    []slackapi.Scope
+	}{
+		{
+			name: "public", want: []slackapi.Scope{
+				slackapi.ScopeAppMentionsRead, slackapi.ScopeChannelsHistory, slackapi.ScopeChannelsRead,
+				slackapi.ScopeFilesRead, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeUsersRead,
+			},
+		},
+		{
+			name: "private", private: true, want: []slackapi.Scope{
+				slackapi.ScopeAppMentionsRead, slackapi.ScopeFilesRead, slackapi.ScopeGroupsHistory,
+				slackapi.ScopeGroupsRead, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeUsersRead,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			web := fake.NewWeb(
+				fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
+				fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
+				fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Private: test.private, Member: true, Accessible: true}},
+				fake.Step{Operation: fake.Scopes, Result: []slackapi.Scope{slackapi.ScopeChatWrite}},
+			)
+			_, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{TeamID: "T012ABC", BotUserID: "U012BOT", ChannelID: "C012ABC"})
+			got, ok := slackapi.MissingScopesFromError(err)
+			if !ok || !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("MissingScopesFromError(%v) = %v, %t; want %v, true", err, got, ok, test.want)
+			}
+			failure := slackapi.Classify(err, slackapi.FailureRead)
+			if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != slackapi.DiagnosticMissingScope {
+				t.Fatalf("Classify = %#v", failure)
+			}
+			if strings.Contains(err.Error(), "T012ABC") || strings.Contains(err.Error(), "C012ABC") {
+				t.Fatalf("missing-scope error leaked identifiers: %q", err)
 			}
 		})
 	}

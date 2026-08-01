@@ -4,6 +4,7 @@ package slackruntime
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -283,11 +284,22 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 	return &Snapshot{Config: c, TeamID: verified.Identity.TeamID, BotUserID: verified.Identity.BotUserID, ChannelID: c.SlackChannelID, Web: web, stream: stream, done: make(chan struct{})}, nil
 }
 func safeError(err error) error {
+	if missing, ok := slackapi.MissingScopesFromError(err); ok && len(missing) != 0 {
+		return errors.New("Slack app is missing required bot OAuth scopes: " + strings.Join(scopesToStrings(missing), ", ") + ". Add them in Slack app OAuth & Permissions, reinstall/re-authorize the app, then restart or gateway reload.")
+	}
 	failure := slackapi.Classify(err, slackapi.FailureSocket)
 	if failure.Diagnostic.Valid() {
 		return errors.New("Slack runtime verification failed (" + string(failure.Diagnostic) + ")")
 	}
 	return errors.New("Slack runtime verification failed")
+}
+
+func scopesToStrings(scopes []slackapi.Scope) []string {
+	values := make([]string, len(scopes))
+	for i, scope := range scopes {
+		values[i] = string(scope)
+	}
+	return values
 }
 
 // Acquire returns the active immutable snapshot. The caller must Release it.

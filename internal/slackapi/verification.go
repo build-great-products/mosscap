@@ -71,7 +71,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 		return VerificationResult{}, NewExternalError(ReasonInvalidResponse, DiagnosticMalformedResponse, "", nil)
 	}
 	if len(missing) != 0 {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticMissingScope, "", nil)
+		return VerificationResult{}, NewMissingScopesError(missing)
 	}
 
 	result := VerificationResult{
