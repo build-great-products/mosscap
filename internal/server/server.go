@@ -229,6 +229,13 @@ func (s *Server) open(ctx context.Context) error {
 		return errors.New("gateway endpoint changed while binding")
 	}
 	s.listener, s.endpoint, s.socketDev, s.socketIno, s.started = l, c.Paths.Endpoint, uint64(st.Dev), st.Ino, time.Now()
+	// The endpoint is reachable and recovery has completed; only now may the
+	// verified initial Socket candidate dispatch envelopes.
+	if s.runtime != nil {
+		if err := s.runtime.Activate(); err != nil {
+			return err
+		}
+	}
 	s.Log.Info("gateway listening", "endpoint", s.endpoint)
 	return nil
 }
@@ -653,6 +660,13 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 	s.activeConfig.Store(&candidate)
 	s.activeDigest = digest
 	s.generation.Store(result.ActiveConfigGeneration)
+	// The durable decision and complete replacement frame are now visible.
+	// Start the candidate intake only after both, before retiring the old one.
+	if candidateRuntime != nil {
+		if err := candidateRuntime.Activate(); err != nil {
+			return protocol.ConfigReloadDTO{}, err
+		}
+	}
 	if oldRuntime != nil {
 		_ = oldRuntime.Close()
 	}

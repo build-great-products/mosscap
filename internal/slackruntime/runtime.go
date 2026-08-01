@@ -146,14 +146,15 @@ func (s *Snapshot) retire() {
 }
 
 type Runtime struct {
-	options  Options
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.RWMutex
-	snapshot *Snapshot
-	closed   bool
-	obs      Observations
-	wg       sync.WaitGroup
+	options   Options
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.RWMutex
+	snapshot  *Snapshot
+	activated bool
+	closed    bool
+	obs       Observations
+	wg        sync.WaitGroup
 }
 
 func New(options Options) (*Runtime, error) {
@@ -183,8 +184,9 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Start verifies auth/access/scopes and Socket readiness before publishing the
-// first candidate. A failed start leaves no active runtime.
+// Start verifies auth/access/scopes and Socket readiness before publishing an
+// inactive candidate. Call Activate only after its durable activation decision.
+// A failed start leaves no active runtime.
 func (r *Runtime) Start(ctx context.Context, c config.Config) error {
 	candidate, err := r.prepare(ctx, c)
 	if err != nil {
@@ -204,7 +206,32 @@ func (r *Runtime) Start(ctx context.Context, c config.Config) error {
 	r.snapshot = candidate
 	r.obs = Observations{State: StateConnected}
 	r.mu.Unlock()
-	r.run(candidate)
+	return nil
+}
+
+// Activate begins intake for the verified candidate published by Start. It is
+// deliberately separate from readiness so callers can commit their durable
+// activation decision before an envelope can reach Handler.
+func (r *Runtime) Activate() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrClosed
+	}
+	if r.snapshot == nil {
+		r.mu.Unlock()
+		return errors.New("Slack runtime is not started")
+	}
+	if r.activated {
+		r.mu.Unlock()
+		return nil
+	}
+	snapshot := r.snapshot
+	r.activated = true
+	// Register the receiver while Close is excluded, so it cannot return from
+	// Wait before this activated intake is accounted for.
+	r.run(snapshot)
+	r.mu.Unlock()
 	return nil
 }
 
@@ -222,10 +249,13 @@ func (r *Runtime) Reload(ctx context.Context, c config.Config) error {
 		return ErrClosed
 	}
 	old := r.snapshot
+	active := r.activated
 	r.snapshot = candidate
 	r.obs = Observations{State: StateConnected}
+	if active {
+		r.run(candidate)
+	}
 	r.mu.Unlock()
-	r.run(candidate)
 	if old != nil {
 		go old.retire()
 	}
@@ -348,6 +378,7 @@ func (r *Runtime) Close() error {
 		return nil
 	}
 	r.closed = true
+	r.activated = false
 	old := r.snapshot
 	r.snapshot = nil
 	r.obs.State = StateClosed

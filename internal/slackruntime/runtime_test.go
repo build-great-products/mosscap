@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +66,43 @@ func TestStartFailureLeavesNoSnapshotAndSecretsSafe(t *testing.T) {
 	}
 	_ = r.Close()
 }
+func TestStartGatesEnvelopeHandlingUntilActivation(t *testing.T) {
+	c := validConfig(t)
+	ack, ackRecorder := fake.NewAckRecorder(nil)
+	socket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: slackapi.Envelope{EnvelopeID: "env-gated", Ack: ack}}}})
+	f := &factory{web: []slackapi.Web{verifiedWeb()}, socket: []slackapi.Socket{socket}}
+	var handled atomic.Int32
+	r, err := New(Options{Factory: f, Handler: func(ctx context.Context, envelope slackapi.Envelope) error {
+		handled.Add(1)
+		return envelope.Ack.Acknowledge(ctx)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if got := handled.Load(); got != 0 || ackRecorder.Calls() != 0 {
+		t.Fatalf("unactivated candidate handled=%d acked=%d", got, ackRecorder.Calls())
+	}
+	if err := r.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for handled.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := handled.Load(); got != 1 || ackRecorder.Calls() != 1 {
+		t.Fatalf("activated candidate handled=%d acked=%d", got, ackRecorder.Calls())
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !socket.OpenedStreams()[0].Closed() {
+		t.Fatal("activated candidate stream was not drained")
+	}
+}
+
 func TestFailedReloadRetainsOldSnapshot(t *testing.T) {
 	c := validConfig(t)
 	oldSocket := fake.NewSocket(fake.SocketSession{})
@@ -145,6 +183,9 @@ func TestReconnectUsesBoundedBackoffAndResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = r.Start(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.Activate(); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

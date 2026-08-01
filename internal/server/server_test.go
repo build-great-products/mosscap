@@ -143,6 +143,22 @@ func phase1VerifiedWeb() slackapi.Web {
 	)
 }
 
+func phase1Envelope(id string) (slackapi.Envelope, *fake.AckRecorder) {
+	ack, recorder := fake.NewAckRecorder(nil)
+	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U012BOT>", Ack: ack}, recorder
+}
+
+func waitForAck(t *testing.T, recorder *fake.AckRecorder) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for recorder.Calls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := recorder.Calls(); got != 1 {
+		t.Fatalf("ack calls = %d", got)
+	}
+}
+
 func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -182,10 +198,16 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldSocket, newSocket := fake.NewSocket(fake.SocketSession{}), fake.NewSocket(fake.SocketSession{})
+	oldSocket := fake.NewSocket(fake.SocketSession{})
+	failedEnvelope, failedAck := phase1Envelope("failed")
+	failedSocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: failedEnvelope}}})
+	successEnvelope, successAck := phase1Envelope("success")
+	newSocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: successEnvelope}}})
+	replayEnvelope, replayAck := phase1Envelope("replay")
+	replaySocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: replayEnvelope}}})
 	factory := &fakeRuntimeFactory{
-		webs:    []slackapi.Web{phase1VerifiedWeb(), fake.NewWeb(fake.Step{Operation: fake.Auth, Err: errors.New("xoxb-TOKEN_CANARY")}), phase1VerifiedWeb()},
-		sockets: []slackapi.Socket{oldSocket, fake.NewSocket(), newSocket},
+		webs:    []slackapi.Web{phase1VerifiedWeb(), fake.NewWeb(fake.Step{Operation: fake.Auth, Err: errors.New("xoxb-TOKEN_CANARY")}), phase1VerifiedWeb(), phase1VerifiedWeb()},
+		sockets: []slackapi.Socket{oldSocket, failedSocket, newSocket, replaySocket},
 	}
 	s := NewWithOptions(initial, loc, "test", nil, Options{Factory: factory})
 	s.store = ledger
@@ -203,12 +225,22 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if s.runtime != oldRuntime || s.snapshot().MaximumFileSize != initial.MaximumFileSize {
 		t.Fatal("failed candidate changed published runtime or config")
 	}
+	if failedAck.Calls() != 0 || len(failedSocket.OpenedStreams()) != 0 {
+		t.Fatal("failed candidate handled an envelope")
+	}
 	result, err := s.reload(context.Background(), "phase1-success")
 	if err != nil || !result.Activated || result.SlackNetworkVerificationDeferred {
 		t.Fatalf("reload result=%+v err=%v", result, err)
 	}
 	if s.runtime == oldRuntime || s.snapshot().MaximumFileSize != 200<<20 {
 		t.Fatal("successful candidate was not atomically published")
+	}
+	waitForAck(t, successAck)
+	if _, err := s.reload(context.Background(), "phase1-success"); err != nil {
+		t.Fatalf("replayed reload: %v", err)
+	}
+	if replayAck.Calls() != 0 {
+		t.Fatalf("replayed candidate acknowledged before activation: %d", replayAck.Calls())
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -217,6 +249,9 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	}
 	if len(newSocket.OpenedStreams()) != 1 {
 		t.Fatal("new runtime was not started before publication")
+	}
+	if len(replaySocket.OpenedStreams()) != 1 || !replaySocket.OpenedStreams()[0].Closed() {
+		t.Fatal("replayed candidate stream was not closed without activation")
 	}
 }
 
