@@ -58,9 +58,14 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 	if err != nil {
 		return nil, nil, "", err
 	}
-	policy := store.SlackAdmissionPolicy{TeamID: c.SlackTeamID, ChannelID: c.SlackChannelID, BotUserID: c.SlackBotUserID}
-	coordinator := slackingest.New(ledger, policy, nil)
-	rt, err := slackruntime.New(slackruntime.Options{Factory: s.runtimeFactory, TrustedUserIDs: trusted, Handler: func(ctx context.Context, e slackapi.Envelope) error { _, err := coordinator.Handle(ctx, e); return err }})
+	var coordinator *slackingest.Coordinator
+	rt, err := slackruntime.New(slackruntime.Options{Factory: s.runtimeFactory, TrustedUserIDs: trusted, Handler: func(ctx context.Context, e slackapi.Envelope) error {
+		if coordinator == nil {
+			return errors.New("Slack admission coordinator is not ready")
+		}
+		_, err := coordinator.Handle(ctx, e)
+		return err
+	}})
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -68,6 +73,13 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 		_ = rt.Close()
 		return nil, nil, "", err
 	}
+	snapshot, err := rt.Acquire()
+	if err != nil {
+		_ = rt.Close()
+		return nil, nil, "", err
+	}
+	coordinator = slackingest.New(ledger, store.SlackAdmissionPolicy{TeamID: snapshot.TeamID, ChannelID: snapshot.ChannelID, BotUserID: snapshot.BotUserID}, nil)
+	snapshot.Release()
 	return rt, coordinator, slackruntime.StateConnected, nil
 }
 func (s *Server) closeSlack() {
