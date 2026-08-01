@@ -54,7 +54,7 @@ internal/server/                    socket lifecycle, peer auth, dispatch, shutd
 internal/client/                    dial, handshake, request/response client
 internal/doctor/                    non-destructive checks and typed check results
 internal/status/                    stable status snapshot types
-plans/phase-0.md                    this plan
+docs/plans/phase-0.md               this plan
 ```
 
 Package direction is `app -> client/config`, `server -> protocol + task + store + doctor/status`, and `store -> task` only for persistence DTOs. `client` must not import `store`. Keep implementation packages under `internal`; the only public compatibility surface in Phase 0 is the executable and protocol JSON.

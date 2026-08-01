@@ -8,7 +8,7 @@
 
 Mosscap connects one trusted Slack channel and local CLI requests to one human-started interactive Pi session. A foreground Go gateway owns durable coordination in SQLite. A TypeScript extension inserts eligible work as visible Pi messages and triggers model processing.
 
-[README.md](README.md) introduces the product. [SYSTEM_MODEL.md](SYSTEM_MODEL.md) explains the design. This document is authoritative when they differ.
+[README.md](../README.md) introduces the product. [SYSTEM_MODEL.md](SYSTEM_MODEL.md) explains the design. This document is authoritative when they differ.
 
 ## 1. Scope
 

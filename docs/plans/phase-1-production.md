@@ -1,8 +1,12 @@
-# Mosscap v1 Phase 1 implementation plan
+# Mosscap v1 Phase 1 production-hardening backlog
 
-**Status:** implementation in progress
+> **Archived on 2026-08-02. This document is not authoritative for current Phase 1 work.**
+>
+> It preserves the original production-grade design and test backlog for later phases. Agents implementing the current prototype must follow [`phase-1.md`](phase-1.md) and must not pull work from this document merely to improve SPEC compliance.
 
-**Normative source:** [`SPEC.md`](../SPEC.md), especially sections 1–6, 8, 11–18. If this plan and the specification differ, the specification wins.
+**Status:** deferred production-hardening backlog
+
+**Reference source:** [`SPEC.md`](../SPEC.md), especially sections 1–6, 8, 11–18.
 
 ## 0. Overnight implementation handoff (2026-08-01)
 
@@ -31,7 +35,7 @@ Two independent review-and-correction cycles were completed for these foundation
 
 ### Pickup order
 
-1. Review commit `760cfddd` against this plan and `SPEC.md`, concentrating on the new `internal/slackapi/**`, `internal/store/slack_*`, migration 0003, and cross-boundary invariants.
+1. Review commit `760cfddd` against this plan and `docs/SPEC.md`, concentrating on the new `internal/slackapi/**`, `internal/store/slack_*`, migration 0003, and cross-boundary invariants.
 2. Independently run `go test ./...`, `go test -race ./...`, `go vet ./...`, `go build ./cmd/mosscap`, `go mod tidy -diff`, and `git diff --check` before extending the foundation.
 3. If the review is clean, implement in parallel behind the established interfaces:
    - `internal/slackingest` initial mention admission and commit-before-ack coordination;
