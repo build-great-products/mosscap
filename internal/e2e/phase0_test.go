@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/stayradiated/mosscap/internal/client"
+	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/protocol"
+	"github.com/stayradiated/mosscap/internal/server"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,7 +40,9 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		t.Fatalf("build executable: %v\n%s", err, output)
 	}
 
-	env := append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(root, "config"), "XDG_STATE_HOME="+filepath.Join(root, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	env := append(os.Environ(), "HOME="+home)
 	run := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command(binary, args...)
@@ -50,44 +54,60 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		return output
 	}
 	run("setup", "--json")
-
-	start := func() *exec.Cmd {
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	type gatewayProcess struct {
+		cancel context.CancelFunc
+		done   chan error
+	}
+	start := func() gatewayProcess {
 		t.Helper()
-		cmd := exec.Command(binary, "gateway", "run")
-		cmd.Env = env
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Start(); err != nil {
+		cfg, err := config.Load(loc)
+		if err != nil {
 			t.Fatal(err)
 		}
+		// Production startup always requires a real Slack runtime. This harness
+		// injects the disabled runtime directly, retaining a real private socket
+		// and SQLite ledger while keeping this Phase 0 replay proof offline.
+		s := server.NewWithOptions(cfg, loc, "e2e", nil, server.Options{Disabled: true})
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- s.Serve(ctx) }()
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			probe := exec.Command(binary, "gateway", "status", "--json")
 			probe.Env = env
 			if output, err := probe.Output(); err == nil && json.Valid(output) {
-				return cmd
+				return gatewayProcess{cancel: cancel, done: done}
+			}
+			select {
+			case err := <-done:
+				cancel()
+				t.Fatalf("gateway start: %v", err)
+			default:
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		t.Fatalf("gateway did not become ready: %s", stderr.String())
-		return nil
-	}
-	stop := func(cmd *exec.Cmd) {
-		t.Helper()
-		if err := cmd.Process.Signal(os.Interrupt); err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
+		cancel()
 		select {
 		case err := <-done:
+			t.Fatalf("gateway did not become ready: %v", err)
+		case <-time.After(6 * time.Second):
+			t.Fatal("gateway did not become ready")
+		}
+		return gatewayProcess{}
+	}
+	stop := func(g gatewayProcess) {
+		t.Helper()
+		g.cancel()
+		select {
+		case err := <-g.done:
 			if err != nil {
 				t.Fatalf("gateway exit: %v", err)
 			}
 		case <-time.After(6 * time.Second):
-			_ = cmd.Process.Kill()
 			t.Fatal("gateway did not stop")
 		}
 	}
