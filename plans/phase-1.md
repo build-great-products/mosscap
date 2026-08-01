@@ -1,8 +1,50 @@
 # Mosscap v1 Phase 1 implementation plan
 
-**Status:** implementation-ready plan
+**Status:** implementation in progress
 
 **Normative source:** [`SPEC.md`](../SPEC.md), especially sections 1–6, 8, 11–18. If this plan and the specification differ, the specification wins.
+
+## 0. Overnight implementation handoff (2026-08-01)
+
+### Checkpoint
+
+The current implementation checkpoint is jj commit `760cfddd` (`wip: implement Phase 1 Slack foundations`). It contains approximately 8,700 lines of implementation and tests. The working copy was clean immediately after that commit.
+
+Completed foundations:
+
+- Go/slack-go/Gorilla dependency setup and injectable clock support;
+- SDK-free `internal/slackapi` contracts, validation, classifications, one-shot acknowledgements, and deterministic Web/Socket fakes;
+- real `slack-go` Web and Mosscap-owned Socket Mode adapters, including redirect refusal, bounded normalization, Socket `hello` readiness/liveness, scope/channel verification, malformed-envelope handling, and secret-safe errors;
+- schema v3 migration and exact schema fingerprint verification, including atomic v1→v2→v3 and v2→v3 compatibility;
+- durable Slack source-event, task-source, file-metadata, and effect schema plus `eff_`/`fil_` identities;
+- atomic source/file repository behavior for admission, replay, redelivery accounting, edits, deletion, stale ordering, file reconciliation, and canonical results; and
+- durable effect repository behavior for prepare/replay, claim, terminal outcome, startup reconciliation, inspection, and explicit linked retry.
+
+Two independent review-and-correction cycles were completed for these foundations. The latest correction subagents reported focused/full tests, race tests, vet, formatting, module tidy, build, and diff checks passing. **The manager has not yet run an independent post-correction review and final validation over the converged checkpoint; that is the first task on pickup.**
+
+### Approved decisions
+
+- Use the latest supported Go release; raising the old Go 1.23 minimum is approved.
+- Keep local-only `setup` usable, but require complete valid Slack configuration for production `gateway run`.
+- Preserve direct schema-v1 opening by atomically applying v1→v2→v3, even though there are no current users.
+- Live Slack tokens are not needed for implementation or automated tests. Use a disposable workspace and locally supplied/revoked credentials only for the final opt-in manual smoke test; never place tokens in chat, source, test output, or commits.
+
+### Pickup order
+
+1. Review commit `760cfddd` against this plan and `SPEC.md`, concentrating on the new `internal/slackapi/**`, `internal/store/slack_*`, migration 0003, and cross-boundary invariants.
+2. Independently run `go test ./...`, `go test -race ./...`, `go vet ./...`, `go build ./cmd/mosscap`, `go mod tidy -diff`, and `git diff --check` before extending the foundation.
+3. If the review is clean, implement in parallel behind the established interfaces:
+   - `internal/slackingest` initial mention admission and commit-before-ack coordination;
+   - `internal/slackruntime` connection/candidate snapshot, reconnect, drain, and shutdown management; and
+   - `internal/effect` validation, durable preparation, one-call execution, ambiguity handling, and retry coordination.
+4. Review/correct that wave, then complete source edit/delete ingestion.
+5. Continue with gateway startup/reload/status/doctor integration, followed sequentially by protocol/CLI reads, protocol/CLI effects, and the Phase 1 reliability/documentation gate.
+
+Do not start central `server.go`, `protocol.go`, or `app.go` integration concurrently; keep one integration owner for those conflict-heavy routing files.
+
+### Known environment/action item
+
+The installed Go toolchain at checkpoint time is 1.26.3. `govulncheck` reports three reachable standard-library advisories fixed by Go 1.26.5. Upgrade the build/validation toolchain to Go 1.26.5 or newer before the release gate, then rerun all validation. No called third-party vulnerability was reported.
 
 ## 1. Goal and release gate
 
