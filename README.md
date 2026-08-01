@@ -64,6 +64,41 @@ A trusted Slack user can automatically trigger a fully capable local Pi session 
 
 Configuration, SQLite, the local socket, and temporary files live under owner-only XDG directories. Slack tokens are never written to SQLite or inserted into Pi messages.
 
+## Phase 0 local-task quick start
+
+Phase 0 implements only the private local ledger, foreground gateway, and task CLI. Slack, Pi delivery, files, effects, and purge are not implemented yet.
+
+```sh
+mosscap setup
+mosscap gateway run                    # keep this foreground process running
+
+# In another terminal:
+mosscap task create --text "review the release" --request-id release-create
+mosscap task working tsk_EXAMPLE --request-id release-working
+mosscap task list
+```
+
+Mutations always go through the gateway. A request ID is durable: retry the *same* command with the same ID after a disconnect or gateway restart to receive its original outcome rather than repeat the mutation.
+
+```sh
+mosscap task create --text "review the release" --request-id release-create --json
+# Restart `mosscap gateway run`, then safely replay:
+mosscap task create --text "review the release" --request-id release-create --json
+```
+
+### Phase 0 security and failure matrix
+
+| Condition | Phase 0 behavior | Operator action |
+| --- | --- | --- |
+| Gateway stops or restarts | Committed tasks and request outcomes remain in SQLite; same-ID replays do not duplicate work. | Restart `mosscap gateway run`, then replay the original mutation ID. |
+| Unsafe mode, owner, symlink, hard link, or escaped state path | Setup/start fails closed. | Restore owner-only `0700` directories and `0600` regular files; remove unsafe links. |
+| Live or unsafe socket / second gateway | Startup refuses to replace the endpoint. | Stop the owner gateway; inspect and remove only a known stale socket. |
+| Unsupported protocol or ledger schema | Connection/start fails closed without reinterpretation. | Use the matching Mosscap binary; do not edit the ledger to force compatibility. |
+| Gateway unavailable | CLI returns exit 6 and does not access SQLite directly. | Start the gateway and retry a mutation with its original request ID. |
+| Request ID reused for different input | CLI returns conflict (exit 4); neither mutation is repeated. | Generate a new request ID for the new intent. |
+| Corrupt or failed SQLite checks | Gateway refuses unsafe startup; doctor reports failures non-destructively. | Restore a known-good ledger; do not auto-repair. |
+| Secret-bearing configuration | Config, status, doctor, logs, and mutation records redact tokens and omit historical task text. | Keep tokens in environment or an owner-only secrets file. |
+
 ## Design documents
 
 - [SYSTEM_MODEL.md](SYSTEM_MODEL.md) explains the components, authority boundaries, and end-to-end flow.

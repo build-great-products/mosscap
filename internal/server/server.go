@@ -1,0 +1,474 @@
+// Package server serves the private local Mosscap protocol.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/doctor"
+	"github.com/stayradiated/mosscap/internal/protocol"
+	"github.com/stayradiated/mosscap/internal/securepath"
+	"github.com/stayradiated/mosscap/internal/status"
+	"github.com/stayradiated/mosscap/internal/store"
+	"github.com/stayradiated/mosscap/internal/task"
+	"golang.org/x/sys/unix"
+)
+
+// Server owns one open ledger and its Unix endpoint.
+type Server struct {
+	Config      config.Config
+	ConfigPath  string
+	Version     string
+	Log         *slog.Logger
+	store       *store.Store
+	listener    *net.UnixListener
+	lock        *os.File
+	endpoint    string
+	socketDev   uint64
+	socketIno   uint64
+	wg          sync.WaitGroup
+	closing     chan struct{}
+	closeOnce   sync.Once
+	slots       chan struct{}
+	admissionMu sync.Mutex
+	stopping    bool
+	activeMu    sync.Mutex
+	active      map[*net.UnixConn]context.CancelFunc
+	started     time.Time
+	connections atomic.Int32
+}
+
+func New(c config.Config, configPath, version string, log *slog.Logger) *Server {
+	if version == "" {
+		version = "devel"
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Server{Config: c, ConfigPath: configPath, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
+}
+
+// Serve validates state, obtains the singleton lock, and runs until ctx is cancelled.
+func (s *Server) Serve(ctx context.Context) error {
+	if err := s.open(ctx); err != nil {
+		s.shutdown()
+		return err
+	}
+	defer s.shutdown()
+	go func() { <-ctx.Done(); s.shutdown() }()
+	for {
+		conn, err := s.listener.AcceptUnix()
+		if err != nil {
+			select {
+			case <-s.closing:
+				return nil
+			default:
+			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				continue
+			}
+			return err
+		}
+		if !sameEUID(conn) {
+			_ = conn.Close()
+			continue
+		}
+		select {
+		case s.slots <- struct{}{}:
+		case <-s.closing:
+			_ = conn.Close()
+			return nil
+		}
+		s.admissionMu.Lock()
+		if s.stopping {
+			s.admissionMu.Unlock()
+			<-s.slots
+			_ = conn.Close()
+			return nil
+		}
+		s.wg.Add(1)
+		s.admissionMu.Unlock()
+		go func() {
+			defer s.wg.Done()
+			defer func() { <-s.slots }()
+			s.handle(conn)
+		}()
+	}
+}
+func (s *Server) open(ctx context.Context) error {
+	c := s.Config
+	if err := config.Validate(c); err != nil {
+		return err
+	}
+	if err := s.validateStartupPaths(c); err != nil {
+		return err
+	}
+	lockPath := filepath.Join(c.Paths.StateDir, "gateway.lock")
+	f, err := securepath.OpenFileNoFollow(lockPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := securepath.CheckOpenFile(lockPath, f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("gateway is already running: %w", err)
+	}
+	s.lock = f
+	busy, _ := time.ParseDuration(c.Database.BusyTimeout)
+	db, err := store.Open(ctx, c.Paths.Database, store.Options{BusyTimeout: busy})
+	if err != nil {
+		return err
+	}
+	// SQLite opens by pathname, so repeat the complete check after open to
+	// detect a replacement between validation and database initialization.
+	if err := s.validateStartupPaths(c); err != nil {
+		_ = db.Close()
+		return err
+	}
+	s.store = db
+	if err := s.prepareEndpoint(c.Paths.Endpoint); err != nil {
+		return err
+	}
+	addr := &net.UnixAddr{Name: c.Paths.Endpoint, Net: "unix"}
+	l, err := net.ListenUnix("unix", addr)
+	if err != nil {
+		return err
+	}
+	// Closing a UnixListener otherwise unlinks its current pathname, which could
+	// be a socket another process installed after ours was removed.
+	l.SetUnlinkOnClose(false)
+	if err := os.Chmod(c.Paths.Endpoint, 0600); err != nil {
+		_ = l.Close()
+		return err
+	}
+	info, err := os.Lstat(c.Paths.Endpoint)
+	if err != nil {
+		_ = l.Close()
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || info.Mode()&os.ModeSocket == 0 {
+		_ = l.Close()
+		return errors.New("gateway endpoint changed while binding")
+	}
+	s.listener, s.endpoint, s.socketDev, s.socketIno, s.started = l, c.Paths.Endpoint, uint64(st.Dev), st.Ino, time.Now()
+	s.Log.Info("gateway listening", "endpoint", s.endpoint)
+	return nil
+}
+
+// validateStartupPaths repeats setup's path checks immediately before and
+// after opening state. This closes the configuration-to-gateway race.
+func (s *Server) validateStartupPaths(c config.Config) error {
+	if err := securepath.CheckAbsoluteComponents(s.ConfigPath); err != nil {
+		return fmt.Errorf("config path: %w", err)
+	}
+	if err := securepath.CheckFile(s.ConfigPath); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	for _, path := range []string{c.Paths.StateDir, c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir} {
+		if err := securepath.CheckAbsoluteComponents(path); err != nil {
+			return fmt.Errorf("state path: %w", err)
+		}
+	}
+	if err := securepath.CheckDir(c.Paths.StateDir); err != nil {
+		return fmt.Errorf("state directory: %w", err)
+	}
+	if err := securepath.CheckDir(c.Paths.TmpDir); err != nil {
+		return fmt.Errorf("temporary directory: %w", err)
+	}
+	if err := securepath.CheckFile(c.Paths.Database); err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	if c.Slack.SecretsFile != "" {
+		if err := securepath.CheckAbsoluteComponents(c.Slack.SecretsFile); err != nil {
+			return fmt.Errorf("slack.secrets_file: %w", err)
+		}
+		if err := securepath.CheckFile(c.Slack.SecretsFile); err != nil {
+			return fmt.Errorf("slack.secrets_file: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) prepareEndpoint(endpoint string) error {
+	info, err := os.Lstat(endpoint)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
+		return errors.New("unsafe existing gateway endpoint")
+	}
+	if c, err := net.DialTimeout("unix", endpoint, 150*time.Millisecond); err == nil {
+		_ = c.Close()
+		return errors.New("gateway endpoint is already live")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return errors.New("unsafe stale gateway endpoint")
+	}
+	return os.Remove(endpoint)
+}
+func (s *Server) shutdown() {
+	s.closeOnce.Do(func() {
+		close(s.closing)
+		s.admissionMu.Lock()
+		s.stopping = true
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		s.admissionMu.Unlock()
+		done := make(chan struct{})
+		go func() { s.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			s.closeActive()
+			<-done
+		}
+		if s.endpoint != "" {
+			// Only remove the socket inode this process bound. A replacement must
+			// remain untouched even though the containing directory is private.
+			if info, err := os.Lstat(s.endpoint); err == nil {
+				if st, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode()&os.ModeSocket != 0 && uint64(st.Dev) == s.socketDev && st.Ino == s.socketIno {
+					_ = os.Remove(s.endpoint)
+				}
+			}
+		}
+		if s.store != nil {
+			_, _ = s.store.DB().Exec("PRAGMA wal_checkpoint(PASSIVE)")
+			_ = s.store.Close()
+		}
+		if s.lock != nil {
+			_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
+			_ = s.lock.Close()
+		}
+	})
+}
+func sameEUID(c *net.UnixConn) bool {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return false
+	}
+	ok := false
+	_ = raw.Control(func(fd uintptr) {
+		cred, e := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		ok = e == nil && cred.Uid == uint32(os.Geteuid())
+	})
+	return ok
+}
+func (s *Server) closeActive() {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	for c, cancel := range s.active {
+		cancel()
+		_ = c.Close()
+	}
+}
+
+func (s *Server) handle(c *net.UnixConn) {
+	s.connections.Add(1)
+	defer s.connections.Add(-1)
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.activeMu.Lock()
+	s.active[c] = cancel
+	s.activeMu.Unlock()
+	defer func() {
+		s.activeMu.Lock()
+		delete(s.active, c)
+		s.activeMu.Unlock()
+		cancel()
+	}()
+	codec := protocol.NewCodec(c, c, uint32(s.Config.Protocol.MaxFrameBytes))
+	hello := false
+	for {
+		_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+		payload, err := codec.ReadFrame()
+		if err != nil {
+			return
+		}
+		r, err := protocol.DecodeRequest(payload)
+		if err != nil {
+			// A version mismatch is the one malformed-request case for which the
+			// peer needs a typed response. It can then map the incompatibility to
+			// exit 9 rather than treating it as a transport outage.
+			if r.ProtocolVersion != protocol.Version {
+				response := protocol.NewErrorResponse(r.RequestID, s.Version, "unsupported_protocol_version", "unsupported", "protocol version is unsupported", false)
+				if out, encodeErr := protocol.EncodeResponse(response); encodeErr == nil {
+					_ = codec.WriteFrame(out)
+				}
+			}
+			return
+		}
+		var response protocol.Response
+		if !hello {
+			if r.Command != "hello" {
+				response = protocol.NewErrorResponse(r.RequestID, s.Version, "hello_required", "usage", "hello is required", false)
+			} else {
+				response = s.dispatch(ctx, r)
+				hello = response.Error == nil
+			}
+		} else {
+			response = s.dispatch(ctx, r)
+		}
+		out, err := protocol.EncodeResponse(response)
+		if err != nil {
+			return
+		}
+		if codec.WriteFrame(out) != nil {
+			return
+		}
+	}
+}
+func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Response {
+	resultType := ""
+	var result any
+	var err error
+	switch r.Command {
+	case "hello":
+		resultType = "hello"
+		result = protocol.HelloResult{SelectedVersion: protocol.Version, Capabilities: protocol.ServerCapabilities}
+	case "status.get":
+		resultType = "gateway_status"
+		result, err = s.status(ctx)
+	case "doctor.run":
+		resultType = "doctor_report"
+		checks := s.store.Doctor(ctx)
+		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
+		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
+	case "task.create":
+		var p protocol.TaskCreateParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_mutation"
+		result, err = s.store.Create(ctx, r.RequestID, p.Text)
+	case "task.get":
+		var p protocol.TaskSelector
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task"
+		result, err = s.store.Get(ctx, p.Task)
+	case "task.list":
+		var p protocol.TaskListParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_list"
+		var tasks []store.Task
+		var next string
+		tasks, next, err = s.store.List(ctx, p.State, p.IncludeDone, p.Limit, p.Cursor)
+		result = protocol.TaskListDTO{Tasks: taskDTOs(tasks), NextCursor: next}
+	case "task.update":
+		var p protocol.TaskUpdateParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_mutation"
+		result, err = s.store.Update(ctx, r.RequestID, p.Task, p.Text)
+	case "task.transition":
+		var p protocol.TaskTransitionParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_mutation"
+		result, err = s.store.Transition(ctx, r.RequestID, p.Task, task.State(p.State), p.Note)
+	default:
+		err = errors.New("unsupported command")
+	}
+	if err != nil {
+		return errorResponse(r.RequestID, s.Version, err)
+	}
+	b, err := json.Marshal(dto(result))
+	if err != nil {
+		return errorResponse(r.RequestID, s.Version, err)
+	}
+	return protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: resultType, Result: b}
+}
+func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
+	counts, err := s.store.Counts(ctx)
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	dbSize, err := fileSize(s.Config.Paths.Database)
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	walSize, err := fileSize(s.Config.Paths.Database + "-wal")
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, PID: os.Getpid(), Database: s.Config.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "not_implemented", SlackCapability: "not_implemented", PiCapability: "not_implemented"}, nil
+}
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func errorResponse(id, version string, err error) protocol.Response {
+	code, category := "unavailable", "unavailable"
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		code, category = "not_found", "not_found"
+	case errors.Is(err, store.ErrAmbiguous):
+		code, category = "ambiguous", "ambiguous"
+	case errors.Is(err, store.ErrRequestConflict):
+		code, category = "request_id_conflict", "conflict"
+	default:
+		if err.Error() == "unsupported command" {
+			code, category = "unsupported", "unsupported"
+		} else {
+			code, category = "invalid_input", "usage"
+		}
+	}
+	return protocol.NewErrorResponse(id, version, code, category, err.Error(), false)
+}
+func dto(v any) any {
+	switch x := v.(type) {
+	case store.Task:
+		return taskDTO(x)
+	case store.MutationResult:
+		return mutationDTO(x)
+	case []store.Task:
+		return protocol.TaskListDTO{Tasks: taskDTOs(x)}
+	default:
+		return v
+	}
+}
+func taskDTOs(tasks []store.Task) []protocol.TaskDTO {
+	a := make([]protocol.TaskDTO, len(tasks))
+	for i := range tasks {
+		a[i] = taskDTO(tasks[i])
+	}
+	return a
+}
+func stamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000Z") }
+func taskDTO(t store.Task) protocol.TaskDTO {
+	var done *string
+	if t.DoneAt != nil {
+		d := stamp(*t.DoneAt)
+		done = &d
+	}
+	return protocol.TaskDTO{TaskID: t.ID, Version: t.Version, State: string(t.State), Text: t.Text, SourceKind: t.SourceKind, CreatedAt: stamp(t.CreatedAt), UpdatedAt: stamp(t.UpdatedAt), DoneAt: done}
+}
+func mutationDTO(m store.MutationResult) protocol.TaskMutationDTO {
+	return protocol.TaskMutationDTO{TaskID: m.TaskID, Version: m.Version, State: string(m.State), Changed: m.Changed, CreatedAt: stamp(m.CreatedAt), UpdatedAt: stamp(m.UpdatedAt)}
+}
