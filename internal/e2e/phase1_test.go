@@ -43,7 +43,7 @@ func TestPhase1SlackVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_team_id": "T012ABC", "slack_bot_user_id": "U012BOT", "slack_channel_id": "C012ABC"} {
+	for key, value := range map[string]string{"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_id": "C012ABC"} {
 		if _, err := config.Set(loc, key, value); err != nil {
 			t.Fatal(err)
 		}
