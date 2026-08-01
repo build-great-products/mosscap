@@ -37,30 +37,38 @@ func NewWithOptions(c config.Config, loc config.Location, version string, log *s
 }
 
 func (s *Server) startSlack(ctx context.Context, c config.Config) error {
+	rt, ingest, state, err := s.prepareSlack(ctx, c, s.store)
+	if err != nil {
+		return err
+	}
+	s.runtime, s.ingest, s.slackState = rt, ingest, state
+	return nil
+}
+
+// prepareSlack verifies and starts an unpublished runtime. Its caller owns rt
+// until it is assigned to Server, and must Close it on a failed activation.
+func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *store.Store) (*slackruntime.Runtime, *slackingest.Coordinator, slackruntime.State, error) {
 	if s.slackDisabled {
-		s.slackState = slackruntime.StateDisabled
-		return nil
+		return nil, nil, slackruntime.StateDisabled, nil
 	}
 	if s.runtimeFactory == nil {
-		return errors.New("production Slack runtime factory is required")
+		return nil, nil, "", errors.New("production Slack runtime factory is required")
 	}
-	trusted, err := s.store.ListTrustedUsers(ctx)
+	trusted, err := ledger.ListTrustedUsers(ctx)
 	if err != nil {
-		return err
+		return nil, nil, "", err
 	}
 	policy := store.SlackAdmissionPolicy{TeamID: c.SlackTeamID, ChannelID: c.SlackChannelID, BotUserID: c.SlackBotUserID}
-	coordinator := slackingest.New(s.store, policy, nil)
+	coordinator := slackingest.New(ledger, policy, nil)
 	rt, err := slackruntime.New(slackruntime.Options{Factory: s.runtimeFactory, TrustedUserIDs: trusted, Handler: func(ctx context.Context, e slackapi.Envelope) error { _, err := coordinator.Handle(ctx, e); return err }})
 	if err != nil {
-		return err
+		return nil, nil, "", err
 	}
 	if err = rt.Start(ctx, c); err != nil {
 		_ = rt.Close()
-		return err
+		return nil, nil, "", err
 	}
-	s.runtime, s.ingest = rt, coordinator
-	s.slackState = slackruntime.StateConnected
-	return nil
+	return rt, coordinator, slackruntime.StateConnected, nil
 }
 func (s *Server) closeSlack() {
 	if s.runtime != nil {

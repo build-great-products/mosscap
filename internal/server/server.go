@@ -579,56 +579,85 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
+
+	// Construct and verify every replacement before recording the activation
+	// decision. Nothing below publishes these candidates until ReloadConfig has
+	// committed its durable success result.
 	var replacement *store.Store
-	result, replay, err := s.store.ReloadConfig(ctx, requestID, digest, func() (store.ConfigReloadResult, error) {
-		if loadErr != nil {
-			return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate is invalid; repair config.toml"}
-		}
-		if err := s.validateStartupPaths(candidate); err != nil {
-			return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate paths are unsafe; repair private XDG paths"}
-		}
+	var candidateRuntime *slackruntime.Runtime
+	var candidateIngest *slackingest.Coordinator
+	candidateState := slackruntime.StateDisabled
+	var prepareErr error
+	if loadErr != nil {
+		prepareErr = &store.ConfigReloadError{Message: "reload candidate is invalid; repair config.toml"}
+	} else if err := s.validateStartupPaths(candidate); err != nil {
+		prepareErr = &store.ConfigReloadError{Message: "reload candidate paths are unsafe; repair private XDG paths"}
+	} else {
 		if s.Verifier != nil {
 			if err := s.Verifier.Verify(ctx, candidate); err != nil {
 				// External verifier errors may contain credentials or Slack responses.
-				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
 			}
 		}
-		current := s.snapshot()
-		if candidate.SQLiteBusyTimeout != current.SQLiteBusyTimeout {
+		if prepareErr == nil && candidate.SQLiteBusyTimeout != s.snapshot().SQLiteBusyTimeout {
 			busy, err := time.ParseDuration(candidate.SQLiteBusyTimeout)
 			if err != nil {
-				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate has an invalid SQLite busy timeout"}
-			}
-			replacement, err = store.Open(ctx, candidate.Paths.Database, store.Options{BusyTimeout: busy})
-			if err != nil {
-				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate SQLite busy timeout could not be activated"}
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate has an invalid SQLite busy timeout"}
+			} else if replacement, err = store.Open(ctx, candidate.Paths.Database, store.Options{BusyTimeout: busy}); err != nil {
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate SQLite busy timeout could not be activated"}
 			}
 		}
-		return store.ConfigReloadResult{Activated: true, SlackNetworkVerificationDeferred: true, ActiveConfigGeneration: s.generation.Load() + 1, ActiveConfigDigest: digest}, nil
-	})
-	if err != nil {
+		if prepareErr == nil {
+			ledger := s.store
+			if replacement != nil {
+				ledger = replacement
+			}
+			candidateRuntime, candidateIngest, candidateState, err = s.prepareSlack(ctx, candidate, ledger)
+			if err != nil {
+				// Runtime errors are already token-safe, but do not expose adapters'
+				// implementation details through the durable reload record.
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+			}
+		}
+	}
+	cleanupCandidate := func() {
+		if candidateRuntime != nil {
+			_ = candidateRuntime.Close()
+		}
 		if replacement != nil {
 			_ = replacement.Close()
 		}
+	}
+	result, replay, err := s.store.ReloadConfig(ctx, requestID, digest, func() (store.ConfigReloadResult, error) {
+		if prepareErr != nil {
+			return store.ConfigReloadResult{}, prepareErr
+		}
+		return store.ConfigReloadResult{Activated: true, SlackNetworkVerificationDeferred: s.slackDisabled, ActiveConfigGeneration: s.generation.Load() + 1, ActiveConfigDigest: digest}, nil
+	})
+	if err != nil {
+		cleanupCandidate()
 		return protocol.ConfigReloadDTO{}, err
 	}
 	if replay {
-		if replacement != nil {
-			_ = replacement.Close()
-		}
+		cleanupCandidate()
 		return configReloadDTO(result), nil
 	}
-	// The durable result commits before publication. No request can observe this
-	// transition half-complete because operationMu excludes other dispatches.
-	old := s.store
-	if replacement != nil {
-		s.store = replacement
+	// Publish the complete runtime/config/store frame only after the durable
+	// activation decision. operationMu has drained all server operations using
+	// the old frame; closing it afterwards drains retained Slack snapshots.
+	oldStore, oldRuntime := s.store, s.runtime
+	s.store, s.runtime, s.ingest, s.slackState = replacement, candidateRuntime, candidateIngest, candidateState
+	if replacement == nil {
+		s.store = oldStore
 	}
 	s.activeConfig.Store(&candidate)
 	s.activeDigest = digest
 	s.generation.Store(result.ActiveConfigGeneration)
+	if oldRuntime != nil {
+		_ = oldRuntime.Close()
+	}
 	if replacement != nil {
-		_ = old.Close()
+		_ = oldStore.Close()
 	}
 	return configReloadDTO(result), nil
 }
