@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -81,7 +82,7 @@ func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=3 WHERE version=2"); err != nil {
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=4 WHERE version=2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -281,7 +282,72 @@ func phase0Database(t *testing.T, path string) *sql.DB {
 	return db
 }
 
-func TestOpenUpgradesIntactPhase0AndPreservesData(t *testing.T) {
+func TestOpenMigrationFailureRollsBackV1Upgrade(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+	db := phase0Database(t, path)
+	if _, err := db.Exec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('tsk_before_failed_upgrade',1,'open','preserved','local',1,1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	breakMigration3(t)
+	if opened, err := Open(ctx, path, Options{}); err == nil {
+		_ = opened.Close()
+		t.Fatal("upgrade with failing v3 migration succeeded")
+	}
+	assertFailedUpgradeRolledBack(t, path, 1, false)
+}
+
+func breakMigration3(t *testing.T) {
+	t.Helper()
+	original := migration0003
+	migration0003 = append(bytes.Clone(original), []byte("\nCREATE TABLE migration_failure_probe(value INTEGER);\nSELECT FROM;\n")...)
+	t.Cleanup(func() { migration0003 = original })
+}
+
+func assertFailedUpgradeRolledBack(t *testing.T, path string, wantVersion int, wantTrustedUsers bool) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version, migrations, taskCount int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM tasks").Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if version != wantVersion || migrations != wantVersion || taskCount != 1 {
+		t.Fatalf("failed upgrade changed ledger: version=%d migrations=%d tasks=%d", version, migrations, taskCount)
+	}
+	var trustedUsers, slackObjects, failureProbe int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='trusted_users'").Scan(&trustedUsers); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name IN ('slack_source_events','slack_task_sources','slack_effects','files')").Scan(&slackObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='migration_failure_probe'").Scan(&failureProbe); err != nil {
+		t.Fatal(err)
+	}
+	wantTrustTable := 0
+	if wantTrustedUsers {
+		wantTrustTable = 1
+	}
+	if trustedUsers != wantTrustTable || slackObjects != 0 || failureProbe != 0 {
+		t.Fatalf("failed upgrade leaked objects: trust=%d Slack=%d probe=%d", trustedUsers, slackObjects, failureProbe)
+	}
+}
+
+func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
 	db := phase0Database(t, path)
@@ -298,7 +364,7 @@ func TestOpenUpgradesIntactPhase0AndPreservesData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
-	var version, migrations, requests int
+	var version, migrations, requests, slackTables int
 	if err := s.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
@@ -308,8 +374,11 @@ func TestOpenUpgradesIntactPhase0AndPreservesData(t *testing.T) {
 	if err := s.DB().QueryRow("SELECT count(*) FROM mutation_requests WHERE request_id='preserved-request'").Scan(&requests); err != nil {
 		t.Fatal(err)
 	}
-	if version != SchemaVersion || migrations != 2 || requests != 1 {
-		t.Fatalf("upgrade state version=%d migrations=%d requests=%d", version, migrations, requests)
+	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('slack_task_sources','slack_source_events','slack_effects','files')").Scan(&slackTables); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion || migrations != 3 || requests != 1 || slackTables != 4 {
+		t.Fatalf("upgrade state version=%d migrations=%d requests=%d Slack tables=%d", version, migrations, requests, slackTables)
 	}
 	tasks, _, err := s.List(ctx, nil, true, 10, "")
 	if err != nil || len(tasks) != 1 || tasks[0].Text != "preserved task" {
@@ -388,7 +457,7 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.DB().Exec("PRAGMA user_version=3"); err != nil {
+		if _, err := s.DB().Exec("PRAGMA user_version=4"); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {

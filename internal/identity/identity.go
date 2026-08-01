@@ -46,6 +46,12 @@ func (g Generator) NewTaskID() (string, error) { return g.NewID("tsk_") }
 // NewStateEventID returns a task-state-event ID.
 func (g Generator) NewStateEventID() (string, error) { return g.NewID("ste_") }
 
+// NewEffectID returns a Slack effect ID.
+func (g Generator) NewEffectID() (string, error) { return g.NewID("eff_") }
+
+// NewFileID returns a durable file-metadata ID.
+func (g Generator) NewFileID() (string, error) { return g.NewID("fil_") }
+
 // NewRequestID returns a request ID.
 func (g Generator) NewRequestID() (string, error) { return g.NewID("req_") }
 

@@ -8,7 +8,7 @@ import (
 )
 
 func TestGeneratorPrefixesAndEntropy(t *testing.T) {
-	generator := NewGenerator(bytes.NewReader(make([]byte, 48)))
+	generator := NewGenerator(bytes.NewReader(make([]byte, 80)))
 	for _, test := range []struct {
 		name string
 		new  func() (string, error)
@@ -16,6 +16,8 @@ func TestGeneratorPrefixesAndEntropy(t *testing.T) {
 	}{
 		{"task", generator.NewTaskID, "tsk_"},
 		{"state event", generator.NewStateEventID, "ste_"},
+		{"effect", generator.NewEffectID, "eff_"},
+		{"file", generator.NewFileID, "fil_"},
 		{"request", generator.NewRequestID, "req_"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

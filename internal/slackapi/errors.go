@@ -1,0 +1,208 @@
+package slackapi
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// FailurePoint captures what is known about external submission when an error
+// is observed.
+type FailurePoint string
+
+const (
+	FailureRead         FailurePoint = "read"
+	FailureSocket       FailurePoint = "socket"
+	FailureBeforeSubmit FailurePoint = "before_submit"
+	FailureAfterSubmit  FailurePoint = "after_submit"
+)
+
+// FailureClass is the durable decision domain code should make.
+type FailureClass string
+
+const (
+	FailureNone         FailureClass = ""
+	FailureConclusive   FailureClass = "conclusive"
+	FailureUnavailable  FailureClass = "unavailable"
+	FailureNotSubmitted FailureClass = "not_submitted"
+	FailureAmbiguous    FailureClass = "ambiguous"
+)
+
+// ErrorReason is an adapter-provided, SDK-independent reason.
+type ErrorReason string
+
+const (
+	ReasonRejected        ErrorReason = "rejected"
+	ReasonInvalidResponse ErrorReason = "invalid_response"
+	ReasonTimeout         ErrorReason = "timeout"
+	ReasonCanceled        ErrorReason = "canceled"
+	ReasonDisconnected    ErrorReason = "disconnected"
+	ReasonUnavailable     ErrorReason = "unavailable"
+)
+
+// DiagnosticCode is a bounded allowlisted value safe for persistence/logging.
+type DiagnosticCode string
+
+const (
+	DiagnosticInvalidAuth        DiagnosticCode = "invalid_auth"
+	DiagnosticTokenRevoked       DiagnosticCode = "token_revoked"
+	DiagnosticMissingScope       DiagnosticCode = "missing_scope"
+	DiagnosticTeamMismatch       DiagnosticCode = "team_mismatch"
+	DiagnosticBotMismatch        DiagnosticCode = "bot_mismatch"
+	DiagnosticChannelNotFound    DiagnosticCode = "channel_not_found"
+	DiagnosticChannelArchived    DiagnosticCode = "channel_archived"
+	DiagnosticChannelReadOnly    DiagnosticCode = "channel_read_only"
+	DiagnosticUnsupportedChannel DiagnosticCode = "unsupported_channel"
+	DiagnosticNotInChannel       DiagnosticCode = "not_in_channel"
+	DiagnosticUserNotFound       DiagnosticCode = "user_not_found"
+	DiagnosticMessageNotFound    DiagnosticCode = "message_not_found"
+	DiagnosticRejected           DiagnosticCode = "external_rejected"
+	DiagnosticRateLimited        DiagnosticCode = "rate_limited"
+	DiagnosticTimeout            DiagnosticCode = "timeout"
+	DiagnosticCanceled           DiagnosticCode = "canceled"
+	DiagnosticDisconnected       DiagnosticCode = "disconnected"
+	DiagnosticMalformedResponse  DiagnosticCode = "malformed_response"
+	DiagnosticUnavailable        DiagnosticCode = "unavailable"
+	DiagnosticInvalidRequest     DiagnosticCode = "invalid_request"
+)
+
+// Valid reports whether d is in the durable diagnostic allowlist.
+func (d DiagnosticCode) Valid() bool {
+	switch d {
+	case DiagnosticInvalidAuth, DiagnosticTokenRevoked, DiagnosticMissingScope,
+		DiagnosticTeamMismatch, DiagnosticBotMismatch, DiagnosticChannelNotFound,
+		DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel,
+		DiagnosticNotInChannel, DiagnosticUserNotFound, DiagnosticMessageNotFound,
+		DiagnosticRejected, DiagnosticRateLimited, DiagnosticTimeout,
+		DiagnosticCanceled, DiagnosticDisconnected, DiagnosticMalformedResponse,
+		DiagnosticUnavailable, DiagnosticInvalidRequest:
+		return true
+	default:
+		return false
+	}
+}
+
+// ExternalError carries only sanitized adapter metadata. It deliberately does
+// not retain or unwrap an SDK cause: generic error walkers and debug renderers
+// must never recover arbitrary external response text.
+type ExternalError struct {
+	reason     ErrorReason
+	diagnostic DiagnosticCode
+	requestID  string
+}
+
+// NewExternalError creates a classified adapter error, replacing unknown
+// diagnostics and unsafe request IDs with bounded defaults. cause is accepted
+// at the adapter boundary but deliberately discarded; callers must encode all
+// classification facts in reason and diagnostic.
+func NewExternalError(reason ErrorReason, diagnostic DiagnosticCode, requestID string, _ error) *ExternalError {
+	if !diagnostic.Valid() {
+		diagnostic = defaultDiagnostic(reason)
+	}
+	if !safeRequestID(requestID) {
+		requestID = ""
+	}
+	return &ExternalError{reason: reason, diagnostic: diagnostic, requestID: requestID}
+}
+
+func (e *ExternalError) Error() string {
+	if e == nil {
+		return "Slack external failure"
+	}
+	if e.requestID != "" {
+		return fmt.Sprintf("Slack external failure (%s, request %s)", e.diagnostic, e.requestID)
+	}
+	return fmt.Sprintf("Slack external failure (%s)", e.diagnostic)
+}
+
+// Format forces every fmt rendering, including %#v debug output, through the
+// same secret-safe representation as Error.
+func (e *ExternalError) Format(state fmt.State, _ rune) {
+	_, _ = state.Write([]byte(e.Error()))
+}
+
+// Failure is the secret-safe result of classifying an adapter error.
+type Failure struct {
+	Class      FailureClass
+	Diagnostic DiagnosticCode
+	RequestID  string
+}
+
+// Classify centralizes the conservative effect/read/socket failure policy.
+// Rejections are conclusive at every point. Any non-conclusive failure after a
+// mutation may have started is ambiguous.
+func Classify(err error, point FailurePoint) Failure {
+	if err == nil {
+		return Failure{}
+	}
+	reason := reasonFromError(err)
+	diagnostic := defaultDiagnostic(reason)
+	requestID := ""
+	var external *ExternalError
+	if errors.As(err, &external) {
+		reason = external.reason
+		diagnostic = external.diagnostic
+		requestID = external.requestID
+	}
+	if reason == ReasonRejected {
+		return Failure{Class: FailureConclusive, Diagnostic: diagnostic, RequestID: requestID}
+	}
+	switch point {
+	case FailureRead, FailureSocket:
+		return Failure{Class: FailureUnavailable, Diagnostic: diagnostic, RequestID: requestID}
+	case FailureBeforeSubmit:
+		return Failure{Class: FailureNotSubmitted, Diagnostic: diagnostic, RequestID: requestID}
+	case FailureAfterSubmit:
+		return Failure{Class: FailureAmbiguous, Diagnostic: diagnostic, RequestID: requestID}
+	default:
+		return Failure{Class: FailureAmbiguous, Diagnostic: diagnostic, RequestID: requestID}
+	}
+}
+
+func reasonFromError(err error) ErrorReason {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return ReasonTimeout
+	case errors.Is(err, context.Canceled):
+		return ReasonCanceled
+	default:
+		return ReasonUnavailable
+	}
+}
+
+func defaultDiagnostic(reason ErrorReason) DiagnosticCode {
+	switch reason {
+	case ReasonRejected:
+		return DiagnosticRejected
+	case ReasonInvalidResponse:
+		return DiagnosticMalformedResponse
+	case ReasonTimeout:
+		return DiagnosticTimeout
+	case ReasonCanceled:
+		return DiagnosticCanceled
+	case ReasonDisconnected:
+		return DiagnosticDisconnected
+	default:
+		return DiagnosticUnavailable
+	}
+}
+
+func safeRequestID(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > MaxIDBytes {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') &&
+			!(r >= '0' && r <= '9') && r != '-' && r != '_' && r != '.' {
+			return false
+		}
+	}
+	// Slack credentials share recognizable xox*/xapp stems. A request ID that
+	// contains either stem is safer to omit than to render or persist.
+	lower := strings.ToLower(value)
+	return !strings.Contains(lower, "xox") && !strings.Contains(lower, "xapp")
+}

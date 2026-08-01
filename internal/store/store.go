@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	SchemaVersion      = 2
+	SchemaVersion      = 3
 	ApplicationID      = 0x4d435030 // "MCP0"
 	RequestRetention   = 30 * 24 * time.Hour
 	defaultBusyTimeout = 5 * time.Second
@@ -38,6 +38,9 @@ var migration0001 []byte
 
 //go:embed migrations/0002_trusted_users.sql
 var migration0002 []byte
+
+//go:embed migrations/0003_slack.sql
+var migration0003 []byte
 
 var (
 	ErrIncompatibleSchema = errors.New("incompatible SQLite schema")
@@ -142,6 +145,8 @@ func migrationChecksum(version int) string {
 		migration = migration0001
 	case 2:
 		migration = migration0002
+	case 3:
+		migration = migration0003
 	default:
 		return ""
 	}
@@ -166,7 +171,8 @@ func Initialize(ctx context.Context, path string, opt Options) (*Store, error) {
 	return s, nil
 }
 
-// Open verifies an initialized database and upgrades only an intact Phase-0 v1 ledger.
+// Open verifies an initialized database and upgrades only an intact older ledger.
+// A direct v1 upgrade applies v2 and v3 atomically.
 func Open(ctx context.Context, path string, opt Options) (*Store, error) {
 	s, err := open(ctx, path, opt)
 	if err != nil {
@@ -323,7 +329,7 @@ func (s *Store) initialize(ctx context.Context, created bool) error {
 	for _, migration := range []struct {
 		version int
 		sql     []byte
-	}{{1, migration0001}, {2, migration0002}} {
+	}{{1, migration0001}, {2, migration0002}, {3, migration0003}} {
 		if _, err = tx.ExecContext(ctx, string(migration.sql)); err != nil {
 			return err
 		}
@@ -344,29 +350,38 @@ func (s *Store) openOrUpgrade(ctx context.Context) error {
 	if err := s.compatible(ctx); err == nil {
 		return nil
 	}
-	if err := s.compatibleVersion(ctx, 1); err != nil {
-		return fmt.Errorf("%w: application_id, version, or migration history", ErrIncompatibleSchema)
+	for version := SchemaVersion - 1; version >= 1; version-- {
+		if err := s.compatibleVersion(ctx, version); err == nil {
+			return s.upgrade(ctx, version)
+		}
 	}
-	return s.upgradeV1(ctx)
+	return fmt.Errorf("%w: application_id, version, or migration history", ErrIncompatibleSchema)
 }
 
-func (s *Store) upgradeV1(ctx context.Context) error {
+func (s *Store) upgrade(ctx context.Context, fromVersion int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := compatibleVersion(ctx, tx, 1); err != nil {
+	if err := compatibleVersion(ctx, tx, fromVersion); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, string(migration0002)); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(2, ?, ?)", migrationChecksum(2), s.now()); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version=2"); err != nil {
-		return err
+	migrations := map[int][]byte{2: migration0002, 3: migration0003}
+	for version := fromVersion + 1; version <= SchemaVersion; version++ {
+		migration, ok := migrations[version]
+		if !ok {
+			return fmt.Errorf("%w: missing migration %d", ErrIncompatibleSchema, version)
+		}
+		if _, err := tx.ExecContext(ctx, string(migration)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?, ?, ?)", version, migrationChecksum(version), s.now()); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -432,31 +447,28 @@ func compatibleVersion(ctx context.Context, q rowQueryer, version int) error {
 }
 
 func expectedSchemaObjects(ctx context.Context, q rowQueryer, version int) error {
-	expected := map[string]bool{
-		"table/schema_migrations":                    true,
-		"table/tasks":                                true,
-		"table/task_state_events":                    true,
-		"table/mutation_requests":                    true,
-		"index/tasks_state_updated_idx":              true,
-		"index/task_state_events_task_committed_idx": true,
-		"index/mutation_requests_expiry_idx":         true,
+	expected, err := expectedSchemaFingerprints(ctx, version)
+	if err != nil {
+		return fmt.Errorf("%w: expected schema: %v", ErrIncompatibleSchema, err)
 	}
-	if version >= 2 {
-		expected["table/trusted_users"] = true
-	}
-	rows, err := q.QueryContext(ctx, "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+	rows, err := q.QueryContext(ctx, "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
 	if err != nil {
 		return fmt.Errorf("%w: schema objects: %v", ErrIncompatibleSchema, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var typ, name string
-		if err := rows.Scan(&typ, &name); err != nil {
+		var ddl sql.NullString
+		if err := rows.Scan(&typ, &name, &ddl); err != nil {
 			return fmt.Errorf("%w: schema objects", ErrIncompatibleSchema)
 		}
 		key := typ + "/" + name
-		if !expected[key] {
+		fingerprint, ok := expected[key]
+		if !ok {
 			return fmt.Errorf("%w: unknown schema object", ErrIncompatibleSchema)
+		}
+		if !ddl.Valid || schemaFingerprint(ddl.String) != fingerprint {
+			return fmt.Errorf("%w: altered schema object %s", ErrIncompatibleSchema, key)
 		}
 		delete(expected, key)
 	}
@@ -464,6 +476,49 @@ func expectedSchemaObjects(ctx context.Context, q rowQueryer, version int) error
 		return fmt.Errorf("%w: schema objects", ErrIncompatibleSchema)
 	}
 	return nil
+}
+
+// expectedSchemaFingerprints builds SQLite's canonical sqlite_master DDL from
+// the embedded migrations themselves. Comparing fingerprints, rather than
+// names alone, rejects same-name tables and indexes with altered semantics.
+func expectedSchemaFingerprints(ctx context.Context, version int) (map[string]string, error) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	migrations := [][]byte{migration0001, migration0002, migration0003}
+	if version < 1 || version > len(migrations) {
+		return nil, errors.New("unknown schema version")
+	}
+	for _, migration := range migrations[:version] {
+		if _, err := db.ExecContext(ctx, string(migration)); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := db.QueryContext(ctx, "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	fingerprints := make(map[string]string)
+	for rows.Next() {
+		var typ, name, ddl string
+		if err := rows.Scan(&typ, &name, &ddl); err != nil {
+			return nil, err
+		}
+		fingerprints[typ+"/"+name] = schemaFingerprint(ddl)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return fingerprints, nil
+}
+
+func schemaFingerprint(ddl string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(strings.ReplaceAll(ddl, "\r\n", "\n"))))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) now() int64 { return clock.UnixMicro(s.clock.Now()) }
