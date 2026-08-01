@@ -12,19 +12,21 @@ type Counts struct {
 // Snapshot is the stable gateway_status result. It contains identities and
 // metrics only; it deliberately never contains task text or secrets.
 type Snapshot struct {
-	UptimeSeconds     int64  `json:"uptime_seconds"`
-	ServerVersion     string `json:"server_version"`
-	ProtocolVersion   int    `json:"protocol_version"`
-	SchemaVersion     int    `json:"schema_version"`
-	PID               int    `json:"pid"`
-	Database          string `json:"database"`
-	Endpoint          string `json:"endpoint"`
-	TaskCounts        Counts `json:"task_counts"`
-	DatabaseBytes     int64  `json:"database_bytes"`
-	WALBytes          int64  `json:"wal_bytes"`
-	Connections       int    `json:"connections"`
-	Health            string `json:"health"`
-	EffectsCapability string `json:"effects_capability"`
-	SlackCapability   string `json:"slack_capability"`
-	PiCapability      string `json:"pi_capability"`
+	UptimeSeconds          int64  `json:"uptime_seconds"`
+	ServerVersion          string `json:"server_version"`
+	ProtocolVersion        int    `json:"protocol_version"`
+	SchemaVersion          int    `json:"schema_version"`
+	ActiveConfigGeneration int64  `json:"active_config_generation"`
+	ActiveConfigDigest     string `json:"active_config_digest,omitempty"`
+	PID                    int    `json:"pid"`
+	Database               string `json:"database"`
+	Endpoint               string `json:"endpoint"`
+	TaskCounts             Counts `json:"task_counts"`
+	DatabaseBytes          int64  `json:"database_bytes"`
+	WALBytes               int64  `json:"wal_bytes"`
+	Connections            int    `json:"connections"`
+	Health                 string `json:"health"`
+	EffectsCapability      string `json:"effects_capability"`
+	SlackCapability        string `json:"slack_capability"`
+	PiCapability           string `json:"pi_capability"`
 }

@@ -27,15 +27,17 @@ import (
 )
 
 const (
-	SchemaVersion      = 1
+	SchemaVersion      = 2
 	ApplicationID      = 0x4d435030 // "MCP0"
 	RequestRetention   = 30 * 24 * time.Hour
 	defaultBusyTimeout = 5 * time.Second
-	migrationFilename  = "0001_phase0.sql"
 )
 
 //go:embed migrations/0001_phase0.sql
 var migration0001 []byte
+
+//go:embed migrations/0002_trusted_users.sql
+var migration0002 []byte
 
 var (
 	ErrIncompatibleSchema = errors.New("incompatible SQLite schema")
@@ -72,6 +74,14 @@ type MutationResult struct {
 	Changed   bool       `json:"changed"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// TrustMutationResult is the current authorization state after a trust mutation.
+// It intentionally contains no trust-change history.
+type TrustMutationResult struct {
+	SlackUserID string `json:"slack_user_id"`
+	Trusted     bool   `json:"trusted"`
+	Changed     bool   `json:"changed"`
 }
 
 type StateEvent struct {
@@ -119,7 +129,25 @@ func decodeCursor(cursor string) (listCursor, error) {
 	return c, nil
 }
 
-func Checksum() string { h := sha256.Sum256(migration0001); return hex.EncodeToString(h[:]) }
+// Checksum returns the Phase-0 migration checksum for compatibility with v1 callers.
+func Checksum() string { return migrationChecksum(1) }
+
+// MigrationChecksum returns the checksum for a known embedded migration.
+func MigrationChecksum(version int) string { return migrationChecksum(version) }
+
+func migrationChecksum(version int) string {
+	var migration []byte
+	switch version {
+	case 1:
+		migration = migration0001
+	case 2:
+		migration = migration0002
+	default:
+		return ""
+	}
+	h := sha256.Sum256(migration)
+	return hex.EncodeToString(h[:])
+}
 
 // Initialize creates (if needed) and migrates only a new or empty database.
 func Initialize(ctx context.Context, path string, opt Options) (*Store, error) {
@@ -138,13 +166,13 @@ func Initialize(ctx context.Context, path string, opt Options) (*Store, error) {
 	return s, nil
 }
 
-// Open verifies an already initialized database; it never migrates it.
+// Open verifies an initialized database and upgrades only an intact Phase-0 v1 ledger.
 func Open(ctx context.Context, path string, opt Options) (*Store, error) {
 	s, err := open(ctx, path, opt)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.compatible(ctx); err != nil {
+	if err := s.openOrUpgrade(ctx); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -292,45 +320,152 @@ func (s *Store) initialize(ctx context.Context, created bool) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, string(migration0001)); err != nil {
-		return err
+	for _, migration := range []struct {
+		version int
+		sql     []byte
+	}{{1, migration0001}, {2, migration0002}} {
+		if _, err = tx.ExecContext(ctx, string(migration.sql)); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(?, ?, ?)", migration.version, migrationChecksum(migration.version), s.now()); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id=%d", ApplicationID)); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "PRAGMA user_version=1"); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(1, ?, ?)", Checksum(), s.now()); err != nil {
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion)); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
+
+func (s *Store) openOrUpgrade(ctx context.Context) error {
+	if err := s.compatible(ctx); err == nil {
+		return nil
+	}
+	if err := s.compatibleVersion(ctx, 1); err != nil {
+		return fmt.Errorf("%w: application_id, version, or migration history", ErrIncompatibleSchema)
+	}
+	return s.upgradeV1(ctx)
+}
+
+func (s *Store) upgradeV1(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := compatibleVersion(ctx, tx, 1); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, string(migration0002)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES(2, ?, ?)", migrationChecksum(2), s.now()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version=2"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.compatible(ctx)
+}
+
 func (s *Store) compatible(ctx context.Context) error {
-	var app, version int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
-		return err
+	return s.compatibleVersion(ctx, SchemaVersion)
+}
+
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func (s *Store) compatibleVersion(ctx context.Context, version int) error {
+	return compatibleVersion(ctx, s.db, version)
+}
+
+func compatibleVersion(ctx context.Context, q rowQueryer, version int) error {
+	var app, actualVersion int
+	if err := q.QueryRowContext(ctx, "PRAGMA application_id").Scan(&app); err != nil {
+		return fmt.Errorf("%w: application_id: %v", ErrIncompatibleSchema, err)
 	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return err
+	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&actualVersion); err != nil {
+		return fmt.Errorf("%w: user_version: %v", ErrIncompatibleSchema, err)
 	}
-	if app != ApplicationID || version != SchemaVersion {
+	if app != ApplicationID || actualVersion != version {
 		return fmt.Errorf("%w: application_id or version", ErrIncompatibleSchema)
 	}
-	var migrationVersion, n int
-	var checksum string
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*), coalesce(max(version), 0), coalesce(max(checksum), '') FROM schema_migrations").Scan(&n, &migrationVersion, &checksum); err != nil {
+	rows, err := q.QueryContext(ctx, "SELECT version, checksum FROM schema_migrations ORDER BY version")
+	if err != nil {
 		return fmt.Errorf("%w: migration table: %v", ErrIncompatibleSchema, err)
 	}
-	if n != 1 || migrationVersion != SchemaVersion || checksum != Checksum() {
+	for expected := 1; expected <= version; expected++ {
+		if !rows.Next() {
+			_ = rows.Close()
+			return fmt.Errorf("%w: migration history", ErrIncompatibleSchema)
+		}
+		var got int
+		var checksum string
+		if err := rows.Scan(&got, &checksum); err != nil || got != expected || checksum != migrationChecksum(expected) {
+			_ = rows.Close()
+			return fmt.Errorf("%w: migration history", ErrIncompatibleSchema)
+		}
+	}
+	if rows.Next() || rows.Err() != nil {
+		_ = rows.Close()
 		return fmt.Errorf("%w: migration history", ErrIncompatibleSchema)
 	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("%w: migration history", ErrIncompatibleSchema)
+	}
+	if err := expectedSchemaObjects(ctx, q, version); err != nil {
+		return err
+	}
 	var check string
-	if err := s.db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil || check != "ok" {
+	if err := q.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil || check != "ok" {
 		return fmt.Errorf("%w: quick_check", ErrIncompatibleSchema)
 	}
 	return nil
 }
+
+func expectedSchemaObjects(ctx context.Context, q rowQueryer, version int) error {
+	expected := map[string]bool{
+		"table/schema_migrations":                    true,
+		"table/tasks":                                true,
+		"table/task_state_events":                    true,
+		"table/mutation_requests":                    true,
+		"index/tasks_state_updated_idx":              true,
+		"index/task_state_events_task_committed_idx": true,
+		"index/mutation_requests_expiry_idx":         true,
+	}
+	if version >= 2 {
+		expected["table/trusted_users"] = true
+	}
+	rows, err := q.QueryContext(ctx, "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		return fmt.Errorf("%w: schema objects: %v", ErrIncompatibleSchema, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var typ, name string
+		if err := rows.Scan(&typ, &name); err != nil {
+			return fmt.Errorf("%w: schema objects", ErrIncompatibleSchema)
+		}
+		key := typ + "/" + name
+		if !expected[key] {
+			return fmt.Errorf("%w: unknown schema object", ErrIncompatibleSchema)
+		}
+		delete(expected, key)
+	}
+	if err := rows.Err(); err != nil || len(expected) != 0 {
+		return fmt.Errorf("%w: schema objects", ErrIncompatibleSchema)
+	}
+	return nil
+}
+
 func (s *Store) now() int64 { return clock.UnixMicro(s.clock.Now()) }
 func hash(operation string, values ...string) string {
 	h := sha256.New()
@@ -461,14 +596,17 @@ func (s *Store) mutate(ctx context.Context, req request, requestID string, fn fu
 		return MutationResult{}, err
 	}
 	defer tx.Rollback()
-	var operation, inputHash, outcome, resultJSON, errorCode, errorMessage string
-	err = tx.QueryRowContext(ctx, "SELECT operation,input_hash,outcome,coalesce(result_json,''),coalesce(error_code,''),coalesce(error_message,'') FROM mutation_requests WHERE request_id=?", requestID).Scan(&operation, &inputHash, &outcome, &resultJSON, &errorCode, &errorMessage)
+	var operation, inputHash, outcome, resultType, resultJSON, errorCode, errorMessage string
+	err = tx.QueryRowContext(ctx, "SELECT operation,input_hash,outcome,coalesce(result_type,''),coalesce(result_json,''),coalesce(error_code,''),coalesce(error_message,'') FROM mutation_requests WHERE request_id=?", requestID).Scan(&operation, &inputHash, &outcome, &resultType, &resultJSON, &errorCode, &errorMessage)
 	if err == nil {
 		if operation != req.operation || inputHash != req.hash {
 			return MutationResult{}, ErrRequestConflict
 		}
 		if outcome != "success" {
 			return MutationResult{}, errorForCode(errorCode, errorMessage)
+		}
+		if resultType != "task_mutation" {
+			return MutationResult{}, errors.New("prior mutation result type mismatch")
 		}
 		var r MutationResult
 		if err := json.Unmarshal([]byte(resultJSON), &r); err != nil {
@@ -506,6 +644,154 @@ func (s *Store) mutate(ctx context.Context, req request, requestID string, fn fu
 	}
 	return r, nil
 }
+
+// ListTrustedUsers returns the committed Slack user-ID allowlist in lexical order.
+func (s *Store) ListTrustedUsers(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT slack_user_id FROM trusted_users ORDER BY slack_user_id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []string
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		users = append(users, userID)
+	}
+	return users, rows.Err()
+}
+
+// IsTrustedUser reads current committed authorization directly from SQLite;
+// callers must not replace this authority check with a configuration cache.
+func (s *Store) IsTrustedUser(ctx context.Context, userID string) (bool, error) {
+	if !validSlackUserID(userID) {
+		return false, invalidInput("invalid Slack user ID")
+	}
+	var trusted bool
+	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM trusted_users WHERE slack_user_id=?)", userID).Scan(&trusted); err != nil {
+		return false, err
+	}
+	return trusted, nil
+}
+
+// AddTrustedUser records a Slack user ID in the current allowlist.
+func (s *Store) AddTrustedUser(ctx context.Context, requestID, userID string) (TrustMutationResult, error) {
+	return s.mutateTrust(ctx, request{"trusted_user.add", hash("trusted_user.add", userID)}, requestID, userID, true)
+}
+
+// RemoveTrustedUser removes a Slack user ID from the current allowlist.
+func (s *Store) RemoveTrustedUser(ctx context.Context, requestID, userID string) (TrustMutationResult, error) {
+	return s.mutateTrust(ctx, request{"trusted_user.remove", hash("trusted_user.remove", userID)}, requestID, userID, false)
+}
+
+func validSlackUserID(userID string) bool {
+	if len(userID) < 9 || len(userID) > 64 || (userID[0] != 'U' && userID[0] != 'W') {
+		return false
+	}
+	for _, c := range userID {
+		if c < 'A' || c > 'Z' {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (s *Store) mutateTrust(ctx context.Context, req request, requestID, userID string, trusted bool) (TrustMutationResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !identity.ValidRequestID(requestID) {
+		return TrustMutationResult{}, errors.New("invalid request ID")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TrustMutationResult{}, err
+	}
+	defer tx.Rollback()
+	var operation, inputHash, outcome, resultType, resultJSON, errorCode, errorMessage string
+	err = tx.QueryRowContext(ctx, "SELECT operation,input_hash,outcome,coalesce(result_type,''),coalesce(result_json,''),coalesce(error_code,''),coalesce(error_message,'') FROM mutation_requests WHERE request_id=?", requestID).Scan(&operation, &inputHash, &outcome, &resultType, &resultJSON, &errorCode, &errorMessage)
+	if err == nil {
+		if operation != req.operation || inputHash != req.hash {
+			return TrustMutationResult{}, ErrRequestConflict
+		}
+		if outcome != "success" {
+			return TrustMutationResult{}, errorForCode(errorCode, errorMessage)
+		}
+		if resultType != "trust_mutation" {
+			return TrustMutationResult{}, errors.New("prior mutation result type mismatch")
+		}
+		var result TrustMutationResult
+		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+			return TrustMutationResult{}, err
+		}
+		return result, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return TrustMutationResult{}, err
+	}
+	now := s.now()
+	if !validSlackUserID(userID) {
+		err := invalidInput("invalid Slack user ID")
+		return TrustMutationResult{}, s.storeTrustError(ctx, tx, req, requestID, now, err)
+	}
+	var changed bool
+	if trusted {
+		result, err := tx.ExecContext(ctx, "INSERT INTO trusted_users(slack_user_id) VALUES(?) ON CONFLICT(slack_user_id) DO NOTHING", userID)
+		if err != nil {
+			return TrustMutationResult{}, err
+		}
+		changed, err = rowsChanged(result)
+		if err != nil {
+			return TrustMutationResult{}, err
+		}
+	} else {
+		result, err := tx.ExecContext(ctx, "DELETE FROM trusted_users WHERE slack_user_id=?", userID)
+		if err != nil {
+			return TrustMutationResult{}, err
+		}
+		changed, err = rowsChanged(result)
+		if err != nil {
+			return TrustMutationResult{}, err
+		}
+	}
+	response := TrustMutationResult{SlackUserID: userID, Trusted: trusted, Changed: changed}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return TrustMutationResult{}, err
+	}
+	expiry := now + RequestRetention.Microseconds()
+	if _, err := tx.ExecContext(ctx, "INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,result_type,result_json,created_at,completed_at,expiry_eligible_at) VALUES(?,?,?,'success','trust_mutation',?,?,?,?)", requestID, req.operation, req.hash, string(encoded), now, now, expiry); err != nil {
+		return TrustMutationResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TrustMutationResult{}, err
+	}
+	return response, nil
+}
+
+func rowsChanged(result sql.Result) (bool, error) {
+	n, err := result.RowsAffected()
+	return n != 0, err
+}
+
+func (s *Store) storeTrustError(ctx context.Context, tx *sql.Tx, req request, requestID string, now int64, mutationErr error) error {
+	code, ok := deterministicCode(mutationErr)
+	if !ok {
+		return mutationErr
+	}
+	expiry := now + RequestRetention.Microseconds()
+	if _, err := tx.ExecContext(ctx, "INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,error_code,error_message,created_at,completed_at,expiry_eligible_at) VALUES(?,?,?,'error',?,?,?, ?,?)", requestID, req.operation, req.hash, code, mutationErr.Error(), now, now, expiry); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return mutationErr
+}
+
 func (s *Store) Get(ctx context.Context, selector string) (Task, error) {
 	return getTx(ctx, s.db, selector)
 }

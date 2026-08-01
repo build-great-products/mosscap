@@ -65,12 +65,6 @@ func (a App) Execute(_ context.Context, args []string) error {
 	if a.Version == "" {
 		a.Version = "devel"
 	}
-	var override string
-	var err error
-	args, override, err = stripGlobalConfig(args)
-	if err != nil {
-		return usage(err.Error())
-	}
 	if len(args) == 0 || isHelp(args[0]) {
 		a.printRootHelp()
 		return nil
@@ -84,20 +78,22 @@ func (a App) Execute(_ context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "setup":
-		return a.setup(override, args[1:])
+		return a.setup("", args[1:])
 	case "config":
-		return a.config(override, args[1:])
+		return a.config("", args[1:])
 	case "doctor":
-		return a.doctorCommand(override, args[1:])
+		return a.doctorCommand("", args[1:])
 	case "gateway":
-		return a.gateway(override, args[1:])
+		return a.gateway("", args[1:])
+	case "trust":
+		return a.trust(args[1:])
 	case "task":
-		return a.task(override, args[1:])
+		return a.task("", args[1:])
 	default:
 		return usage(fmt.Sprintf("unknown command %q", args[0]))
 	}
 }
-func (a App) setup(override string, args []string) error {
+func (a App) setup(_ string, args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "")
@@ -113,7 +109,7 @@ func (a App) setup(override string, args []string) error {
 	if fs.NArg() != 0 {
 		return usage("setup accepts no arguments")
 	}
-	loc, err := config.DefaultLocation(override)
+	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err
 	}
@@ -137,7 +133,7 @@ func (a App) config(override string, args []string) error {
 		return usage(fmt.Sprintf("unknown config command %q", args[0]))
 	}
 }
-func (a App) configShow(override string, args []string) error {
+func (a App) configShow(_ string, args []string) error {
 	fs := flag.NewFlagSet("config show", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	j := fs.Bool("json", false, "")
@@ -153,7 +149,7 @@ func (a App) configShow(override string, args []string) error {
 	if fs.NArg() != 0 {
 		return usage("config show accepts no arguments")
 	}
-	loc, err := config.DefaultLocation(override)
+	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err
 	}
@@ -163,23 +159,23 @@ func (a App) configShow(override string, args []string) error {
 	}
 	return a.render(config.Redact(c), *j)
 }
-func (a App) configSet(override string, args []string) error {
+func (a App) configSet(_ string, args []string) error {
 	fs := flag.NewFlagSet("config set", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	j := fs.Bool("json", false, "")
 	h := fs.Bool("help", false, "")
 	fs.BoolVar(h, "h", false, "")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderTaskFlags(args)); err != nil {
 		return usage(err.Error())
 	}
 	if *h {
-		fmt.Fprintln(a.Out, "Usage: mosscap config set KEY VALUE [--json]\n\nChanges are permitted only while the configured gateway is offline.")
+		fmt.Fprintln(a.Out, "Usage: mosscap config set KEY VALUE [--json]\n\nStage one validated setting without changing the gateway's active snapshot.")
 		return nil
 	}
 	if fs.NArg() != 2 {
 		return usage("config set requires KEY and VALUE")
 	}
-	loc, err := config.DefaultLocation(override)
+	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err
 	}
@@ -191,11 +187,14 @@ func (a App) configSet(override string, args []string) error {
 }
 func (a App) gateway(override string, args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		a.printBranchHelp("gateway", []string{"run", "status"})
+		a.printBranchHelp("gateway", []string{"run", "reload", "status"})
 		return nil
 	}
 	if args[0] == "status" {
 		return a.gatewayStatus(override, args[1:])
+	}
+	if args[0] == "reload" {
+		return a.gatewayReload(args[1:])
 	}
 	if args[0] != "run" {
 		return usage(fmt.Sprintf("unknown gateway command %q", args[0]))
@@ -214,7 +213,7 @@ func (a App) gateway(override string, args []string) error {
 	if fs.NArg() != 0 {
 		return usage("gateway run accepts no arguments")
 	}
-	loc, err := config.DefaultLocation(override)
+	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err
 	}
@@ -227,10 +226,52 @@ func (a App) gateway(override string, args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return server.New(c, loc.Path, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
+	return server.New(c, loc, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
 }
 
-func (a App) gatewayStatus(override string, args []string) error {
+func (a App) gatewayReload(args []string) error {
+	fs := flag.NewFlagSet("gateway reload", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	requestID := fs.String("request-id", "", "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		fmt.Fprintln(a.Out, "Usage: mosscap gateway reload [--request-id ID] [--json]\n\nValidate and atomically activate the complete staged configuration.")
+		return nil
+	}
+	if fs.NArg() != 0 {
+		return usage("gateway reload accepts no arguments")
+	}
+	if *requestID == "" {
+		id, err := identity.NewGenerator(nil).NewRequestID()
+		if err != nil {
+			return err
+		}
+		*requestID = id
+	}
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		return err
+	}
+	// The gateway, not the short-lived CLI, owns candidate parsing and atomic
+	// activation. Use fixed XDG paths and the conservative default frame bound so
+	// even a malformed staged file reaches the running gateway for a typed error.
+	c, err := config.Default(loc)
+	if err != nil {
+		return err
+	}
+	result, err := a.gatewayCall(c, "config.reload", *requestID, nil, protocol.CapabilityConfigReload)
+	if err != nil {
+		return err
+	}
+	return a.render(map[string]any{"request_id": *requestID, "result": result}, *j)
+}
+
+func (a App) gatewayStatus(_ string, args []string) error {
 	fs := flag.NewFlagSet("gateway status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	j := fs.Bool("json", false, "")
@@ -246,22 +287,22 @@ func (a App) gatewayStatus(override string, args []string) error {
 	if fs.NArg() != 0 {
 		return usage("gateway status accepts no arguments")
 	}
-	loc, err := config.DefaultLocation(override)
+	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err
 	}
-	c, err := config.Load(loc)
+	c, err := config.Default(loc)
 	if err != nil {
 		return err
 	}
-	result, err := a.gatewayCall(c, "status.get", "req_status", nil)
+	result, err := a.gatewayCall(c, "status.get", "req_status", nil, "")
 	if err != nil {
 		return err
 	}
 	return a.render(result, *j)
 }
 
-func (a App) doctorCommand(override string, args []string) error {
+func (a App) doctorCommand(_ string, args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	j := fs.Bool("json", false, "")
@@ -277,16 +318,22 @@ func (a App) doctorCommand(override string, args []string) error {
 	if fs.NArg() != 0 {
 		return usage("doctor accepts no arguments")
 	}
-	loc, err := config.DefaultLocation(override)
+	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err
 	}
-	c, err := config.Load(loc)
-	if err != nil {
-		return err
+	c, configErr := config.Load(loc)
+	if configErr != nil {
+		// A staged edit must not prevent doctor from reaching the fixed endpoint
+		// of a healthy gateway still using its previous snapshot. Paths are not
+		// configurable, so the default supplies only those fixed locations.
+		c, err = config.Default(loc)
+		if err != nil {
+			return err
+		}
 	}
-	checks := localDoctorChecks(loc, c)
-	remoteResult, remoteErr := a.gatewayCall(c, "doctor.run", "req_doctor", nil)
+	checks := localDoctorChecks(loc, c, configErr)
+	remoteResult, remoteErr := a.gatewayCall(c, "doctor.run", "req_doctor", nil, "")
 	if remoteErr != nil {
 		checks = append(checks, doctor.Check{Name: "gateway_diagnostics", Status: doctor.Skipped, Message: "gateway diagnostics unavailable", Action: "start mosscap gateway run"})
 		report := doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
@@ -304,20 +351,31 @@ func (a App) doctorCommand(override string, args []string) error {
 	return a.render(doctor.Report{Overall: doctor.Overall(checks), Checks: checks}, *j)
 }
 
-func (a App) gatewayCall(c config.Config, command, requestID string, params any) (any, error) {
-	cl, err := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.Protocol.MaxFrameBytes))
+func (a App) gatewayCall(c config.Config, command, requestID string, params any, requiredCapability string) (any, error) {
+	if params == nil {
+		params = protocol.EmptyParams{}
+	}
+	b, err := json.Marshal(params)
+	if err != nil {
+		return nil, usage("invalid request parameters")
+	}
+	request := protocol.Request{ProtocolVersion: protocol.Version, RequestID: requestID, ClientKind: "cli", ClientVersion: a.Version, Command: command, Params: b}
+	if err := request.Validate(); err != nil {
+		return nil, usage(err.Error())
+	}
+	cl, err := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
 	if err != nil {
 		return nil, &commandError{ExitUnavailable, err.Error()}
 	}
 	defer cl.Close()
-	if _, err = cl.Hello(context.Background(), "req_hello_"+strings.ReplaceAll(command, ".", "_"), "cli", a.Version, nil); err != nil {
+	hello, err := cl.Hello(context.Background(), "req_hello_"+strings.ReplaceAll(command, ".", "_"), "cli", a.Version, nil)
+	if err != nil {
 		return nil, remote(err)
 	}
-	if params == nil {
-		params = protocol.EmptyParams{}
+	if requiredCapability != "" && !hasCapability(hello.Capabilities, requiredCapability) {
+		return nil, unsupported("gateway does not support " + requiredCapability + "; upgrade the gateway before using this command")
 	}
-	b, _ := json.Marshal(params)
-	response, err := cl.Call(context.Background(), protocol.Request{ProtocolVersion: protocol.Version, RequestID: requestID, ClientKind: "cli", ClientVersion: a.Version, Command: command, Params: b})
+	response, err := cl.Call(context.Background(), request)
 	if err != nil {
 		return nil, remote(err)
 	}
@@ -330,9 +388,13 @@ func (a App) gatewayCall(c config.Config, command, requestID string, params any)
 	}
 	return out, nil
 }
-func localDoctorChecks(loc config.Location, c config.Config) []doctor.Check {
+func localDoctorChecks(loc config.Location, c config.Config, loadErr error) []doctor.Check {
 	checks := []doctor.Check{}
-	if err := config.Validate(c); err != nil {
+	if loadErr != nil {
+		// Do not include parser errors: TOML parser diagnostics can quote a
+		// token-bearing value. The fixed-endpoint checks below remain useful.
+		checks = append(checks, doctor.Check{Name: "config", Status: doctor.Fail, Message: "staged configuration is malformed or obsolete", Action: "repair config.toml, then run gateway reload"})
+	} else if err := config.Validate(c); err != nil {
 		checks = append(checks, doctor.Check{Name: "config", Status: doctor.Fail, Message: "configuration is invalid", Action: "fix config.toml"})
 	} else {
 		checks = append(checks, doctor.Check{Name: "config", Status: doctor.Pass, Message: "configuration is valid"})
@@ -350,13 +412,6 @@ func localDoctorChecks(loc config.Location, c config.Config) []doctor.Check {
 	} else {
 		checks = append(checks, doctor.Check{Name: "private_paths", Status: doctor.Pass, Message: "configured path components and state paths are private and safe"})
 	}
-	if c.Slack.SecretsFile == "" {
-		checks = append(checks, doctor.Check{Name: "secrets_file", Status: doctor.Pass, Message: "no secrets file is configured"})
-	} else if securepath.CheckAbsoluteComponents(c.Slack.SecretsFile) != nil || securepath.CheckFile(c.Slack.SecretsFile) != nil {
-		checks = append(checks, doctor.Check{Name: "secrets_file", Status: doctor.Fail, Message: "configured secrets file or its path components are unsafe", Action: "repair secrets file ownership, mode, and path components"})
-	} else {
-		checks = append(checks, doctor.Check{Name: "secrets_file", Status: doctor.Pass, Message: "configured secrets file is private and safe"})
-	}
 	var fs syscall.Statfs_t
 	if err := syscall.Statfs(c.Paths.StateDir, &fs); err != nil {
 		checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Warn, Message: "state filesystem space is unavailable", Action: "restore the state directory and inspect available space"})
@@ -368,18 +423,84 @@ func localDoctorChecks(loc config.Location, c config.Config) []doctor.Check {
 			checks = append(checks, doctor.Check{Name: "storage_space", Status: doctor.Pass, Message: "state filesystem has available space"})
 		}
 	}
-	// Redaction is structural: only presence booleans and a marker are exposed.
-	view := config.Redact(c)
-	if view.Slack.SecretsFile == "<configured>" || view.Slack.SecretsFile == "<unset>" {
-		checks = append(checks, doctor.Check{Name: "secret_redaction", Status: doctor.Pass, Message: "diagnostics redact configured secrets"})
-	} else {
-		checks = append(checks, doctor.Check{Name: "secret_redaction", Status: doctor.Fail, Message: "secret redaction is unsafe", Action: "repair configuration"})
-	}
+	// Redaction is structural: the view type has no token-value fields.
+	_ = config.Redact(c)
+	checks = append(checks, doctor.Check{Name: "secret_redaction", Status: doctor.Pass, Message: "diagnostics structurally omit Slack token values"})
 	_ = loc
 	return checks
 }
 
-func (a App) task(override string, args []string) error {
+func (a App) trust(args []string) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		a.printBranchHelp("trust", []string{"list", "add", "remove"})
+		return nil
+	}
+	cmd := args[0]
+	if cmd != "list" && cmd != "add" && cmd != "remove" {
+		return usage(fmt.Sprintf("unknown trust command %q", cmd))
+	}
+	fs := flag.NewFlagSet("trust "+cmd, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	j := fs.Bool("json", false, "")
+	h := fs.Bool("help", false, "")
+	fs.BoolVar(h, "h", false, "")
+	requestID := fs.String("request-id", "", "")
+	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+		return usage(err.Error())
+	}
+	if *h {
+		if cmd == "list" {
+			fmt.Fprintln(a.Out, "Usage: mosscap trust list [--json]")
+		} else {
+			fmt.Fprintf(a.Out, "Usage: mosscap trust %s SLACK_USER_ID [--request-id ID] [--json]\n", cmd)
+		}
+		return nil
+	}
+	mutation := cmd != "list"
+	if !mutation {
+		if fs.NArg() != 0 || *requestID != "" {
+			return usage("trust list accepts no arguments and no --request-id")
+		}
+		*requestID = "req_trust_list"
+	} else {
+		if fs.NArg() != 1 {
+			return usage("trust " + cmd + " requires SLACK_USER_ID")
+		}
+		if *requestID == "" {
+			id, err := identity.NewGenerator(nil).NewRequestID()
+			if err != nil {
+				return err
+			}
+			*requestID = id
+		}
+	}
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		return err
+	}
+	// Trust is live SQLite authority and remains operable independently of a
+	// staged config edit; only the fixed endpoint and a bounded codec are needed.
+	c, err := config.Default(loc)
+	if err != nil {
+		return err
+	}
+	var params any = protocol.EmptyParams{}
+	command := "trust.list"
+	if mutation {
+		params = protocol.TrustMutationParams{SlackUserID: fs.Arg(0)}
+		command = "trust." + cmd
+	}
+	result, err := a.gatewayCall(c, command, *requestID, params, protocol.CapabilityTrustedUsers)
+	if err != nil {
+		return err
+	}
+	if mutation {
+		result = map[string]any{"request_id": *requestID, "result": result}
+	}
+	return a.render(result, *j)
+}
+
+func (a App) task(_ string, args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		a.printBranchHelp("task", []string{"create", "list", "show", "update", "open", "working", "done"})
 		return nil
@@ -415,7 +536,7 @@ func (a App) task(override string, args []string) error {
 			return "", usage("exactly one of --text or --text-file is required")
 		}
 		if *textFile != "" {
-			loc, e := config.DefaultLocation(override)
+			loc, e := config.DefaultLocation()
 			if e != nil {
 				return "", e
 			}
@@ -423,7 +544,7 @@ func (a App) task(override string, args []string) error {
 			if e != nil {
 				return "", e
 			}
-			b, e := securepath.ReadRegularFile(*textFile, int64(loaded.Protocol.MaxFrameBytes))
+			b, e := securepath.ReadRegularFile(*textFile, int64(loaded.LocalProtocolMaximumFrame))
 			if e != nil {
 				return "", fmt.Errorf("--text-file: %w", e)
 			}
@@ -489,7 +610,7 @@ func (a App) task(override string, args []string) error {
 	}
 	c := loaded
 	if c.Paths.Endpoint == "" {
-		loc, e := config.DefaultLocation(override)
+		loc, e := config.DefaultLocation()
 		if e != nil {
 			return e
 		}
@@ -505,11 +626,11 @@ func (a App) task(override string, args []string) error {
 		if encodeErr != nil {
 			return encodeErr
 		}
-		if len(encoded) > c.Protocol.MaxFrameBytes {
+		if len(encoded) > c.LocalProtocolMaximumFrame {
 			return usage("--text-file exceeds the protocol frame limit")
 		}
 	}
-	cl, e := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.Protocol.MaxFrameBytes))
+	cl, e := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
 	if e != nil {
 		return &commandError{ExitUnavailable, e.Error()}
 	}
@@ -553,6 +674,15 @@ func reorderTaskFlags(args []string) []string {
 		positionals = append(positionals, arg)
 	}
 	return append(flags, positionals...)
+}
+
+func hasCapability(capabilities []string, required string) bool {
+	for _, capability := range capabilities {
+		if capability == required {
+			return true
+		}
+	}
+	return false
 }
 
 func remote(err error) error {
@@ -622,7 +752,7 @@ func (a App) leaf(name string, args []string) error {
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, "Usage: mosscap [--config PATH] <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or change configuration\n  gateway     run or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  task        manage local tasks\n\nRun \"mosscap <command> --help\" for command help.\n")
+	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  task        manage local tasks\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)
@@ -645,25 +775,3 @@ func (e *commandError) Error() string { return e.message }
 func usage(m string) error            { return &commandError{ExitUsage, "usage: " + m} }
 func unsupported(m string) error      { return &commandError{ExitUnsupported, m} }
 func isHelp(a string) bool            { return a == "--help" || a == "-h" || a == "help" }
-func stripGlobalConfig(args []string) ([]string, string, error) {
-	var path string
-	for len(args) > 0 {
-		switch {
-		case args[0] == "--config":
-			if len(args) < 2 || args[1] == "" {
-				return nil, "", errors.New("--config requires a path")
-			}
-			path = args[1]
-			args = args[2:]
-		case len(args[0]) > len("--config=") && args[0][:len("--config=")] == "--config=":
-			path = args[0][len("--config="):]
-			if path == "" {
-				return nil, "", errors.New("--config requires a path")
-			}
-			args = args[1:]
-		default:
-			return args, path, nil
-		}
-	}
-	return args, path, nil
-}

@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stayradiated/mosscap/internal/client"
+	"github.com/stayradiated/mosscap/internal/protocol"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,11 +38,10 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		t.Fatalf("build executable: %v\n%s", err, output)
 	}
 
-	configPath := filepath.Join(root, "config", "config.toml")
 	env := append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(root, "config"), "XDG_STATE_HOME="+filepath.Join(root, "state"))
 	run := func(args ...string) []byte {
 		t.Helper()
-		cmd := exec.Command(binary, append([]string{"--config", configPath}, args...)...)
+		cmd := exec.Command(binary, args...)
 		cmd.Env = env
 		output, err := cmd.CombinedOutput()
 		if err != nil {
@@ -52,7 +53,7 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 
 	start := func() *exec.Cmd {
 		t.Helper()
-		cmd := exec.Command(binary, "--config", configPath, "gateway", "run")
+		cmd := exec.Command(binary, "gateway", "run")
 		cmd.Env = env
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -61,7 +62,7 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		}
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			probe := exec.Command(binary, "--config", configPath, "gateway", "status", "--json")
+			probe := exec.Command(binary, "gateway", "status", "--json")
 			probe.Env = env
 			if output, err := probe.Output(); err == nil && json.Valid(output) {
 				return cmd
@@ -99,19 +100,120 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		if err := json.Unmarshal(output, &value); err != nil {
 			t.Fatalf("decode mutation response %q: %v", output, err)
 		}
-		if value.RequestID == "" || value.Result["task_id"] == "" {
+		if value.RequestID == "" || len(value.Result) == 0 {
 			t.Fatalf("incomplete mutation response: %s", output)
 		}
 		return value.Result
 	}
 
 	gateway := start()
+	// File edits are allowed while the gateway runs, but take effect only after
+	// an explicit failure-atomic reload.
+	if output := run("config", "set", "maximum_file_size", "200MiB", "--json"); !json.Valid(output) {
+		t.Fatalf("config set output is not JSON: %s", output)
+	}
+	var reloaded struct {
+		RequestID string `json:"request_id"`
+		Result    struct {
+			Activated                        bool `json:"activated"`
+			SlackNetworkVerificationDeferred bool `json:"slack_network_verification_deferred"`
+		} `json:"result"`
+	}
+	if output := run("gateway", "reload", "--request-id", "gate-reload", "--json"); json.Unmarshal(output, &reloaded) != nil || !reloaded.Result.Activated || !reloaded.Result.SlackNetworkVerificationDeferred {
+		t.Fatalf("reload result: %s", output)
+	}
+	// This uses only the public local wire protocol against the launched binary.
+	// A malformed staged file must yield a typed error while its running snapshot
+	// (and therefore its generation) remains unchanged.
+	configPath := filepath.Join(root, "config", "mosscap", "config.toml")
+	validConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := filepath.Join(root, "state", "mosscap", "control.sock")
+	call := func(request protocol.Request) protocol.Response {
+		t.Helper()
+		cl, err := client.Dial(context.Background(), endpoint, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cl.Close()
+		if _, err := cl.Hello(context.Background(), "e2e-reload-hello-"+request.RequestID, "cli", "e2e", nil); err != nil {
+			t.Fatal(err)
+		}
+		response, err := cl.Call(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	before := call(protocol.Request{ProtocolVersion: protocol.Version, RequestID: "e2e-status-before", ClientKind: "cli", ClientVersion: "e2e", Command: "status.get", Params: []byte(`{}`)})
+	var beforeStatus struct {
+		ActiveConfigGeneration int64  `json:"active_config_generation"`
+		ActiveConfigDigest     string `json:"active_config_digest"`
+	}
+	if err := json.Unmarshal(before.Result, &beforeStatus); err != nil || beforeStatus.ActiveConfigGeneration == 0 || beforeStatus.ActiveConfigDigest == "" {
+		t.Fatalf("initial active status=%s err=%v", before.Result, err)
+	}
+	if err := os.WriteFile(configPath, []byte("version = 1\n[paths]\nstate_dir = \"/tmp/obsolete\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	failed := call(protocol.Request{ProtocolVersion: protocol.Version, RequestID: "e2e-invalid-reload", ClientKind: "cli", ClientVersion: "e2e", Command: "config.reload", Params: []byte(`{}`)})
+	if failed.Error == nil || failed.Error.Code != "config_reload_failed" || failed.Error.Category != "unsafe" {
+		t.Fatalf("invalid reload response = %#v", failed)
+	}
+	var doctorReport struct {
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if output := run("doctor", "--json"); json.Unmarshal(output, &doctorReport) != nil || !hasCheck(doctorReport.Checks, "config", "fail") || !hasCheck(doctorReport.Checks, "sqlite_integrity", "pass") {
+		t.Fatalf("doctor did not diagnose staged config while reaching gateway: %s", output)
+	}
+	after := call(protocol.Request{ProtocolVersion: protocol.Version, RequestID: "e2e-status-after", ClientKind: "cli", ClientVersion: "e2e", Command: "status.get", Params: []byte(`{}`)})
+	var afterStatus struct {
+		ActiveConfigGeneration int64  `json:"active_config_generation"`
+		ActiveConfigDigest     string `json:"active_config_digest"`
+	}
+	if err := json.Unmarshal(after.Result, &afterStatus); err != nil || afterStatus != beforeStatus {
+		t.Fatalf("invalid reload changed active configuration before=%+v after=%+v err=%v", beforeStatus, afterStatus, err)
+	}
+	if err := os.WriteFile(configPath, validConfig, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var trusted struct {
+		SlackUserIDs []string `json:"slack_user_ids"`
+	}
+	if output := run("trust", "list", "--json"); json.Unmarshal(output, &trusted) != nil || len(trusted.SlackUserIDs) != 0 {
+		t.Fatalf("initial trust list: %s", output)
+	}
+	firstTrust := mutation(run("trust", "add", "U01234567", "--request-id", "gate-trust-add", "--json"))
+	if firstTrust["trusted"] != true || firstTrust["changed"] != true {
+		t.Fatalf("trust add result: %v", firstTrust)
+	}
+	if replay := mutation(run("trust", "add", "U01234567", "--request-id", "gate-trust-add", "--json")); !sameJSON(firstTrust, replay) {
+		t.Fatalf("trust add replay changed result: first=%v replay=%v", firstTrust, replay)
+	}
 	created := mutation(run("task", "create", "--text", "survives restart", "--request-id", "gate-create", "--json"))
 	taskID := created["task_id"].(string)
 	transitioned := mutation(run("task", "working", taskID, "--request-id", "gate-working", "--json"))
 	stop(gateway)
 
 	gateway = start()
+	trusted = struct {
+		SlackUserIDs []string `json:"slack_user_ids"`
+	}{}
+	if output := run("trust", "list", "--json"); json.Unmarshal(output, &trusted) != nil || len(trusted.SlackUserIDs) != 1 || trusted.SlackUserIDs[0] != "U01234567" {
+		t.Fatalf("trust list after restart: %s", output)
+	}
+	removed := mutation(run("trust", "remove", "U01234567", "--request-id", "gate-trust-remove", "--json"))
+	if removed["trusted"] != false || removed["changed"] != true {
+		t.Fatalf("trust remove result: %v", removed)
+	}
+	if replay := mutation(run("trust", "remove", "U01234567", "--request-id", "gate-trust-remove", "--json")); !sameJSON(removed, replay) {
+		t.Fatalf("trust remove replay changed result: first=%v replay=%v", removed, replay)
+	}
 	if replay := mutation(run("task", "create", "--text", "survives restart", "--request-id", "gate-create", "--json")); !sameJSON(created, replay) {
 		t.Fatalf("create replay changed result: first=%v replay=%v", created, replay)
 	}
@@ -151,7 +253,7 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var tasks, events, requests int
+	var tasks, events, requests, trustedUsers int
 	if err := db.QueryRowContext(context.Background(), "SELECT count(*) FROM tasks").Scan(&tasks); err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +263,11 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM mutation_requests").Scan(&requests); err != nil {
 		t.Fatal(err)
 	}
-	if tasks != 1 || events != 1 || requests != 2 {
-		t.Fatalf("durable counts tasks=%d events=%d requests=%d, want 1,1,2", tasks, events, requests)
+	if err := db.QueryRow("SELECT count(*) FROM trusted_users").Scan(&trustedUsers); err != nil {
+		t.Fatal(err)
+	}
+	if tasks != 1 || events != 1 || requests != 6 || trustedUsers != 0 {
+		t.Fatalf("durable counts tasks=%d events=%d requests=%d trusted=%d, want 1,1,6,0", tasks, events, requests, trustedUsers)
 	}
 }
 
@@ -191,6 +296,18 @@ func sourceRoot(t *testing.T) string {
 		}
 		dir = next
 	}
+}
+
+func hasCheck(checks []struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}, name, status string) bool {
+	for _, check := range checks {
+		if check.Name == name && check.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func sameJSON(a, b any) bool {

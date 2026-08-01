@@ -3,6 +3,7 @@ package securepath
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,13 @@ func TestReadRegularFileRejectsSymlinkAndOversize(t *testing.T) {
 		}
 	}); err == nil {
 		t.Fatal("accepted a file whose size changed during read")
+	}
+}
+
+func TestEnsurePrivateAbsoluteDirRejectsSharedTemporaryAncestor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xdg", "mosscap")
+	if err := EnsurePrivateAbsoluteDir(path); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Fatalf("EnsurePrivateAbsoluteDir shared tmp error = %v", err)
 	}
 }
 

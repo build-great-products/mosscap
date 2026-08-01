@@ -240,6 +240,19 @@ func EnsurePrivateDir(home, path string) error {
 	return CheckDir(path)
 }
 
+// EnsurePrivateAbsoluteDir creates a private directory selected by an absolute
+// XDG root outside the effective home. Existing components must be symlink-free
+// and not group/world writable; this deliberately rejects shared /tmp roots.
+func EnsurePrivateAbsoluteDir(path string) error {
+	if err := CheckAbsoluteComponents(path); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return err
+	}
+	return CheckDir(path)
+}
+
 // Descendant reports whether child is lexically below root after cleaning.
 func Descendant(root, child string) bool {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(child))

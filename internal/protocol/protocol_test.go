@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"testing"
@@ -31,6 +32,98 @@ func TestResponseGolden(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("\ngot: %s\nwant: %s", got, want)
 	}
+}
+
+func TestAdditiveCapabilitiesAreAdvertisedWithoutProtocolBump(t *testing.T) {
+	if Version != 1 {
+		t.Fatalf("additive commands unexpectedly changed protocol version to %d", Version)
+	}
+	for _, capability := range []string{CapabilityTrustedUsers, CapabilityConfigReload} {
+		found := false
+		for _, advertised := range ServerCapabilities {
+			found = found || advertised == capability
+		}
+		if !found {
+			t.Fatalf("server does not advertise %q", capability)
+		}
+	}
+}
+
+func TestTrustAndReloadRequestGolden(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		params  string
+	}{
+		{"trust.list", `{}`},
+		{"trust.add", `{"slack_user_id":"U01234567"}`},
+		{"trust.remove", `{"slack_user_id":"U01234567"}`},
+		{"config.reload", `{}`},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			r := Request{ProtocolVersion: Version, RequestID: "req_abcdefghijklmnopqrstuv", ClientKind: "cli", ClientVersion: "test", Command: tc.command, Params: []byte(tc.params)}
+			got, err := EncodeRequest(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"test","command":"` + tc.command + `","params":` + tc.params + `}`
+			if string(got) != want {
+				t.Fatalf("\ngot: %s\nwant: %s", got, want)
+			}
+		})
+	}
+}
+
+func TestTrustAndReloadParamsStrict(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		params  string
+		valid   bool
+	}{
+		{"list empty", "trust.list", `{}`, true},
+		{"reload empty", "config.reload", `{}`, true},
+		{"add valid immutable ID", "trust.add", `{"slack_user_id":"U01234567"}`, true},
+		{"remove valid enterprise ID", "trust.remove", `{"slack_user_id":"W01234567"}`, true},
+		{"empty params reject fields", "trust.list", `{"extra":true}`, false},
+		{"reload reject fields", "config.reload", `{"extra":true}`, false},
+		{"missing user ID", "trust.add", `{}`, false},
+		{"unknown mutation field", "trust.remove", `{"slack_user_id":"U01234567","extra":true}`, false},
+		{"lowercase user ID", "trust.add", `{"slack_user_id":"u01234567"}`, false},
+		{"short user ID", "trust.add", `{"slack_user_id":"U0123456"}`, false},
+		{"invalid user ID punctuation", "trust.add", `{"slack_user_id":"U0123-567"}`, false},
+		{"oversized user ID", "trust.add", `{"slack_user_id":"U0123456789012345678901234567890123456789012345678901234567890123"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateParams(tc.command, []byte(tc.params))
+			if (err == nil) != tc.valid {
+				t.Fatalf("ValidateParams(%q, %s) error = %v, valid = %v", tc.command, tc.params, err, tc.valid)
+			}
+		})
+	}
+}
+
+func TestTrustAndReloadResultGolden(t *testing.T) {
+	trust := TrustMutationDTO{SlackUserID: "U01234567", Trusted: true, Changed: true}
+	if got := mustJSON(t, trust); got != `{"slack_user_id":"U01234567","trusted":true,"changed":true}` {
+		t.Fatalf("trust result = %s", got)
+	}
+	users := TrustedUserListDTO{SlackUserIDs: []string{"U01234567", "U76543210"}}
+	if got := mustJSON(t, users); got != `{"slack_user_ids":["U01234567","U76543210"]}` {
+		t.Fatalf("trusted-user list = %s", got)
+	}
+	reload := ConfigReloadDTO{Activated: true, SlackNetworkVerificationDeferred: true, ActiveConfigGeneration: 3, ActiveConfigDigest: "sha256:abc"}
+	if got := mustJSON(t, reload); got != `{"activated":true,"slack_network_verification_deferred":true,"active_config_generation":3,"active_config_digest":"sha256:abc"}` {
+		t.Fatalf("reload result = %s", got)
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 func TestFrameFragmentedAndMultiple(t *testing.T) {
 	var wire bytes.Buffer

@@ -1,4 +1,6 @@
-// Package protocol defines Mosscap's version 1 local wire contract.
+// Package protocol defines Mosscap's version 1 local wire contract. Additive
+// commands are negotiated through capabilities; clients must not send a
+// command whose capability was absent from hello.
 package protocol
 
 import (
@@ -20,9 +22,11 @@ const (
 	CapabilityDoctor       = "doctor"
 	CapabilityLocalTasks   = "local_tasks"
 	CapabilityRequestDedup = "request_dedup"
+	CapabilityTrustedUsers = "trusted_users"
+	CapabilityConfigReload = "config_reload"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -60,6 +64,8 @@ type Error struct {
 }
 
 // HelloParams initiates a connection. SupportedVersions must include Version.
+// Capabilities describe the client; HelloResult capabilities describe the
+// server's supported command set.
 type HelloParams struct {
 	SupportedVersions []int    `json:"supported_versions"`
 	Capabilities      []string `json:"capabilities"`
@@ -71,6 +77,12 @@ type HelloResult struct {
 }
 
 type EmptyParams struct{}
+
+// TrustMutationParams identifies one immutable Slack user.
+type TrustMutationParams struct {
+	SlackUserID string `json:"slack_user_id"`
+}
+
 type TaskSelector struct {
 	Task string `json:"task"`
 }
@@ -115,6 +127,28 @@ type TaskMutationDTO struct {
 type TaskListDTO struct {
 	Tasks      []TaskDTO `json:"tasks"`
 	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// TrustedUserListDTO contains lexicographically sorted immutable Slack user IDs.
+type TrustedUserListDTO struct {
+	SlackUserIDs []string `json:"slack_user_ids"`
+}
+
+// TrustMutationDTO reports the resulting authorization state for one Slack user.
+type TrustMutationDTO struct {
+	SlackUserID string `json:"slack_user_id"`
+	Trusted     bool   `json:"trusted"`
+	Changed     bool   `json:"changed"`
+}
+
+// ConfigReloadDTO deliberately contains no configuration values or secrets.
+// SlackNetworkVerificationDeferred is true because Phase 1 does not yet make
+// Slack network verification part of reload activation.
+type ConfigReloadDTO struct {
+	Activated                        bool   `json:"activated"`
+	SlackNetworkVerificationDeferred bool   `json:"slack_network_verification_deferred"`
+	ActiveConfigGeneration           int64  `json:"active_config_generation,omitempty"`
+	ActiveConfigDigest               string `json:"active_config_digest,omitempty"`
 }
 
 func (r Request) Validate() error {
@@ -192,8 +226,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	switch command {
 	case "hello":
 		target = &HelloParams{}
-	case "status.get", "doctor.run":
+	case "status.get", "doctor.run", "trust.list", "config.reload":
 		target = &EmptyParams{}
+	case "trust.add", "trust.remove":
+		target = &TrustMutationParams{}
 	case "task.create":
 		target = &TaskCreateParams{}
 	case "task.list":
@@ -224,6 +260,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		}
 		if !supported {
 			return errors.New("unsupported hello version")
+		}
+	case *TrustMutationParams:
+		if !validSlackUserID(p.SlackUserID) {
+			return errors.New("invalid Slack user ID")
 		}
 	case *TaskCreateParams:
 		if p.Text == "" {
@@ -300,10 +340,25 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "task.create", "task.list", "task.get", "task.update", "task.transition":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "task.create", "task.list", "task.get", "task.update", "task.transition":
 		return true
 	}
 	return false
+}
+
+// validSlackUserID accepts Slack's immutable, uppercase user-ID form only.
+func validSlackUserID(id string) bool {
+	if len(id) < 9 || len(id) > 64 || (id[0] != 'U' && id[0] != 'W') {
+		return false
+	}
+	for _, c := range id[1:] {
+		if c < '0' || c > '9' {
+			if c < 'A' || c > 'Z' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // NewErrorResponse builds a valid typed error envelope.

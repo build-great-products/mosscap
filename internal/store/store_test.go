@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -77,7 +81,7 @@ func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=2"); err != nil {
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=3 WHERE version=2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -250,5 +254,230 @@ func TestDefaultGenerator(t *testing.T) {
 	r, err := s.Create(context.Background(), "generated", "text")
 	if err != nil || r.TaskID == "" {
 		t.Fatalf("result=%+v err=%v", r, err)
+	}
+}
+
+func phase0Database(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(string(migration0001)); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		"PRAGMA application_id=1296257072", // ApplicationID cannot be a SQL parameter.
+		"PRAGMA user_version=1",
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(1,?,1)", Checksum()); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func TestOpenUpgradesIntactPhase0AndPreservesData(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+	db := phase0Database(t, path)
+	if _, err := db.Exec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES('tsk_preserved',1,'open','preserved task','local',1,1,NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,result_type,result_json,created_at,completed_at,expiry_eligible_at) VALUES('preserved-request','task.create',?,'success','task_mutation','{}',1,1,1)", hash("preserved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	var version, migrations, requests int
+	if err := s.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM mutation_requests WHERE request_id='preserved-request'").Scan(&requests); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion || migrations != 2 || requests != 1 {
+		t.Fatalf("upgrade state version=%d migrations=%d requests=%d", version, migrations, requests)
+	}
+	tasks, _, err := s.List(ctx, nil, true, 10, "")
+	if err != nil || len(tasks) != 1 || tasks[0].Text != "preserved task" {
+		t.Fatalf("preserved tasks=%#v err=%v", tasks, err)
+	}
+	if users, err := s.ListTrustedUsers(ctx); err != nil || len(users) != 0 {
+		t.Fatalf("initial trusted users=%v err=%v", users, err)
+	}
+	if _, err := s.AddTrustedUser(ctx, "upgrade-trust", "U12345678"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer s.Close()
+	if users, err := s.ListTrustedUsers(ctx); err != nil || len(users) != 1 || users[0] != "U12345678" {
+		t.Fatalf("restart trusted users=%v err=%v", users, err)
+	}
+}
+
+func TestOpenRejectsUnrecognizedSchemasWithoutChangingThem(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+	db := phase0Database(t, path)
+	if _, err := db.Exec("UPDATE schema_migrations SET checksum='bad'"); err == nil {
+		t.Fatal("accepted invalid checksum")
+	}
+	if _, err := db.Exec("UPDATE schema_migrations SET checksum=?", strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, path, Options{}); !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("Open checksum mismatch: %v", err)
+	}
+	check, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version, migrations int
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 || migrations != 1 {
+		t.Fatalf("rejected ledger changed: version=%d migrations=%d", version, migrations)
+	}
+}
+
+func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
+	ctx := context.Background()
+	t.Run("unknown object", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+		db := phase0Database(t, path)
+		if _, err := db.Exec("CREATE TABLE unknown_schema_object (id INTEGER)"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(ctx, path, Options{}); !errors.Is(err, ErrIncompatibleSchema) {
+			t.Fatalf("Open unknown schema: %v", err)
+		}
+	})
+	t.Run("newer version", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+		s, err := Initialize(ctx, path, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB().Exec("PRAGMA user_version=3"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(ctx, path, Options{}); !errors.Is(err, ErrIncompatibleSchema) {
+			t.Fatalf("Open newer schema: %v", err)
+		}
+	})
+}
+
+func TestTrustedUsersMutationReplayConflictAndIdempotency(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if trusted, err := s.IsTrustedUser(ctx, "U12345678"); err != nil || trusted {
+		t.Fatalf("empty authority=%t err=%v", trusted, err)
+	}
+	added, err := s.AddTrustedUser(ctx, "trust-add", "U12345678")
+	if err != nil || added != (TrustMutationResult{SlackUserID: "U12345678", Trusted: true, Changed: true}) {
+		t.Fatalf("add=%+v err=%v", added, err)
+	}
+	if trusted, err := s.IsTrustedUser(ctx, "U12345678"); err != nil || !trusted {
+		t.Fatalf("committed add authority=%t err=%v", trusted, err)
+	}
+	replay, err := s.AddTrustedUser(ctx, "trust-add", "U12345678")
+	if err != nil || replay != added {
+		t.Fatalf("add replay=%+v err=%v", replay, err)
+	}
+	if _, err := s.AddTrustedUser(ctx, "trust-add", "U87654321"); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("add conflict=%v", err)
+	}
+	existing, err := s.AddTrustedUser(ctx, "trust-existing", "U12345678")
+	if err != nil || existing.Changed || !existing.Trusted {
+		t.Fatalf("add existing=%+v err=%v", existing, err)
+	}
+	removed, err := s.RemoveTrustedUser(ctx, "trust-remove", "U12345678")
+	if err != nil || removed != (TrustMutationResult{SlackUserID: "U12345678", Trusted: false, Changed: true}) {
+		t.Fatalf("remove=%+v err=%v", removed, err)
+	}
+	if trusted, err := s.IsTrustedUser(ctx, "U12345678"); err != nil || trusted {
+		t.Fatalf("committed removal authority=%t err=%v", trusted, err)
+	}
+	absent, err := s.RemoveTrustedUser(ctx, "trust-absent", "U12345678")
+	if err != nil || absent.Changed || absent.Trusted {
+		t.Fatalf("remove absent=%+v err=%v", absent, err)
+	}
+	if users, err := s.ListTrustedUsers(ctx); err != nil || len(users) != 0 {
+		t.Fatalf("zero trusted users=%v err=%v", users, err)
+	}
+	if _, err := s.AddTrustedUser(ctx, "bad-trust", "B12345678"); err == nil {
+		t.Fatal("accepted bot ID as trusted user")
+	}
+	if _, err := s.AddTrustedUser(ctx, "bad-trust", "B12345678"); err == nil {
+		t.Fatal("invalid ID replay did not preserve error")
+	}
+}
+
+func TestTrustedUsersAreSortedAndSerializedWithTaskWrites(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	ids := []string{"U99999999", "W12345678", "U12345678"}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(ids)*2)
+	for i, userID := range ids {
+		wg.Add(2)
+		go func(i int, userID string) {
+			defer wg.Done()
+			_, err := s.AddTrustedUser(ctx, "trust-concurrent-"+strconv.Itoa(i), userID)
+			errs <- err
+		}(i, userID)
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.Create(ctx, "task-concurrent-"+strconv.Itoa(i), "task")
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	users, err := s.ListTrustedUsers(ctx)
+	if err != nil || !slices.Equal(users, []string{"U12345678", "U99999999", "W12345678"}) {
+		t.Fatalf("trusted users=%v err=%v", users, err)
+	}
+	var tasks int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil || tasks != len(ids) {
+		t.Fatalf("tasks=%d err=%v", tasks, err)
 	}
 }

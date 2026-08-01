@@ -26,37 +26,71 @@ import (
 )
 
 // Server owns one open ledger and its Unix endpoint.
-type Server struct {
-	Config      config.Config
-	ConfigPath  string
-	Version     string
-	Log         *slog.Logger
-	store       *store.Store
-	listener    *net.UnixListener
-	lock        *os.File
-	endpoint    string
-	socketDev   uint64
-	socketIno   uint64
-	wg          sync.WaitGroup
-	closing     chan struct{}
-	closeOnce   sync.Once
-	slots       chan struct{}
-	admissionMu sync.Mutex
-	stopping    bool
-	activeMu    sync.Mutex
-	active      map[*net.UnixConn]context.CancelFunc
-	started     time.Time
-	connections atomic.Int32
+// ConfigurationVerifier is the Phase 1 seam for authenticating proposed Slack
+// credentials and checking workspace/channel access before activation. The
+// Phase 0 gateway has no Slack network integration, so a nil verifier performs
+// no network claims and reload reports that verification as deferred.
+type ConfigurationVerifier interface {
+	Verify(context.Context, config.Config) error
 }
 
-func New(c config.Config, configPath, version string, log *slog.Logger) *Server {
+type ConfigurationVerifierFunc func(context.Context, config.Config) error
+
+type reloadError struct{ message string }
+
+func (e *reloadError) Error() string { return e.message }
+
+func (f ConfigurationVerifierFunc) Verify(ctx context.Context, c config.Config) error {
+	return f(ctx, c)
+}
+
+type Server struct {
+	Config         config.Config // immutable startup fallback for direct tests
+	ConfigLocation config.Location
+	Version        string
+	Log            *slog.Logger
+	Verifier       ConfigurationVerifier
+	store          *store.Store
+	listener       *net.UnixListener
+	lock           *os.File
+	endpoint       string
+	socketDev      uint64
+	socketIno      uint64
+	wg             sync.WaitGroup
+	closing        chan struct{}
+	closeOnce      sync.Once
+	slots          chan struct{}
+	admissionMu    sync.Mutex
+	stopping       bool
+	activeMu       sync.Mutex
+	active         map[*net.UnixConn]context.CancelFunc
+	started        time.Time
+	connections    atomic.Int32
+	activeConfig   atomic.Pointer[config.Config]
+	generation     atomic.Int64
+	reloadMu       sync.Mutex
+	operationMu    sync.RWMutex
+	activeDigest   string // guarded by operationMu; SHA-256 only, never TOML bytes
+}
+
+func New(c config.Config, loc config.Location, version string, log *slog.Logger) *Server {
 	if version == "" {
 		version = "devel"
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{Config: c, ConfigPath: configPath, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
+	s := &Server{Config: c, ConfigLocation: loc, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
+	s.activeConfig.Store(&c)
+	s.generation.Store(1)
+	return s
+}
+
+func (s *Server) snapshot() config.Config {
+	if c := s.activeConfig.Load(); c != nil {
+		return *c
+	}
+	return s.Config
 }
 
 // Serve validates state, obtains the singleton lock, and runs until ctx is cancelled.
@@ -107,7 +141,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 }
 func (s *Server) open(ctx context.Context) error {
-	c := s.Config
+	c := s.snapshot()
 	if err := config.Validate(c); err != nil {
 		return err
 	}
@@ -132,7 +166,7 @@ func (s *Server) open(ctx context.Context) error {
 		return fmt.Errorf("gateway is already running: %w", err)
 	}
 	s.lock = f
-	busy, _ := time.ParseDuration(c.Database.BusyTimeout)
+	busy, _ := time.ParseDuration(c.SQLiteBusyTimeout)
 	db, err := store.Open(ctx, c.Paths.Database, store.Options{BusyTimeout: busy})
 	if err != nil {
 		return err
@@ -177,10 +211,14 @@ func (s *Server) open(ctx context.Context) error {
 // validateStartupPaths repeats setup's path checks immediately before and
 // after opening state. This closes the configuration-to-gateway race.
 func (s *Server) validateStartupPaths(c config.Config) error {
-	if err := securepath.CheckAbsoluteComponents(s.ConfigPath); err != nil {
+	configPath := s.ConfigLocation.Path
+	if configPath == "" {
+		configPath = filepath.Join(c.Paths.ConfigDir, config.FileName)
+	}
+	if err := securepath.CheckAbsoluteComponents(configPath); err != nil {
 		return fmt.Errorf("config path: %w", err)
 	}
-	if err := securepath.CheckFile(s.ConfigPath); err != nil {
+	if err := securepath.CheckFile(configPath); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	for _, path := range []string{c.Paths.StateDir, c.Paths.Database, c.Paths.Endpoint, c.Paths.TmpDir} {
@@ -196,14 +234,6 @@ func (s *Server) validateStartupPaths(c config.Config) error {
 	}
 	if err := securepath.CheckFile(c.Paths.Database); err != nil {
 		return fmt.Errorf("database: %w", err)
-	}
-	if c.Slack.SecretsFile != "" {
-		if err := securepath.CheckAbsoluteComponents(c.Slack.SecretsFile); err != nil {
-			return fmt.Errorf("slack.secrets_file: %w", err)
-		}
-		if err := securepath.CheckFile(c.Slack.SecretsFile); err != nil {
-			return fmt.Errorf("slack.secrets_file: %w", err)
-		}
 	}
 	return nil
 }
@@ -300,7 +330,10 @@ func (s *Server) handle(c *net.UnixConn) {
 		s.activeMu.Unlock()
 		cancel()
 	}()
-	codec := protocol.NewCodec(c, c, uint32(s.Config.Protocol.MaxFrameBytes))
+	// A connection retains the immutable configuration snapshot under which it
+	// started; connections accepted after reload use the newly active frame bound.
+	active := s.snapshot()
+	codec := protocol.NewCodec(c, c, uint32(active.LocalProtocolMaximumFrame))
 	hello := false
 	for {
 		_ = c.SetDeadline(time.Now().Add(15 * time.Second))
@@ -342,6 +375,22 @@ func (s *Server) handle(c *net.UnixConn) {
 	}
 }
 func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Response {
+	// Reload needs exclusive ownership while it replaces the live SQLite pool.
+	// Every other dispatch holds a read lock so it cannot observe a half-swapped
+	// store or configuration snapshot.
+	if r.Command == "config.reload" {
+		result, err := s.reload(ctx, r.RequestID)
+		if err != nil {
+			return errorResponse(r.RequestID, s.Version, err)
+		}
+		b, err := json.Marshal(result)
+		if err != nil {
+			return errorResponse(r.RequestID, s.Version, err)
+		}
+		return protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: "config_reload", Result: b}
+	}
+	s.operationMu.RLock()
+	defer s.operationMu.RUnlock()
 	resultType := ""
 	var result any
 	var err error
@@ -357,6 +406,22 @@ func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Resp
 		checks := s.store.Doctor(ctx)
 		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
+	case "trust.list":
+		resultType = "trusted_user_list"
+		var users []string
+		users, err = s.store.ListTrustedUsers(ctx)
+		result = protocol.TrustedUserListDTO{SlackUserIDs: users}
+	case "trust.add", "trust.remove":
+		var p protocol.TrustMutationParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "trust_mutation"
+		var mutation store.TrustMutationResult
+		if r.Command == "trust.add" {
+			mutation, err = s.store.AddTrustedUser(ctx, r.RequestID, p.SlackUserID)
+		} else {
+			mutation, err = s.store.RemoveTrustedUser(ctx, r.RequestID, p.SlackUserID)
+		}
+		result = protocol.TrustMutationDTO{SlackUserID: mutation.SlackUserID, Trusted: mutation.Trusted, Changed: mutation.Changed}
 	case "task.create":
 		var p protocol.TaskCreateParams
 		_ = json.Unmarshal(r.Params, &p)
@@ -397,20 +462,99 @@ func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Resp
 	}
 	return protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: resultType, Result: b}
 }
+func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigReloadDTO, error) {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+	loc := s.ConfigLocation
+	if loc.Path == "" {
+		var err error
+		loc, err = config.DefaultLocation()
+		if err != nil {
+			return protocol.ConfigReloadDTO{}, &reloadError{message: "reload location is invalid"}
+		}
+	}
+	candidate, digest, loadErr := config.LoadWithDigest(loc)
+	if digest == "" {
+		// An unreadable or unsafe file has no stable candidate identity to
+		// deduplicate. Do not persist a path error that might change underneath us.
+		return protocol.ConfigReloadDTO{}, &reloadError{message: "reload candidate cannot be read safely; repair config.toml"}
+	}
+
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	var replacement *store.Store
+	result, replay, err := s.store.ReloadConfig(ctx, requestID, digest, func() (store.ConfigReloadResult, error) {
+		if loadErr != nil {
+			return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate is invalid; repair config.toml"}
+		}
+		if err := s.validateStartupPaths(candidate); err != nil {
+			return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate paths are unsafe; repair private XDG paths"}
+		}
+		if s.Verifier != nil {
+			if err := s.Verifier.Verify(ctx, candidate); err != nil {
+				// External verifier errors may contain credentials or Slack responses.
+				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+			}
+		}
+		current := s.snapshot()
+		if candidate.SQLiteBusyTimeout != current.SQLiteBusyTimeout {
+			busy, err := time.ParseDuration(candidate.SQLiteBusyTimeout)
+			if err != nil {
+				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate has an invalid SQLite busy timeout"}
+			}
+			replacement, err = store.Open(ctx, candidate.Paths.Database, store.Options{BusyTimeout: busy})
+			if err != nil {
+				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate SQLite busy timeout could not be activated"}
+			}
+		}
+		return store.ConfigReloadResult{Activated: true, SlackNetworkVerificationDeferred: true, ActiveConfigGeneration: s.generation.Load() + 1, ActiveConfigDigest: digest}, nil
+	})
+	if err != nil {
+		if replacement != nil {
+			_ = replacement.Close()
+		}
+		return protocol.ConfigReloadDTO{}, err
+	}
+	if replay {
+		if replacement != nil {
+			_ = replacement.Close()
+		}
+		return configReloadDTO(result), nil
+	}
+	// The durable result commits before publication. No request can observe this
+	// transition half-complete because operationMu excludes other dispatches.
+	old := s.store
+	if replacement != nil {
+		s.store = replacement
+	}
+	s.activeConfig.Store(&candidate)
+	s.activeDigest = digest
+	s.generation.Store(result.ActiveConfigGeneration)
+	if replacement != nil {
+		_ = old.Close()
+	}
+	return configReloadDTO(result), nil
+}
+
+func configReloadDTO(result store.ConfigReloadResult) protocol.ConfigReloadDTO {
+	return protocol.ConfigReloadDTO{Activated: result.Activated, SlackNetworkVerificationDeferred: result.SlackNetworkVerificationDeferred, ActiveConfigGeneration: result.ActiveConfigGeneration, ActiveConfigDigest: result.ActiveConfigDigest}
+}
+
 func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
 	counts, err := s.store.Counts(ctx)
 	if err != nil {
 		return status.Snapshot{}, err
 	}
-	dbSize, err := fileSize(s.Config.Paths.Database)
+	c := s.snapshot()
+	dbSize, err := fileSize(c.Paths.Database)
 	if err != nil {
 		return status.Snapshot{}, err
 	}
-	walSize, err := fileSize(s.Config.Paths.Database + "-wal")
+	walSize, err := fileSize(c.Paths.Database + "-wal")
 	if err != nil {
 		return status.Snapshot{}, err
 	}
-	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, PID: os.Getpid(), Database: s.Config.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "not_implemented", SlackCapability: "not_implemented", PiCapability: "not_implemented"}, nil
+	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "not_implemented", SlackCapability: "not_implemented", PiCapability: "not_implemented"}, nil
 }
 func fileSize(path string) (int64, error) {
 	info, err := os.Stat(path)
@@ -433,7 +577,11 @@ func errorResponse(id, version string, err error) protocol.Response {
 	case errors.Is(err, store.ErrRequestConflict):
 		code, category = "request_id_conflict", "conflict"
 	default:
-		if err.Error() == "unsupported command" {
+		var reload *reloadError
+		var durableReload *store.ConfigReloadError
+		if errors.As(err, &reload) || errors.As(err, &durableReload) {
+			code, category = "config_reload_failed", "unsafe"
+		} else if err.Error() == "unsupported command" {
 			code, category = "unsupported", "unsupported"
 		} else {
 			code, category = "invalid_input", "usage"

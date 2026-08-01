@@ -16,7 +16,8 @@ Mosscap connects one trusted Slack channel and local CLI requests to one human-s
 
 - One Go `mosscap` executable containing a foreground gateway and short-lived CLI commands.
 - Slack Socket Mode ingestion for exactly one configured workspace and channel.
-- Admission of direct bot mentions from explicitly trusted Slack user IDs.
+- Admission of direct bot mentions from Slack user IDs in a live, SQLite-backed trust set.
+- Complete file-backed scalar configuration with validated, failure-atomic gateway reload.
 - Automatic creation of one generic task for every admitted Slack message.
 - Local task creation and explicit task state management.
 - SQLite-first Slack acknowledgement and source-event deduplication.
@@ -68,16 +69,17 @@ The gateway is the only normal writer to the SQLite coordination ledger. It owns
 - Slack effect preparation, execution, and reconciliation;
 - durable file metadata and temporary transfer lifecycle;
 - mutation request deduplication;
-- purge execution; and
+- purge execution;
+- validated configuration reload and atomic activation; and
 - the local protocol server.
 
 It runs in the foreground. It must exit non-zero when configuration or state permissions are unsafe, the schema is unsupported, SQLite cannot be opened safely, or the local endpoint cannot be bound.
 
 ### 2.2 CLI
 
-The CLI is a gateway client. Except for `setup` and offline-safe configuration changes, it must not write SQLite directly.
+The CLI is a gateway client. Except for `setup` and direct, offline-safe edits to `config.toml`, it must not write state directly. Trust changes and all other SQLite mutations go through the gateway.
 
-Every mutation must use a client-generated request ID. Human-readable output is the default. `--json` must emit stable typed objects without decorative text.
+Every gateway mutation must use a client-generated request ID. Human-readable output is the default. `--json` must emit stable typed objects without decorative text. A reload's mutation input is the SHA-256 digest of its exact staged TOML bytes: SQLite stores that digest and its typed outcome, never TOML bytes or token values. Reusing a request ID with different staged bytes is a conflict.
 
 ### 2.3 Pi extension
 
@@ -100,11 +102,11 @@ SQLite is authoritative for coordination state. Pi JSONL, Slack messages and rea
 
 The gateway must enable foreign keys and WAL mode and use a bounded busy timeout. Transactions listed in this specification must be atomic.
 
-## 3. Configuration and local state
+## 3. Configuration, trust, and local state
 
-### 3.1 Default paths
+### 3.1 Fixed XDG paths
 
-Use XDG locations:
+Mosscap uses these XDG-derived locations:
 
 ```text
 $XDG_CONFIG_HOME/mosscap/config.toml
@@ -113,26 +115,27 @@ $XDG_STATE_HOME/mosscap/control.sock
 $XDG_STATE_HOME/mosscap/tmp/
 ```
 
-Fallbacks are `~/.config` and `~/.local/state` when the corresponding XDG variable is unset.
+Fallbacks are `~/.config` and `~/.local/state` when the corresponding XDG variable is unset. These paths are not settings in `config.toml`; a process that needs different roots must start with different XDG roots.
 
-Configuration and state roots must be owned by the effective user and mode `0700`. Credential-bearing regular files and the database must be `0600`. The socket must be under the private state root and mode `0600`.
+Configuration and state roots must be owned by the effective user and mode `0700`. `config.toml` and the database must be regular files owned by the effective user and mode `0600`. The socket must be under the private state root and mode `0600`.
 
 Mosscap must reject symlinked roots, non-owner files, group/world-writable paths below the user's home, and endpoints in shared temporary directories.
 
-### 3.2 Required configuration
+### 3.2 Complete scalar configuration
 
-- Slack app token and bot token, supplied by environment or an owner-readable secrets file;
+`config.toml` is the authority for every scalar setting. It contains every setting explicitly so the available configuration is discoverable, including:
+
+- Slack app token and bot token;
 - workspace/team ID;
 - bot user ID;
-- exactly one channel ID;
-- at least one trusted immutable Slack user ID; and
-- state and endpoint paths.
+- exactly one channel ID; and
+- all limits, lease durations, timeouts, and reconnect behavior.
 
-Slack operation commands never accept a workspace or channel argument. Changing the configured channel is an offline configuration operation, not a per-command routing option.
+The generated file should document its settings with comments. `config set KEY VALUE` must validate the known key and typed value, update only that key atomically, preserve comments, ordering, and unrelated formatting, and retain mode `0600`. It may operate while the gateway is stopped or running. Editing the file does not by itself change the gateway's active configuration.
 
-### 3.3 Defaults
+The complete generated configuration contains these initial values:
 
-| Setting | Default |
+| Setting | Initial value |
 | --- | --- |
 | delivery lease | 60 seconds |
 | leader heartbeat / expiry | 10 / 30 seconds |
@@ -143,13 +146,25 @@ Slack operation commands never accept a workspace or channel argument. Changing 
 | temporary download lifetime | 24 hours |
 | local protocol maximum frame | 1 MiB |
 
-`config show` must redact secrets. Logs and diagnostic output must never contain tokens.
+`config show` displays the file-backed settings and must redact both Slack tokens. Logs, diagnostics, protocol results, and mutation records must never contain tokens.
 
-### 3.4 Setup and compatibility
+Slack operation commands never accept a workspace or channel argument.
 
-`mosscap setup` creates or validates private paths and initializes the current schema only in new or empty state. It does not start the gateway or Pi.
+### 3.3 Live trust set
 
-A v1 binary may refuse an unknown schema or protocol version. It must never silently reinterpret unknown task, delivery, or effect states.
+Trusted Slack user IDs are not stored in `config.toml`. The current trust set is stored in SQLite, and each entry is an immutable Slack user ID. The set itself is mutable and may be empty; an empty set admits no Slack messages.
+
+`trust add` and `trust remove` are request-deduplicated gateway mutations. A successful mutation takes effect for admission immediately after its transaction commits. Mosscap does not maintain a separate trust-change audit log.
+
+### 3.4 Reload, setup, and compatibility
+
+`gateway reload` parses and validates the complete TOML file, authenticates the proposed Slack credentials, and verifies the proposed workspace identity and channel access before activation. It must activate the complete proposed configuration as one in-memory snapshot or leave the prior snapshot active unchanged. A failed reload reports actionable diagnostics without disrupting the existing Slack connection. Operations already started under an earlier snapshot retain that snapshot for their attempt; new work uses the newly activated snapshot.
+
+> **Current implementation boundary:** the pre-Slack phase performs complete local parsing, semantic/path validation, and failure-atomic snapshot activation through the local protocol. It has an injectable verifier seam and explicitly reports Slack network verification as deferred. Credential authentication and workspace/channel access checks remain a Phase 1 gate and are not simulated.
+
+`mosscap setup` creates or validates private paths, writes a complete documented `config.toml`, and initializes the current schema only in new or empty state. It does not start the gateway or Pi. Re-running setup must not silently overwrite an existing configuration or state.
+
+On startup, the gateway validates and activates the current complete TOML configuration before accepting work. A v1 binary may refuse an unknown schema or protocol version. It must never silently reinterpret unknown task, delivery, or effect states.
 
 ## 4. Durable records
 
@@ -280,9 +295,13 @@ A temporary path may be recorded only while the path is live. Temporary paths ar
 
 ### 4.8 Request deduplication
 
-Every local mutation carries a request ID. The gateway stores its typed result so reconnecting clients can retrieve the original outcome without repeating the mutation.
+Every local gateway mutation carries a request ID. The gateway stores its typed result so reconnecting clients can retrieve the original outcome without repeating the mutation.
 
 Request records have an expiry eligibility timestamp. Expiry does not delete them automatically; it only makes finalized records eligible for explicit purge.
+
+### 4.9 Trusted users
+
+A trusted-user row stores one immutable Slack user ID as current authorization state. Adding an existing ID and removing an absent ID are idempotent. Removal deletes the current row; no separate trust-change history is retained. The table may contain zero rows.
 
 ## 5. Task behavior
 
@@ -338,7 +357,7 @@ For each Socket Mode envelope, the gateway must:
 1. validate envelope shape and configured workspace;
 2. begin a SQLite transaction;
 3. deduplicate source identity;
-4. evaluate configured channel, human sender, trusted immutable user ID, and direct bot mention;
+4. evaluate configured channel, human sender, the current committed trusted-user set, and direct bot mention;
 5. normalize current text, thread identity, and file metadata;
 6. create or update the task and source-event result;
 7. commit; then
@@ -350,7 +369,7 @@ Initial admission requires all of:
 
 - configured workspace and channel;
 - non-bot sender;
-- explicit trusted user ID; and
+- a sender ID present in the current committed trusted-user set; and
 - literal direct mention of the configured bot user.
 
 Display name, channel membership, `@channel`, and merely replying in a bot thread do not establish admission.
@@ -581,6 +600,7 @@ mosscap setup
 mosscap config show
 mosscap config set KEY VALUE
 mosscap gateway run
+mosscap gateway reload
 mosscap gateway status [--json]
 mosscap doctor [--json]
 
@@ -655,12 +675,14 @@ Required capabilities:
 - handshake and capability negotiation;
 - status and health;
 - mutation request deduplication;
-- task, Slack, effect, delivery, file, trust, and purge operations;
+- task, Slack, effect, delivery, file, trust, configuration reload, and purge operations;
 - leader claim, release, heartbeat, generation fencing, and server disconnect;
 - delivery lease, insertion-start, persisted, rejected, and uncertain reports; and
 - bounded server notifications for newly eligible task versions and fencing.
 
 Unknown fields may be ignored only within a declared compatible version. Unknown enum values fail safe. Frames larger than the configured maximum are rejected before allocation of an unbounded payload.
+
+The current additive trust and reload commands retain protocol version 1 rather than bumping it: their envelopes use the existing command/result mechanism and the hello capability list is the compatibility boundary. A v1 client must inspect server capabilities before sending an additive command; a gateway that omits `trusted_users` or `config_reload` is unsupported for that command (exit 9), not treated as a transport failure. A future incompatible envelope, enum, or handshake change requires a protocol bump.
 
 Per-connection outbound queues are bounded. A slow client is disconnected without discarding durable work.
 
@@ -709,7 +731,7 @@ Startup must check schema compatibility and SQLite integrity, expire dead leader
 ## 15. Security boundaries
 
 - While `/mosscap` is active, a trusted Slack user's admitted mention automatically triggers model processing in a fully capable local Pi session.
-- Trust is based only on configured workspace, configured channel, immutable user allowlist, non-bot sender, and direct bot mention.
+- Trust is based only on configured workspace, configured channel, membership in the live allowlist of immutable Slack user IDs, non-bot sender, and direct bot mention.
 - These checks are authorization gates, not a sandbox.
 - Slack text, task text, filenames, MIME labels, and file bytes are untrusted data and must be visibly delimited from Mosscap control metadata.
 - Slack-origin text cannot directly invoke local protocol commands. Pi may choose to act on it with the authority the human gave Pi; that is the intended trust boundary.
@@ -735,6 +757,8 @@ Startup must check schema compatibility and SQLite integrity, expire dead leader
 12. Automatic deletion is limited to expired temporary bytes; durable metadata requires explicit purge.
 13. Purge never removes live tasks or unresolved delivery/effect evidence.
 14. No Mosscap component starts or owns Pi.
+15. Slack admission uses the current committed trusted-user set; an empty set admits no Slack messages.
+16. Configuration reload either activates one complete validated snapshot or leaves the prior snapshot active.
 
 ## 17. Implementation sequence
 
@@ -750,6 +774,8 @@ Startup must check schema compatibility and SQLite integrity, expire dead leader
 
 ### Phase 1: Slack admission and operations
 
+- Complete scalar TOML configuration, comment-preserving edits, and validated gateway reload (local snapshot foundation implemented before Slack; network verification completes here).
+- SQLite-backed live trust commands (implemented before Slack) and empty-set admission behavior (completed with Slack admission here).
 - Socket Mode connection and strict single-channel admission.
 - Commit-before-ack deduplication, source edits, deletions, and file metadata.
 - Single-channel reads and durable Slack effects.
@@ -821,6 +847,9 @@ Startup must check schema compatibility and SQLite integrity, expire dead leader
 24. Status distinguishes gateway health from operator-action-required ambiguity and reports SQLite and temporary-byte usage.
 25. Doctor is non-destructive and secret-safe.
 26. Gateway, Slack, extension, and file-transfer fault tests satisfy the recovery table without terminal inference or exactly-once claims.
+27. Setup writes a complete, documented, owner-only TOML file; targeted CLI edits preserve its comments and formatting, and all output redacts tokens.
+28. A reload with valid Slack configuration atomically activates the complete snapshot; an invalid or inaccessible proposal leaves the prior configuration and connection active.
+29. Trust add/remove operations survive restart, apply immediately after commit, and an empty trust set admits no Slack messages.
 
 ## 19. Definition of v1 complete
 

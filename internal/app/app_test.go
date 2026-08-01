@@ -21,8 +21,13 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"config", "set", "--help"},
 		{"gateway", "--help"},
 		{"gateway", "run", "--help"},
+		{"gateway", "reload", "--help"},
 		{"gateway", "status", "--help"},
 		{"doctor", "--help"},
+		{"trust", "--help"},
+		{"trust", "list", "--help"},
+		{"trust", "add", "--help"},
+		{"trust", "remove", "--help"},
 		{"task", "--help"},
 		{"task", "create", "--help"},
 		{"task", "list", "--help"},
@@ -49,15 +54,20 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 	}
 }
 
-func TestGlobalConfigBeforeSubcommand(t *testing.T) {
+func TestAlternateConfigPathIsNotAuthority(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	got := (App{Out: &stdout, Err: &stderr}).Run(context.Background(), []string{"--config", "/tmp/mosscap.toml", "task", "--help"})
-	if got != ExitSuccess || !strings.Contains(stdout.String(), "Usage: mosscap task") || stderr.Len() != 0 {
-		t.Fatalf("global config help: exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	if got != ExitUsage || stdout.Len() != 0 || !strings.Contains(stderr.String(), "unknown command") {
+		t.Fatalf("alternate config path: exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
 }
 
 func TestVersionAndUnimplementedCommand(t *testing.T) {
+	// gateway run is intentionally exercised before setup; isolate it from any
+	// developer installation that might otherwise make the test block forever.
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root+"/config")
+	t.Setenv("XDG_STATE_HOME", root+"/state")
 	var stdout, stderr bytes.Buffer
 	a := App{Out: &stdout, Err: &stderr, Version: "v1.2.3"}
 	if got := a.Run(context.Background(), []string{"--version"}); got != ExitSuccess {
