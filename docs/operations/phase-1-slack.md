@@ -8,7 +8,7 @@ Create an app for the intended workspace and enable Socket Mode. Generate an app
 
 Configure Event Subscriptions for Socket Mode and subscribe the bot to the message events needed for direct mentions, message changes, and message deletions. Enable the least bot scopes required by the gateway verification and operations: identity/workspace/channel inspection, channel history/replies/permalinks, `chat:write`, and reactions. Private channels require the corresponding private-channel scopes and an explicit bot invite. Treat Slack's OAuth scope display as authoritative when it requests a narrower or additional read scope.
 
-Record only immutable IDs, not names: workspace/team ID, bot user ID, and channel ID. Mosscap rejects an identity, scope, membership, or configured-channel mismatch before Socket intake becomes active.
+Record only immutable IDs, not names: channel ID is configured; workspace/team ID and bot user ID are derived from the bot token. Mosscap rejects an identity, scope, membership, or configured-channel mismatch before Socket intake becomes active.
 
 ## Credentials and first start
 
@@ -17,7 +17,7 @@ Use owner-only XDG roots (the defaults are appropriate for a single local accoun
 ```sh
 mosscap setup
 # Edit the owner-only config.toml; do not paste it into chat or source control.
-# Set slack_app_token, slack_bot_token, slack_team_id, slack_bot_user_id, slack_channel_id.
+# Set slack_app_token, slack_bot_token, and slack_channel_id. The workspace and bot user IDs are derived from auth.test at startup and verified before intake.
 mosscap gateway run
 ```
 

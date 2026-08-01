@@ -317,7 +317,7 @@ func unknownKeyError(key string) error {
 }
 
 var configKeys = []string{
-	"version", "slack_app_token", "slack_bot_token", "slack_team_id", "slack_bot_user_id", "slack_channel_id",
+	"version", "slack_app_token", "slack_bot_token", "slack_channel_id",
 	"delivery_lease", "leader_heartbeat", "leader_expiry", "slack_reconnect_initial_backoff",
 	"slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size",
 	"maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame",
@@ -492,9 +492,7 @@ version = %d
 # Slack Socket Mode app token and bot token. Both are redacted from all output.
 slack_app_token = %q
 slack_bot_token = %q
-# Expected Slack workspace, bot user, and one channel (C... or G...).
-slack_team_id = %q
-slack_bot_user_id = %q
+# One configured channel (C... or G...). Workspace and bot user IDs are derived from auth.test.
 slack_channel_id = %q
 
 # Delivery leader lease and heartbeat timings.
@@ -513,7 +511,7 @@ maximum_file_size = %q
 maximum_files_per_slack_operation = %d
 temporary_download_lifetime = %q
 local_protocol_maximum_frame = %d
-`, c.Version, c.SlackAppToken, c.SlackBotToken, c.SlackTeamID, c.SlackBotUserID, c.SlackChannelID,
+`, c.Version, c.SlackAppToken, c.SlackBotToken, c.SlackChannelID,
 		c.DeliveryLease, c.LeaderHeartbeat, c.LeaderExpiry, c.SlackReconnectInitialBackoff, c.SlackReconnectMaxBackoff,
 		c.SlackReconnectJitter, c.SQLiteBusyTimeout, c.MaximumFileSize.String(), c.MaximumFilesPerSlackOperation,
 		c.TemporaryDownloadLifetime, c.LocalProtocolMaximumFrame))

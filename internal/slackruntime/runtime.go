@@ -272,14 +272,15 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 	if web == nil || socket == nil {
 		return nil, errors.New("Slack runtime factory returned incomplete clients")
 	}
-	if _, err := slackapi.Verify(ctx, web, slackapi.VerificationRequest{TeamID: c.SlackTeamID, BotUserID: c.SlackBotUserID, ChannelID: c.SlackChannelID, TrustedUserIDs: append([]string(nil), r.options.TrustedUserIDs...)}); err != nil {
+	verified, err := slackapi.Verify(ctx, web, slackapi.VerificationRequest{ChannelID: c.SlackChannelID, TrustedUserIDs: append([]string(nil), r.options.TrustedUserIDs...)})
+	if err != nil {
 		return nil, safeError(err)
 	}
 	stream, err := socket.Open(ctx)
 	if err != nil {
 		return nil, safeError(err)
 	}
-	return &Snapshot{Config: c, TeamID: c.SlackTeamID, BotUserID: c.SlackBotUserID, ChannelID: c.SlackChannelID, Web: web, stream: stream, done: make(chan struct{})}, nil
+	return &Snapshot{Config: c, TeamID: verified.Identity.TeamID, BotUserID: verified.Identity.BotUserID, ChannelID: c.SlackChannelID, Web: web, stream: stream, done: make(chan struct{})}, nil
 }
 func safeError(err error) error {
 	failure := slackapi.Classify(err, slackapi.FailureSocket)
