@@ -36,6 +36,20 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"task", "open", "--help"},
 		{"task", "working", "--help"},
 		{"task", "done", "--help"},
+		{"slack", "--help"},
+		{"slack", "history", "--help"},
+		{"slack", "thread", "--help"},
+		{"slack", "send", "--help"},
+		{"slack", "edit", "--help"},
+		{"slack", "delete", "--help"},
+		{"slack", "react", "--help"},
+		{"slack", "unreact", "--help"},
+		{"effect", "--help"},
+		{"effect", "list", "--help"},
+		{"effect", "inspect", "--help"},
+		{"effect", "retry", "--help"},
+		{"file", "--help"},
+		{"file", "show", "--help"},
 	}
 	for _, args := range tests {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -89,6 +103,27 @@ func TestUnsupportedRemoteMapsToExit9(t *testing.T) {
 	var command *commandError
 	if !errors.As(err, &command) || command.code != ExitUnsupported {
 		t.Fatalf("remote error = %#v", err)
+	}
+}
+
+func TestPhase1ExitMappingsAndForbiddenFlags(t *testing.T) {
+	for _, tc := range []struct {
+		category string
+		want     int
+	}{{"external_failed", ExitExternalFailed}, {"ambiguous", ExitAmbiguous}} {
+		t.Run(tc.category, func(t *testing.T) {
+			err := remote(&client.RemoteError{ProtocolError: protocol.Error{Category: tc.category, Message: "safe"}})
+			var command *commandError
+			if !errors.As(err, &command) || command.code != tc.want {
+				t.Fatalf("remote(%q) = %#v", tc.category, err)
+			}
+		})
+	}
+	for _, args := range [][]string{{"slack", "history", "--channel", "C123"}, {"slack", "send", "--file", "x"}, {"file", "get", "fil_x"}} {
+		var out, stderr bytes.Buffer
+		if got := (App{Out: &out, Err: &stderr}).Run(context.Background(), args); got != ExitUsage {
+			t.Fatalf("Run(%q) = %d, stderr=%q", args, got, stderr.String())
+		}
 	}
 }
 

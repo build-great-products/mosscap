@@ -21,17 +21,20 @@ import (
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/securepath"
 	"github.com/stayradiated/mosscap/internal/server"
+	"github.com/stayradiated/mosscap/internal/slackruntime"
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
 const (
-	ExitSuccess     = 0
-	ExitUsage       = 2
-	ExitNotFound    = 3
-	ExitConflict    = 4
-	ExitUnsafe      = 5
-	ExitUnavailable = 6
-	ExitUnsupported = 9
+	ExitSuccess        = 0
+	ExitUsage          = 2
+	ExitNotFound       = 3
+	ExitConflict       = 4
+	ExitUnsafe         = 5
+	ExitUnavailable    = 6
+	ExitExternalFailed = 7
+	ExitAmbiguous      = 8
+	ExitUnsupported    = 9
 )
 
 type App struct {
@@ -89,6 +92,12 @@ func (a App) Execute(_ context.Context, args []string) error {
 		return a.trust(args[1:])
 	case "task":
 		return a.task("", args[1:])
+	case "slack":
+		return a.slack(args[1:])
+	case "effect":
+		return a.effect(args[1:])
+	case "file":
+		return a.file(args[1:])
 	default:
 		return usage(fmt.Sprintf("unknown command %q", args[0]))
 	}
@@ -226,7 +235,7 @@ func (a App) gateway(override string, args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return server.New(c, loc, a.Version, slog.New(slog.NewTextHandler(a.Err, nil))).Serve(ctx)
+	return server.NewWithOptions(c, loc, a.Version, slog.New(slog.NewTextHandler(a.Err, nil)), server.Options{Factory: slackruntime.RealFactory{}}).Serve(ctx)
 }
 
 func (a App) gatewayReload(args []string) error {
@@ -658,7 +667,7 @@ func (a App) task(_ string, args []string) error {
 // reorderTaskFlags allows the documented TASK-before-flags form while keeping
 // the standard library flag parser for all option validation.
 func reorderTaskFlags(args []string) []string {
-	valueFlags := map[string]bool{"--text": true, "--text-file": true, "--request-id": true, "--note": true, "--state": true, "--limit": true}
+	valueFlags := map[string]bool{"--text": true, "--text-file": true, "--request-id": true, "--note": true, "--state": true, "--limit": true, "--thread": true, "--task": true, "--reason": true}
 	flags := make([]string, 0, len(args))
 	positionals := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -692,7 +701,7 @@ func remote(err error) error {
 		switch re.ProtocolError.Category {
 		case "not_found":
 			code = ExitNotFound
-		case "ambiguous", "conflict":
+		case "conflict":
 			code = ExitConflict
 		case "usage":
 			code = ExitUsage
@@ -700,6 +709,10 @@ func remote(err error) error {
 			code = ExitUnsupported
 		case "unavailable":
 			code = ExitUnavailable
+		case "external_failed":
+			code = ExitExternalFailed
+		case "ambiguous":
+			code = ExitAmbiguous
 		}
 		return &commandError{code, re.Error()}
 	}
@@ -752,7 +765,7 @@ func (a App) leaf(name string, args []string) error {
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  task        manage local tasks\n\nRun \"mosscap <command> --help\" for command help.\n")
+	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  task        manage local tasks\n  slack       read and operate in the configured Slack channel\n  effect      inspect durable Slack effects\n  file        show incoming Slack file metadata\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)
