@@ -16,6 +16,7 @@
         "reactions:read",
         "reactions:write",
         "users:read",
+        "team:read",
         "files:read",
         "channels:read",
         "channels:history"

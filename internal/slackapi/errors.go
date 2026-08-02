@@ -147,7 +147,7 @@ func MissingScopesFromError(err error) ([]Scope, bool) {
 func requiredBotScope(scope Scope) bool {
 	switch scope {
 	case ScopeAppMentionsRead, ScopeChatWrite, ScopeReactionsRead, ScopeReactionsWrite,
-		ScopeUsersRead, ScopeFilesRead, ScopeChannelsRead, ScopeChannelsHistory,
+		ScopeUsersRead, ScopeTeamRead, ScopeFilesRead, ScopeChannelsRead, ScopeChannelsHistory,
 		ScopeGroupsRead, ScopeGroupsHistory:
 		return true
 	default:
