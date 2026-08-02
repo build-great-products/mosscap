@@ -10,9 +10,6 @@
   },
   "oauth_config": {
     "scopes": {
-      "app": [
-        "connections:write"
-      ],
       "bot": [
         "app_mentions:read",
         "chat:write",

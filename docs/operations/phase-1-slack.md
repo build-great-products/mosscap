@@ -4,7 +4,7 @@ Phase 1 connects **one configured Slack channel** to the local Mosscap ledger. I
 
 ## Slack app setup
 
-Import [`../slack/phase-1-public-channel-manifest.json`](../slack/phase-1-public-channel-manifest.json) in Slack's app-manifest UI for the configured public `C...` channel. The manifest enables Socket Mode, requests only its listed scopes, and subscribes only to `app_mention` and `message.channels`; it deliberately has no interactivity, slash commands, request URLs, or file-write/upload permissions. Slack's manifest UI validation is authoritative: correct any schema or scope feedback there before proceeding.
+Import [`../../manifest.json`](../../manifest.json) in Slack's app-manifest UI for the configured public `C...` channel. The manifest enables Socket Mode, requests only its listed bot scopes, and subscribes only to `app_mention` and `message.channels`; it deliberately has no app-level scope property, interactivity, slash commands, request URLs, or file-write/upload permissions. Generate the separate app-level `connections:write` Socket Mode token after importing the manifest. Slack's manifest UI validation is authoritative: correct any schema or scope feedback there before proceeding.
 
 For one configured private `G...` channel, use the same manifest except replace only `channels:read` and `channels:history` with `groups:read` and `groups:history`, and replace `message.channels` with `message.groups`. Retain every other scope and event, including `app_mention`, unchanged. Install (or reinstall after any manifest/scope change) the app in the intended workspace, then explicitly invite the bot to the configured channel.
 
