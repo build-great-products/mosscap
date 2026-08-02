@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,70 @@ func TestWebFailsOnScriptMismatchWithoutPrintingPayload(t *testing.T) {
 	err := web.AddReaction(context.Background(), slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1.000001", Emoji: "secret-payload"})
 	if err == nil || err.Error() != "fake Slack Web: got add_reaction call, expected delete_message" {
 		t.Fatalf("mismatch error = %v", err)
+	}
+	if got := err.Error(); got == "" || strings.Contains(got, "secret-payload") {
+		t.Fatalf("mismatch error leaked request payload: %q", got)
+	}
+}
+
+func TestWebCallScriptsGateFIFOAndModelSubmissionBoundary(t *testing.T) {
+	preBarrier := NewBarrier()
+	postBarrier := NewBarrier()
+	postRequest := slackapi.PostMessageRequest{ChannelID: "C012ABC", Text: "exact intent", ClientMessageID: "eff_123"}
+	historyRequest := slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 1}
+	web := NewWeb(
+		Step{Operation: PostMessage, Request: postRequest, PreCall: CallScript{Barrier: preBarrier}},
+		Step{Operation: History, Request: historyRequest, PostCall: CallScript{Barrier: postBarrier, Fault: Disconnect}},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	postDone := make(chan error, 1)
+	go func() { _, err := web.PostMessage(ctx, postRequest); postDone <- err }()
+	select {
+	case <-preBarrier.Reached():
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	historyDone := make(chan error, 1)
+	go func() { _, err := web.History(ctx, historyRequest); historyDone <- err }()
+	preBarrier.Release()
+	if err := <-postDone; err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	select {
+	case <-postBarrier.Reached():
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	calls := web.Calls()
+	if len(calls) != 2 || calls[0].Operation != PostMessage || calls[1].Operation != History {
+		t.Fatalf("FIFO calls = %#v", calls)
+	}
+	if web.Remaining() != 0 {
+		t.Fatalf("remaining after post-call gate = %d", web.Remaining())
+	}
+	postBarrier.Release()
+	if err := <-historyDone; slackapi.Classify(err, slackapi.FailureAfterSubmit).Diagnostic != slackapi.DiagnosticDisconnected {
+		t.Fatalf("post-call disconnect = %v", err)
+	}
+}
+
+func TestWebPreCallTimeoutDoesNotCaptureOrConsume(t *testing.T) {
+	barrier := NewBarrier()
+	request := slackapi.DeleteMessageRequest{ChannelID: "C012ABC", MessageTS: "1.000001"}
+	web := NewWeb(Step{Operation: DeleteMessage, Request: request, PreCall: CallScript{Barrier: barrier, Fault: Timeout}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- web.DeleteMessage(ctx, request) }()
+	<-barrier.Reached()
+	barrier.Release()
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pre-call timeout = %v", err)
+	}
+	if calls := web.Calls(); len(calls) != 0 || web.Remaining() != 1 {
+		t.Fatalf("pre-call timeout calls=%#v remaining=%d", calls, web.Remaining())
 	}
 }
 
@@ -190,6 +255,23 @@ func TestSocketBarriersCancellationAndLifecycle(t *testing.T) {
 	}
 }
 
+func TestSocketRejectsConcurrentReceive(t *testing.T) {
+	barrier := NewBarrier()
+	stream := newStream([]ReceiveStep{{Barrier: barrier}})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first := make(chan error, 1)
+	go func() { _, err := stream.Receive(ctx); first <- err }()
+	<-barrier.Reached()
+	if _, err := stream.Receive(ctx); !errors.Is(err, slackapi.ErrConcurrentReceive) {
+		t.Fatalf("concurrent Receive error = %v", err)
+	}
+	barrier.Release()
+	if err := <-first; err != nil {
+		t.Fatalf("first Receive error = %v", err)
+	}
+}
+
 func TestSocketOpenBarrierHonorsCancellation(t *testing.T) {
 	barrier := NewBarrier()
 	socket := NewSocket(SocketSession{OpenBarrier: barrier})
@@ -216,6 +298,12 @@ func TestAckRecorderAndJitter(t *testing.T) {
 	}
 	if recorder.Calls() != 1 {
 		t.Fatalf("ack calls = %d", recorder.Calls())
+	}
+	if err := ack.Acknowledge(context.Background()); !errors.Is(err, slackapi.ErrAlreadyAcknowledged) {
+		t.Fatalf("second acknowledgement error = %v", err)
+	}
+	if recorder.Calls() != 1 {
+		t.Fatalf("ack callback retried: %d calls", recorder.Calls())
 	}
 
 	jitter := NewJitter(250*time.Millisecond, 0)

@@ -12,6 +12,7 @@ const (
 	ScopeReactionsRead    Scope = "reactions:read"
 	ScopeReactionsWrite   Scope = "reactions:write"
 	ScopeUsersRead        Scope = "users:read"
+	ScopeTeamRead         Scope = "team:read"
 	ScopeFilesRead        Scope = "files:read"
 	ScopeChannelsRead     Scope = "channels:read"
 	ScopeChannelsHistory  Scope = "channels:history"
@@ -51,6 +52,7 @@ func RequiredBotScopes(privateChannel bool) []Scope {
 		ScopeReactionsRead,
 		ScopeReactionsWrite,
 		ScopeUsersRead,
+		ScopeTeamRead,
 		ScopeFilesRead,
 	}
 	if privateChannel {

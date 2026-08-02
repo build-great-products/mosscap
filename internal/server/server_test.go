@@ -15,6 +15,8 @@ import (
 	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/protocol"
+	"github.com/stayradiated/mosscap/internal/slackapi"
+	"github.com/stayradiated/mosscap/internal/slackapi/fake"
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
@@ -115,6 +117,141 @@ func TestReloadIsFailureAtomicAndUsesImmutableSnapshots(t *testing.T) {
 	}
 	if got := s.snapshot(); got.MaximumFileSize != 200<<20 || s.generation.Load() != 2 {
 		t.Fatalf("invalid reload changed active snapshot: size=%d generation=%d", got.MaximumFileSize, s.generation.Load())
+	}
+}
+
+type fakeRuntimeFactory struct {
+	webs    []slackapi.Web
+	sockets []slackapi.Socket
+}
+
+func (f *fakeRuntimeFactory) Build(config.Config) (slackapi.Web, slackapi.Socket, error) {
+	if len(f.webs) == 0 || len(f.sockets) == 0 {
+		return nil, nil, errors.New("fake runtime factory exhausted")
+	}
+	web, socket := f.webs[0], f.sockets[0]
+	f.webs, f.sockets = f.webs[1:], f.sockets[1:]
+	return web, socket, nil
+}
+
+func phase1VerifiedWeb() slackapi.Web {
+	return fake.NewWeb(
+		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
+		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
+		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
+		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+	)
+}
+
+func phase1Envelope(id string) (slackapi.Envelope, *fake.AckRecorder) {
+	ack, recorder := fake.NewAckRecorder(nil)
+	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U012BOT>", Ack: ack}, recorder
+}
+
+func waitForAck(t *testing.T, recorder *fake.AckRecorder) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for recorder.Calls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := recorder.Calls(); got != 1 {
+		t.Fatalf("ack calls = %d", got)
+	}
+}
+
+func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, ".mosscap-phase1-reload-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.Setup(loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_id": "C012ABC",
+	} {
+		if _, err := config.Set(loc, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initial, _, err = config.LoadWithDigest(loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, _ := time.ParseDuration(initial.SQLiteBusyTimeout)
+	ledger, err := store.Open(context.Background(), initial.Paths.Database, store.Options{BusyTimeout: busy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSocket := fake.NewSocket(fake.SocketSession{})
+	failedEnvelope, failedAck := phase1Envelope("failed")
+	failedSocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: failedEnvelope}}})
+	successEnvelope, successAck := phase1Envelope("success")
+	newSocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: successEnvelope}}})
+	replayEnvelope, replayAck := phase1Envelope("replay")
+	replaySocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: replayEnvelope}}})
+	factory := &fakeRuntimeFactory{
+		webs:    []slackapi.Web{phase1VerifiedWeb(), fake.NewWeb(fake.Step{Operation: fake.Auth, Err: errors.New("xoxb-TOKEN_CANARY")}), phase1VerifiedWeb(), phase1VerifiedWeb()},
+		sockets: []slackapi.Socket{oldSocket, failedSocket, newSocket, replaySocket},
+	}
+	s := NewWithOptions(initial, loc, "test", nil, Options{Factory: factory})
+	s.store = ledger
+	if err := s.startSlack(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.closeSlack(); _ = ledger.Close() })
+	oldRuntime := s.runtime
+	if _, err := config.Set(loc, "maximum_file_size", "200MiB"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.reload(context.Background(), "phase1-failed"); err == nil || strings.Contains(err.Error(), "TOKEN_CANARY") {
+		t.Fatalf("unsafe candidate failure: %v", err)
+	}
+	if s.runtime != oldRuntime || s.snapshot().MaximumFileSize != initial.MaximumFileSize {
+		t.Fatal("failed candidate changed published runtime or config")
+	}
+	if failedAck.Calls() != 0 || len(failedSocket.OpenedStreams()) != 0 {
+		t.Fatal("failed candidate handled an envelope")
+	}
+	result, err := s.reload(context.Background(), "phase1-success")
+	if err != nil || !result.Activated || result.SlackNetworkVerificationDeferred {
+		t.Fatalf("reload result=%+v err=%v", result, err)
+	}
+	if s.runtime == oldRuntime || s.snapshot().MaximumFileSize != 200<<20 {
+		t.Fatal("successful candidate was not atomically published")
+	}
+	waitForAck(t, successAck)
+	if _, err := s.reload(context.Background(), "phase1-success"); err != nil {
+		t.Fatalf("replayed reload: %v", err)
+	}
+	if replayAck.Calls() != 0 {
+		t.Fatalf("replayed candidate acknowledged before activation: %d", replayAck.Calls())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := oldSocket.OpenedStreams()[0].WaitForClose(ctx); err != nil {
+		t.Fatalf("old runtime did not drain: %v", err)
+	}
+	if len(newSocket.OpenedStreams()) != 1 {
+		t.Fatal("new runtime was not started before publication")
+	}
+	if len(replaySocket.OpenedStreams()) != 1 || !replaySocket.OpenedStreams()[0].Closed() {
+		t.Fatal("replayed candidate stream was not closed without activation")
 	}
 }
 

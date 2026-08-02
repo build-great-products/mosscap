@@ -30,13 +30,54 @@ const (
 	RemoveReaction Operation = "remove_reaction"
 )
 
+// CallFault is a safe, deterministic failure injected around one Web call.
+type CallFault string
+
+const (
+	// Timeout returns context.DeadlineExceeded. It models a call deadline
+	// without retaining any request or response body.
+	Timeout CallFault = "timeout"
+	// Disconnect returns a classified Slack disconnect error.
+	Disconnect CallFault = "disconnect"
+)
+
+// CallScript delays a call at its phase and then injects Fault. Barrier is
+// optional; when supplied, it reports that the phase was reached and blocks
+// until released or the call context is canceled. A zero-valued script passes.
+type CallScript struct {
+	Barrier *Barrier
+	Fault   CallFault
+}
+
+func (s CallScript) apply(ctx context.Context) error {
+	if err := s.Barrier.Wait(ctx); err != nil {
+		return err
+	}
+	switch s.Fault {
+	case "":
+		return nil
+	case Timeout:
+		return context.DeadlineExceeded
+	case Disconnect:
+		return slackapi.NewExternalError(slackapi.ReasonDisconnected, slackapi.DiagnosticDisconnected, "", nil)
+	default:
+		return fmt.Errorf("fake Slack Web: unknown call fault %q", s.Fault)
+	}
+}
+
 // Step is one expected call and scripted result. A nil Request accepts any
-// request. Result must be assignable to the method's result DTO.
+// request. Result must be assignable to the method's result DTO. PreCall runs
+// after this step has been selected but before the request is recorded or the
+// step is consumed; a pre-call fault therefore proves no Web call occurred.
+// PostCall runs after exact request capture and consumption, modelling an
+// unknown outcome after submission. Both scripts preserve strict FIFO order.
 type Step struct {
 	Operation Operation
 	Request   any
 	Result    any
 	Err       error
+	PreCall   CallScript
+	PostCall  CallScript
 }
 
 // Call is one observed SDK-free request.
@@ -135,18 +176,31 @@ func (w *Web) invoke(ctx context.Context, operation Operation, request, output a
 		return err
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.calls = append(w.calls, Call{Operation: operation, Request: request})
 	if len(w.steps) == 0 {
+		w.mu.Unlock()
 		return fmt.Errorf("fake Slack Web: unexpected %s call", operation)
 	}
 	step := w.steps[0]
-	w.steps = w.steps[1:]
 	if step.Operation != operation {
+		w.mu.Unlock()
 		return fmt.Errorf("fake Slack Web: got %s call, expected %s", operation, step.Operation)
 	}
 	if step.Request != nil && !reflect.DeepEqual(step.Request, request) {
+		w.mu.Unlock()
 		return fmt.Errorf("fake Slack Web: %s request differs from script", operation)
+	}
+	// Keep the lock through the pre-call script so a later caller cannot pass
+	// this unconsumed FIFO step. Once captured, later calls may proceed while a
+	// post-call script models the uncertain response boundary.
+	if err := step.PreCall.apply(ctx); err != nil {
+		w.mu.Unlock()
+		return err
+	}
+	w.calls = append(w.calls, Call{Operation: operation, Request: request})
+	w.steps = w.steps[1:]
+	w.mu.Unlock()
+	if err := step.PostCall.apply(ctx); err != nil {
+		return err
 	}
 	if step.Err != nil {
 		return step.Err

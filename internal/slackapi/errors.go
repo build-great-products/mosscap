@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -92,6 +93,68 @@ type ExternalError struct {
 	requestID  string
 }
 
+// MissingScopesError is a secret-safe, typed verification rejection. Its
+// scopes are restricted to Mosscap's required bot OAuth scope allowlist.
+type MissingScopesError struct {
+	missing []Scope
+}
+
+// NewMissingScopesError retains a sorted, deduplicated copy of required bot
+// scopes only. Invalid or unrelated values are discarded so error rendering
+// cannot expose arbitrary external response content.
+func NewMissingScopesError(missing []Scope) *MissingScopesError {
+	seen := make(map[Scope]struct{}, len(missing))
+	safe := make([]Scope, 0, len(missing))
+	for _, scope := range missing {
+		if !requiredBotScope(scope) {
+			continue
+		}
+		if _, duplicate := seen[scope]; duplicate {
+			continue
+		}
+		seen[scope] = struct{}{}
+		safe = append(safe, scope)
+	}
+	sort.Slice(safe, func(i, j int) bool { return safe[i] < safe[j] })
+	return &MissingScopesError{missing: safe}
+}
+
+func (e *MissingScopesError) Error() string { return "Slack external failure (missing_scope)" }
+
+// Format prevents debug renderers from observing the private scope slice.
+func (e *MissingScopesError) Format(state fmt.State, _ rune) {
+	_, _ = state.Write([]byte(e.Error()))
+}
+
+// MissingScopes returns a copy of the exact sorted bot OAuth scope names.
+func (e *MissingScopesError) MissingScopes() []Scope {
+	if e == nil {
+		return nil
+	}
+	return append([]Scope(nil), e.missing...)
+}
+
+// MissingScopesFromError extracts safe missing scope names from a verification
+// error without exposing arbitrary wrapped causes.
+func MissingScopesFromError(err error) ([]Scope, bool) {
+	var missing *MissingScopesError
+	if !errors.As(err, &missing) {
+		return nil, false
+	}
+	return missing.MissingScopes(), true
+}
+
+func requiredBotScope(scope Scope) bool {
+	switch scope {
+	case ScopeAppMentionsRead, ScopeChatWrite, ScopeReactionsRead, ScopeReactionsWrite,
+		ScopeUsersRead, ScopeTeamRead, ScopeFilesRead, ScopeChannelsRead, ScopeChannelsHistory,
+		ScopeGroupsRead, ScopeGroupsHistory:
+		return true
+	default:
+		return false
+	}
+}
+
 // NewExternalError creates a classified adapter error, replacing unknown
 // diagnostics and unsafe request IDs with bounded defaults. cause is accepted
 // at the adapter boundary but deliberately discarded; callers must encode all
@@ -144,6 +207,11 @@ func Classify(err error, point FailurePoint) Failure {
 		reason = external.reason
 		diagnostic = external.diagnostic
 		requestID = external.requestID
+	}
+	var missingScopes *MissingScopesError
+	if errors.As(err, &missingScopes) {
+		reason = ReasonRejected
+		diagnostic = DiagnosticMissingScope
 	}
 	if reason == ReasonRejected {
 		return Failure{Class: FailureConclusive, Diagnostic: diagnostic, RequestID: requestID}

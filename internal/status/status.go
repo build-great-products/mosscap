@@ -29,4 +29,7 @@ type Snapshot struct {
 	EffectsCapability      string `json:"effects_capability"`
 	SlackCapability        string `json:"slack_capability"`
 	PiCapability           string `json:"pi_capability"`
+	// Slack is Phase 1 operational state. It is populated by server without
+	// carrying tokens, headers, message bodies, or file bytes.
+	Slack any `json:"slack,omitempty"`
 }

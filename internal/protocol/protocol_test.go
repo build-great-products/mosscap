@@ -161,6 +161,74 @@ func TestFrameRejectsBadLengthsAndUTF8(t *testing.T) {
 		})
 	}
 }
+func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
+	cases := []struct{ command, params string }{
+		{"slack.history", `{"limit":100}`},
+		{"slack.thread", `{"thread_ts":"1712345678.000001"}`},
+		{"slack.send", `{"thread_ts":"1712345678.000001","text":"hello","task":"tsk_abc"}`},
+		{"slack.edit", `{"message_ts":"1712345678.000001","text":"hello"}`},
+		{"slack.delete", `{"message_ts":"1712345678.000001","reason":"operator request"}`},
+		{"slack.react", `{"message_ts":"1712345678.000001","emoji":"eyes"}`},
+		{"slack.unreact", `{"message_ts":"1712345678.000001","emoji":"eyes"}`},
+		{"effect.list", `{"state":"ambiguous","limit":100}`},
+		{"effect.inspect", `{"effect":"eff_abc"}`},
+		{"effect.retry", `{"effect":"eff_abc","reason":"reviewed","confirm_duplicate_risk":true}`},
+		{"file.show", `{"file":"fil_abc"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			r := Request{ProtocolVersion: Version, RequestID: "req_abcdefghijklmnopqrstuv", ClientKind: "cli", ClientVersion: "test", Command: tc.command, Params: []byte(tc.params)}
+			encoded, err := EncodeRequest(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeRequest(encoded); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, tc := range []struct{ command, params string }{
+		{"slack.history", `{"limit":101}`}, {"slack.thread", `{"thread_ts":"bad"}`},
+		{"slack.send", `{"text":"","extra":true}`}, {"slack.edit", `{"message_ts":"1.000001","text":"x","thread_ts":"1.000001"}`},
+		{"slack.delete", `{"message_ts":"1.000001","reason":""}`}, {"slack.react", `{"message_ts":"1.000001","emoji":"bad emoji"}`},
+		{"effect.list", `{"state":"unknown"}`}, {"effect.inspect", `{"effect":"tsk_abc"}`},
+		{"effect.retry", `{"effect":"eff_abc","reason":""}`}, {"file.show", `{"file":"/tmp/file"}`},
+	} {
+		if err := ValidateParams(tc.command, []byte(tc.params)); err == nil {
+			t.Fatalf("accepted invalid %s %s", tc.command, tc.params)
+		}
+	}
+}
+
+func TestPhase1CapabilitiesAndSafeDTOs(t *testing.T) {
+	for _, capability := range []string{CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata} {
+		found := false
+		for _, advertised := range ServerCapabilities {
+			found = found || advertised == capability
+		}
+		if !found {
+			t.Fatalf("missing Phase 1 capability %q", capability)
+		}
+	}
+	// Effect list/mutation DTOs intentionally lack request text and reasons;
+	// inspect is the one explicit result type which can contain exact intent.
+	list := EffectListDTO{Effects: []SlackEffectDTO{{EffectID: "eff_abc", Kind: "send", State: "confirmed", PreparedAt: "2026-01-01T00:00:00Z"}}}
+	if got := mustJSON(t, list); got != `{"effects":[{"effect_id":"eff_abc","kind":"send","state":"confirmed","attempt_count":0,"prepared_at":"2026-01-01T00:00:00Z"}]}` {
+		t.Fatalf("effect list = %s", got)
+	}
+	inspect := EffectInspectDTO{Effect: list.Effects[0], Intent: SlackEffectIntentDTO{Text: "explicit body"}}
+	if got := mustJSON(t, inspect); got == "" {
+		t.Fatal("empty inspect DTO")
+	}
+	if _, err := EncodeResponse(NewErrorResponse("req_abcdefghijklmnopqrstuv", "test", "external", "external_failed", "xoxb-secret-token", false)); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := Error{Code: "x", Category: "usage", Message: "Authorization: Bearer secret"}
+	if err := unsafe.Validate(); err == nil {
+		t.Fatal("accepted credential-bearing error")
+	}
+}
+
 func TestStrictDecode(t *testing.T) {
 	cases := [][]byte{
 		[]byte(`{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"x","command":"hello","params":{"supported_versions":[2],"capabilities":[]}}`),

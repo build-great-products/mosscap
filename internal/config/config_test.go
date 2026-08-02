@@ -49,7 +49,7 @@ func TestDefaultCompleteFixedPathsAndTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"version", "slack_app_token", "slack_bot_token", "slack_team_id", "slack_bot_user_id", "slack_channel_id", "delivery_lease", "leader_heartbeat", "leader_expiry", "slack_reconnect_initial_backoff", "slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size", "maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame"} {
+	for _, key := range []string{"version", "slack_app_token", "slack_bot_token", "slack_channel_id", "delivery_lease", "leader_heartbeat", "leader_expiry", "slack_reconnect_initial_backoff", "slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size", "maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame"} {
 		if !strings.Contains(string(b), "\n"+key+" =") {
 			t.Errorf("template lacks top-level %s", key)
 		}

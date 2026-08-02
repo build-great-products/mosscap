@@ -19,6 +19,10 @@ import (
 	"github.com/stayradiated/mosscap/internal/doctor"
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/securepath"
+	"github.com/stayradiated/mosscap/internal/slackapi"
+	"github.com/stayradiated/mosscap/internal/slackingest"
+	"github.com/stayradiated/mosscap/internal/slackops"
+	"github.com/stayradiated/mosscap/internal/slackruntime"
 	"github.com/stayradiated/mosscap/internal/status"
 	"github.com/stayradiated/mosscap/internal/store"
 	"github.com/stayradiated/mosscap/internal/task"
@@ -71,6 +75,11 @@ type Server struct {
 	reloadMu       sync.Mutex
 	operationMu    sync.RWMutex
 	activeDigest   string // guarded by operationMu; SHA-256 only, never TOML bytes
+	runtimeFactory slackruntime.Factory
+	runtime        *slackruntime.Runtime
+	ingest         *slackingest.Coordinator
+	slackDisabled  bool
+	slackState     slackruntime.State
 }
 
 func New(c config.Config, loc config.Location, version string, log *slog.Logger) *Server {
@@ -80,7 +89,7 @@ func New(c config.Config, loc config.Location, version string, log *slog.Logger)
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{Config: c, ConfigLocation: loc, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc)}
+	s := &Server{Config: c, ConfigLocation: loc, Version: version, Log: log, closing: make(chan struct{}), slots: make(chan struct{}, 64), active: make(map[*net.UnixConn]context.CancelFunc), slackDisabled: true, slackState: slackruntime.StateDisabled}
 	s.activeConfig.Store(&c)
 	s.generation.Store(1)
 	return s
@@ -178,6 +187,22 @@ func (s *Server) open(ctx context.Context) error {
 		return err
 	}
 	s.store = db
+	// Reconcile uncertainty before any prepared effect can be submitted, then
+	// verify Socket readiness before making the local endpoint reachable.
+	if err := s.startSlack(ctx, c); err != nil {
+		return err
+	}
+	if s.runtime != nil {
+		op, release, err := s.ops()
+		if err != nil {
+			return err
+		}
+		_, err = op.Recover(ctx)
+		release()
+		if err != nil {
+			return err
+		}
+	}
 	if err := s.prepareEndpoint(c.Paths.Endpoint); err != nil {
 		return err
 	}
@@ -204,6 +229,13 @@ func (s *Server) open(ctx context.Context) error {
 		return errors.New("gateway endpoint changed while binding")
 	}
 	s.listener, s.endpoint, s.socketDev, s.socketIno, s.started = l, c.Paths.Endpoint, uint64(st.Dev), st.Ino, time.Now()
+	// The endpoint is reachable and recovery has completed; only now may the
+	// verified initial Socket candidate dispatch envelopes.
+	if s.runtime != nil {
+		if err := s.runtime.Activate(); err != nil {
+			return err
+		}
+	}
 	s.Log.Info("gateway listening", "endpoint", s.endpoint)
 	return nil
 }
@@ -285,6 +317,8 @@ func (s *Server) shutdown() {
 				}
 			}
 		}
+		// Socket intake is stopped and snapshots drained before SQLite closes.
+		s.closeSlack()
 		if s.store != nil {
 			_, _ = s.store.DB().Exec("PRAGMA wal_checkpoint(PASSIVE)")
 			_ = s.store.Close()
@@ -405,6 +439,7 @@ func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Resp
 		resultType = "doctor_report"
 		checks := s.store.Doctor(ctx)
 		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
+		checks = append(checks, s.phase1Doctor(ctx)...)
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
 	case "trust.list":
 		resultType = "trusted_user_list"
@@ -431,7 +466,76 @@ func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Resp
 		var p protocol.TaskSelector
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task"
-		result, err = s.store.Get(ctx, p.Task)
+		result, err = s.store.GetTaskReadModel(ctx, p.Task)
+	case "file.show":
+		var p protocol.FileSelector
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "slack_file"
+		result, err = s.store.GetSlackFile(ctx, p.File)
+	case "slack.history", "slack.thread":
+		var op interface {
+			History(context.Context, int) (slackapi.MessagePage, error)
+			Thread(context.Context, string) (slackapi.MessagePage, error)
+		}
+		var release func()
+		op, release, err = s.ops()
+		if err == nil {
+			defer release()
+		}
+		resultType = "slack_message_page"
+		if err == nil && r.Command == "slack.history" {
+			var p protocol.SlackHistoryParams
+			_ = json.Unmarshal(r.Params, &p)
+			result, err = op.History(ctx, p.Limit)
+		}
+		if err == nil && r.Command == "slack.thread" {
+			var p protocol.SlackThreadParams
+			_ = json.Unmarshal(r.Params, &p)
+			result, err = op.Thread(ctx, p.ThreadTS)
+		}
+	case "slack.send", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
+		var op *slackops.Service
+		var release func()
+		op, release, err = s.ops()
+		if err == nil {
+			defer release()
+			var intent store.SlackEffectIntent
+			intent, err = effectIntent(r.Command, r)
+			if err == nil {
+				result, err = op.Execute(ctx, r.RequestID, intent)
+			}
+		}
+		resultType = "slack_effect"
+	case "effect.list":
+		var p protocol.EffectListParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "slack_effect_list"
+		var state *store.SlackEffectState
+		if p.State != nil {
+			x := store.SlackEffectState(*p.State)
+			state = &x
+		}
+		result, err = s.store.ListSlackEffects(ctx, state, p.Limit)
+	case "effect.inspect":
+		var p protocol.EffectSelector
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "effect_inspect"
+		var effect store.SlackEffect
+		effect, err = s.store.GetSlackEffect(ctx, p.Effect)
+		if err == nil {
+			result = protocol.EffectInspectDTO{Effect: slackEffectDTO(effect), Intent: protocol.SlackEffectIntentDTO{Text: effect.Text, Emoji: effect.Emoji, OperatorReason: effect.OperatorReason}}
+		}
+	case "effect.retry":
+		var p protocol.EffectRetryParams
+		_ = json.Unmarshal(r.Params, &p)
+		var op *slackops.Service
+		var release func()
+		op, release, err = s.ops()
+		if err == nil {
+			defer release()
+			result, err = op.Retry(ctx, r.RequestID, p.Effect, p.Reason, p.ConfirmDuplicateRisk)
+		}
+		resultType = "slack_effect"
 	case "task.list":
 		var p protocol.TaskListParams
 		_ = json.Unmarshal(r.Params, &p)
@@ -482,56 +586,92 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 
 	s.operationMu.Lock()
 	defer s.operationMu.Unlock()
+
+	// Construct and verify every replacement before recording the activation
+	// decision. Nothing below publishes these candidates until ReloadConfig has
+	// committed its durable success result.
 	var replacement *store.Store
-	result, replay, err := s.store.ReloadConfig(ctx, requestID, digest, func() (store.ConfigReloadResult, error) {
-		if loadErr != nil {
-			return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate is invalid; repair config.toml"}
-		}
-		if err := s.validateStartupPaths(candidate); err != nil {
-			return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate paths are unsafe; repair private XDG paths"}
-		}
+	var candidateRuntime *slackruntime.Runtime
+	var candidateIngest *slackingest.Coordinator
+	candidateState := slackruntime.StateDisabled
+	var prepareErr error
+	if loadErr != nil {
+		prepareErr = &store.ConfigReloadError{Message: "reload candidate is invalid; repair config.toml"}
+	} else if err := s.validateStartupPaths(candidate); err != nil {
+		prepareErr = &store.ConfigReloadError{Message: "reload candidate paths are unsafe; repair private XDG paths"}
+	} else {
 		if s.Verifier != nil {
 			if err := s.Verifier.Verify(ctx, candidate); err != nil {
 				// External verifier errors may contain credentials or Slack responses.
-				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
 			}
 		}
-		current := s.snapshot()
-		if candidate.SQLiteBusyTimeout != current.SQLiteBusyTimeout {
+		if prepareErr == nil && candidate.SQLiteBusyTimeout != s.snapshot().SQLiteBusyTimeout {
 			busy, err := time.ParseDuration(candidate.SQLiteBusyTimeout)
 			if err != nil {
-				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate has an invalid SQLite busy timeout"}
-			}
-			replacement, err = store.Open(ctx, candidate.Paths.Database, store.Options{BusyTimeout: busy})
-			if err != nil {
-				return store.ConfigReloadResult{}, &store.ConfigReloadError{Message: "reload candidate SQLite busy timeout could not be activated"}
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate has an invalid SQLite busy timeout"}
+			} else if replacement, err = store.Open(ctx, candidate.Paths.Database, store.Options{BusyTimeout: busy}); err != nil {
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate SQLite busy timeout could not be activated"}
 			}
 		}
-		return store.ConfigReloadResult{Activated: true, SlackNetworkVerificationDeferred: true, ActiveConfigGeneration: s.generation.Load() + 1, ActiveConfigDigest: digest}, nil
-	})
-	if err != nil {
+		if prepareErr == nil {
+			ledger := s.store
+			if replacement != nil {
+				ledger = replacement
+			}
+			candidateRuntime, candidateIngest, candidateState, err = s.prepareSlack(ctx, candidate, ledger)
+			if err != nil {
+				// Runtime errors are already token-safe, but do not expose adapters'
+				// implementation details through the durable reload record.
+				prepareErr = &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+			}
+		}
+	}
+	cleanupCandidate := func() {
+		if candidateRuntime != nil {
+			_ = candidateRuntime.Close()
+		}
 		if replacement != nil {
 			_ = replacement.Close()
 		}
+	}
+	result, replay, err := s.store.ReloadConfig(ctx, requestID, digest, func() (store.ConfigReloadResult, error) {
+		if prepareErr != nil {
+			return store.ConfigReloadResult{}, prepareErr
+		}
+		return store.ConfigReloadResult{Activated: true, SlackNetworkVerificationDeferred: s.slackDisabled, ActiveConfigGeneration: s.generation.Load() + 1, ActiveConfigDigest: digest}, nil
+	})
+	if err != nil {
+		cleanupCandidate()
 		return protocol.ConfigReloadDTO{}, err
 	}
 	if replay {
-		if replacement != nil {
-			_ = replacement.Close()
-		}
+		cleanupCandidate()
 		return configReloadDTO(result), nil
 	}
-	// The durable result commits before publication. No request can observe this
-	// transition half-complete because operationMu excludes other dispatches.
-	old := s.store
-	if replacement != nil {
-		s.store = replacement
+	// Publish the complete runtime/config/store frame only after the durable
+	// activation decision. operationMu has drained all server operations using
+	// the old frame; closing it afterwards drains retained Slack snapshots.
+	oldStore, oldRuntime := s.store, s.runtime
+	s.store, s.runtime, s.ingest, s.slackState = replacement, candidateRuntime, candidateIngest, candidateState
+	if replacement == nil {
+		s.store = oldStore
 	}
 	s.activeConfig.Store(&candidate)
 	s.activeDigest = digest
 	s.generation.Store(result.ActiveConfigGeneration)
+	// The durable decision and complete replacement frame are now visible.
+	// Start the candidate intake only after both, before retiring the old one.
+	if candidateRuntime != nil {
+		if err := candidateRuntime.Activate(); err != nil {
+			return protocol.ConfigReloadDTO{}, err
+		}
+	}
+	if oldRuntime != nil {
+		_ = oldRuntime.Close()
+	}
 	if replacement != nil {
-		_ = old.Close()
+		_ = oldStore.Close()
 	}
 	return configReloadDTO(result), nil
 }
@@ -554,7 +694,11 @@ func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
 	if err != nil {
 		return status.Snapshot{}, err
 	}
-	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "not_implemented", SlackCapability: "not_implemented", PiCapability: "not_implemented"}, nil
+	slack, err := s.phase1Status(ctx)
+	if err != nil {
+		return status.Snapshot{}, err
+	}
+	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "available", SlackCapability: string(s.slackState), PiCapability: "not_implemented", Slack: slack}, nil
 }
 func fileSize(path string) (int64, error) {
 	info, err := os.Stat(path)
@@ -568,7 +712,7 @@ func fileSize(path string) (int64, error) {
 }
 
 func errorResponse(id, version string, err error) protocol.Response {
-	code, category := "unavailable", "unavailable"
+	code, category := "invalid_input", "usage"
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		code, category = "not_found", "not_found"
@@ -576,15 +720,22 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "ambiguous", "ambiguous"
 	case errors.Is(err, store.ErrRequestConflict):
 		code, category = "request_id_conflict", "conflict"
+	case errors.Is(err, slackops.ErrUnavailable), errors.Is(err, slackruntime.ErrClosed):
+		code, category = "slack_unavailable", "unavailable"
 	default:
+		var failure *slackops.FailureError
 		var reload *reloadError
 		var durableReload *store.ConfigReloadError
-		if errors.As(err, &reload) || errors.As(err, &durableReload) {
+		if errors.As(err, &failure) {
+			if failure.State == store.SlackEffectAmbiguous {
+				code, category = "ambiguous_external_outcome", "ambiguous"
+			} else {
+				code, category = "external_operation_failed", "external_failed"
+			}
+		} else if errors.As(err, &reload) || errors.As(err, &durableReload) {
 			code, category = "config_reload_failed", "unsafe"
 		} else if err.Error() == "unsupported command" {
 			code, category = "unsupported", "unsupported"
-		} else {
-			code, category = "invalid_input", "usage"
 		}
 	}
 	return protocol.NewErrorResponse(id, version, code, category, err.Error(), false)
@@ -595,6 +746,25 @@ func dto(v any) any {
 		return taskDTO(x)
 	case store.MutationResult:
 		return mutationDTO(x)
+	case store.TaskReadModel:
+		out := taskDTO(x.Task)
+		if x.SlackSource != nil {
+			out.SlackSource = slackSourceDTO(*x.SlackSource)
+		}
+		out.Files = slackFileDTOs(x.Files)
+		return out
+	case store.SlackFile:
+		return slackFileDTO(x)
+	case store.SlackEffect:
+		return slackEffectDTO(x)
+	case []store.SlackEffect:
+		out := make([]protocol.SlackEffectDTO, len(x))
+		for i := range x {
+			out[i] = slackEffectDTO(x[i])
+		}
+		return protocol.EffectListDTO{Effects: out}
+	case slackapi.MessagePage:
+		return messagePageDTO(x)
 	case []store.Task:
 		return protocol.TaskListDTO{Tasks: taskDTOs(x)}
 	default:
@@ -619,4 +789,45 @@ func taskDTO(t store.Task) protocol.TaskDTO {
 }
 func mutationDTO(m store.MutationResult) protocol.TaskMutationDTO {
 	return protocol.TaskMutationDTO{TaskID: m.TaskID, Version: m.Version, State: string(m.State), Changed: m.Changed, CreatedAt: stamp(m.CreatedAt), UpdatedAt: stamp(m.UpdatedAt)}
+}
+func slackSourceDTO(s store.SlackSource) *protocol.SlackSourceDTO {
+	out := &protocol.SlackSourceDTO{InitialSourceEventID: s.InitialSourceEventID, TeamID: s.TeamID, ChannelID: s.ChannelID, AuthorUserID: s.AuthorUserID, MessageTS: s.MessageTS, ThreadTS: s.ThreadTS, Permalink: s.Permalink, LatestEventAt: stamp(time.UnixMicro(s.LatestEventAtUS))}
+	if s.SourceDeletedAt != nil {
+		v := stamp(*s.SourceDeletedAt)
+		out.SourceDeletedAt = &v
+	}
+	return out
+}
+func slackFileDTO(f store.SlackFile) protocol.SlackFileDTO {
+	return protocol.SlackFileDTO{FileID: f.FileID, SlackFileID: f.SlackFileID, Permalink: f.Permalink, OriginalName: f.OriginalName, DeclaredMIME: f.DeclaredMIME, SizeBytes: f.SizeBytes, RelatedTaskID: f.RelatedTaskID, TransferState: f.TransferState, CreatedAt: stamp(f.CreatedAt), UpdatedAt: stamp(f.UpdatedAt)}
+}
+func slackFileDTOs(files []store.SlackFile) []protocol.SlackFileDTO {
+	out := make([]protocol.SlackFileDTO, len(files))
+	for i := range files {
+		out[i] = slackFileDTO(files[i])
+	}
+	return out
+}
+func slackEffectDTO(e store.SlackEffect) protocol.SlackEffectDTO {
+	out := protocol.SlackEffectDTO{EffectID: e.ID, PredecessorEffectID: e.PredecessorEffectID, RelatedTaskID: e.RelatedTaskID, Kind: string(e.Kind), TargetMessageTS: e.TargetMessageTS, ThreadTS: e.ThreadTS, State: string(e.State), AttemptCount: e.AttemptCount, PreparedAt: stamp(e.PreparedAt), ResponseMessageTS: e.ResponseMessageTS, DiagnosticCode: string(e.DiagnosticCode)}
+	if e.SubmittedAt != nil {
+		v := stamp(*e.SubmittedAt)
+		out.SubmittedAt = &v
+	}
+	if e.CompletedAt != nil {
+		v := stamp(*e.CompletedAt)
+		out.CompletedAt = &v
+	}
+	return out
+}
+func messagePageDTO(p slackapi.MessagePage) protocol.SlackMessagePageDTO {
+	out := protocol.SlackMessagePageDTO{NextCursor: p.NextCursor, Messages: make([]protocol.SlackMessageDTO, len(p.Messages))}
+	for i, m := range p.Messages {
+		d := protocol.SlackMessageDTO{MessageTS: string(m.MessageTS), ThreadTS: string(m.ThreadTS), AuthorUserID: m.AuthorID, Text: m.Text}
+		for _, r := range m.Reactions {
+			d.Reactions = append(d.Reactions, protocol.SlackReactionDTO{Name: r.Name, Count: r.Count, Mine: r.Mine})
+		}
+		out.Messages[i] = d
+	}
+	return out
 }

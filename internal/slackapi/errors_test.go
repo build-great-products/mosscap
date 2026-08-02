@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,23 @@ func TestExternalErrorIsSanitized(t *testing.T) {
 	}
 	if errors.Unwrap(err) != nil || errors.Is(err, cause) {
 		t.Fatal("ExternalError exposed its arbitrary SDK cause")
+	}
+}
+
+func TestMissingScopesErrorOnlyRetainsAllowedScopeNames(t *testing.T) {
+	const unsafe = "xoxb:token-canary"
+	err := NewMissingScopesError([]Scope{ScopeUsersRead, ScopeChannelsHistory, unsafe, ScopeUsersRead})
+	if got := err.MissingScopes(); !reflect.DeepEqual(got, []Scope{ScopeChannelsHistory, ScopeUsersRead}) {
+		t.Fatalf("MissingScopes = %v", got)
+	}
+	for _, rendered := range []string{err.Error(), fmt.Sprintf("%#v", err)} {
+		if strings.Contains(rendered, unsafe) {
+			t.Fatalf("missing-scope error leaked unsafe input: %q", rendered)
+		}
+	}
+	failure := Classify(err, FailureRead)
+	if failure.Class != FailureConclusive || failure.Diagnostic != DiagnosticMissingScope {
+		t.Fatalf("Classify = %#v", failure)
 	}
 }
 
