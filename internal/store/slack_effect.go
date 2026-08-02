@@ -66,6 +66,7 @@ const (
 	SlackEffectDiagnosticInvalidTarget         SlackEffectDiagnosticCode = "invalid_target"
 	SlackEffectDiagnosticUnknownSubmission     SlackEffectDiagnosticCode = "unknown_submission"
 	SlackEffectDiagnosticStartupReconciliation SlackEffectDiagnosticCode = "startup_reconciliation"
+	SlackEffectDiagnosticFileChanged           SlackEffectDiagnosticCode = "file_changed"
 )
 
 var (
@@ -259,6 +260,9 @@ func (s *Store) ClaimSlackEffect(ctx context.Context, effectID string) (SlackEff
 		}
 		return SlackEffect{}, ErrSlackEffectTransition
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE files SET transfer_state='submitted',updated_at_us=? WHERE related_effect_id=? AND direction='to_slack' AND transfer_state='prepared'`, now, effectID); err != nil {
+		return SlackEffect{}, err
+	}
 	effect, err := getSlackEffectExact(ctx, tx, effectID)
 	if err != nil {
 		return SlackEffect{}, err
@@ -289,6 +293,9 @@ func (s *Store) CommitSlackEffectOutcome(ctx context.Context, effectID string, o
 	current, err := getSlackEffectExact(ctx, tx, effectID)
 	if err != nil {
 		return SlackEffect{}, err
+	}
+	if current.Kind == SlackEffectFileUpload {
+		return SlackEffect{}, ErrSlackEffectTransition
 	}
 	if current.State != SlackEffectSubmitted {
 		if slackEffectOutcomeMatches(current, outcome) {
@@ -332,8 +339,13 @@ func (s *Store) CommitSlackEffectOutcome(ctx context.Context, effectID string, o
 func (s *Store) ReconcileSubmittedSlackEffects(ctx context.Context) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	now := s.now()
-	result, err := s.db.ExecContext(ctx, `UPDATE slack_effects SET
+	result, err := tx.ExecContext(ctx, `UPDATE slack_effects SET
 		state='ambiguous',diagnostic_code=?,
 		completed_at_us=max(?,submitted_at_us,updated_at_us),
 		updated_at_us=max(?,submitted_at_us,updated_at_us)
@@ -342,7 +354,19 @@ func (s *Store) ReconcileSubmittedSlackEffects(ctx context.Context) (int64, erro
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if count != 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE files SET transfer_state='ambiguous',diagnostic_code=?,updated_at_us=max(?,updated_at_us) WHERE direction='to_slack' AND transfer_state='submitted' AND related_effect_id IN (SELECT effect_id FROM slack_effects WHERE state='ambiguous' AND diagnostic_code=?)`, SlackEffectDiagnosticStartupReconciliation, now, SlackEffectDiagnosticStartupReconciliation); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // RetrySlackEffect creates a new prepared effect linked to an unmodified
@@ -385,6 +409,24 @@ func (s *Store) RetrySlackEffect(ctx context.Context, requestID, predecessorSele
 			predecessor.PayloadHash, now, now, now)
 		if err != nil {
 			return SlackEffectMutationResult{}, err
+		}
+		if predecessor.Kind == SlackEffectFileUpload {
+			files, err := listOutgoingFilesForEffectTx(ctx, tx, predecessor.ID)
+			if err != nil {
+				return SlackEffectMutationResult{}, err
+			}
+			if len(files) == 0 {
+				return SlackEffectMutationResult{}, ErrSlackInvariant
+			}
+			for _, file := range files {
+				fileID, err := s.ids.NewFileID()
+				if err != nil {
+					return SlackEffectMutationResult{}, err
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO files(file_id,direction,original_name,validated_size_bytes,sha256,related_effect_id,effect_ordinal,source_attached,source_path,source_device,source_inode,source_mtime_ns,transfer_state,created_at_us,updated_at_us) VALUES(?,'to_slack',?,?,?,?,?,0,?,?,?,?, 'prepared',?,?)`, fileID, file.OriginalName, dereferenceInt(file.ValidatedSizeBytes), file.SHA256, effectID, dereferenceInt(file.EffectOrdinal), file.SourcePath, file.SourceDevice, file.SourceInode, file.SourceMTimeNS, now, now); err != nil {
+					return SlackEffectMutationResult{}, err
+				}
+			}
 		}
 		return SlackEffectMutationResult{
 			EffectID: effectID, State: SlackEffectPrepared, Kind: predecessor.Kind,
@@ -596,7 +638,7 @@ func (code SlackEffectDiagnosticCode) valid() bool {
 		SlackEffectDiagnosticMalformedResponse, SlackEffectDiagnosticUnavailable,
 		SlackEffectDiagnosticInvalidRequest, SlackEffectDiagnosticAccessDenied,
 		SlackEffectDiagnosticInvalidTarget, SlackEffectDiagnosticUnknownSubmission,
-		SlackEffectDiagnosticStartupReconciliation:
+		SlackEffectDiagnosticStartupReconciliation, SlackEffectDiagnosticFileChanged:
 		return true
 	default:
 		return false
