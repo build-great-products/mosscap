@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -320,8 +321,15 @@ func (web *Web) downloadPrivate(ctx context.Context, rawURL string, maximum int6
 			_ = response.Body.Close()
 			return fileTooLarge()
 		}
-		count, copyErr := io.Copy(destination, io.LimitReader(response.Body, maximum+1))
+		// Keep the caller's writer at its admitted limit while retaining one
+		// extra streamed byte solely to prove an overrun. In particular, a
+		// bounded destination may reject that extra byte with its own local
+		// error; that must not erase the conclusive size classification.
+		count, copyErr := io.Copy(&downloadLimitWriter{destination: destination, remaining: maximum}, io.LimitReader(response.Body, downloadReadLimit(maximum)))
 		closeErr := response.Body.Close()
+		if errors.Is(copyErr, errDownloadLimitExceeded) {
+			return fileTooLarge()
+		}
 		if copyErr != nil || closeErr != nil {
 			return sanitizeError(firstError(copyErr, closeErr))
 		}
@@ -330,6 +338,41 @@ func (web *Web) downloadPrivate(ctx context.Context, rawURL string, maximum int6
 		}
 		return nil
 	}
+}
+
+var errDownloadLimitExceeded = errors.New("download limit exceeded")
+
+type downloadLimitWriter struct {
+	destination io.Writer
+	remaining   int64
+}
+
+func (writer *downloadLimitWriter) Write(bytes []byte) (int, error) {
+	allowed := len(bytes)
+	if int64(allowed) > writer.remaining {
+		allowed = int(writer.remaining)
+	}
+	if allowed > 0 {
+		written, err := writer.destination.Write(bytes[:allowed])
+		writer.remaining -= int64(written)
+		if err != nil {
+			return written, err
+		}
+		if written != allowed {
+			return written, io.ErrShortWrite
+		}
+	}
+	if allowed != len(bytes) {
+		return allowed, errDownloadLimitExceeded
+	}
+	return allowed, nil
+}
+
+func downloadReadLimit(maximum int64) int64 {
+	if maximum == math.MaxInt64 {
+		return maximum
+	}
+	return maximum + 1
 }
 
 func validateUploadRequest(request slackapi.UploadRequest) error {

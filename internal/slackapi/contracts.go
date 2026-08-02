@@ -39,8 +39,9 @@ type FileTransfer interface {
 }
 
 // DownloadRequest identifies one admitted Slack file and its immutable byte
-// limit. The writer is owned by the caller and receives at most limit+1 bytes
-// so it can distinguish a streamed overrun without unbounded allocation.
+// limit. The writer is owned by the caller and receives at most limit bytes;
+// implementations read one additional byte to classify a streamed overrun
+// without unbounded allocation.
 type DownloadRequest struct {
 	FileID       string
 	MaximumBytes int64

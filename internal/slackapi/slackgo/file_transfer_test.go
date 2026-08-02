@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -34,6 +35,22 @@ func (doer *transferDoer) Do(request *http.Request) (*http.Response, error) {
 
 func jsonResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+}
+
+type boundedTransferWriter struct {
+	destination *bytes.Buffer
+	limit       int64
+	written     int64
+	err         error
+}
+
+func (writer *boundedTransferWriter) Write(bytes []byte) (int, error) {
+	if int64(len(bytes)) > writer.limit-writer.written {
+		return 0, writer.err
+	}
+	written, err := writer.destination.Write(bytes)
+	writer.written += int64(written)
+	return written, err
 }
 
 func TestDownloadFollowsOnlyApprovedRedirectAndStripsToken(t *testing.T) {
@@ -147,6 +164,40 @@ func TestDownloadRejectsUnsafeOrOversizeBeforeWritingUnboundedBytes(t *testing.T
 				t.Fatalf("wrote %d bytes", content.Len())
 			}
 		})
+	}
+}
+
+func TestDownloadClassifiesChunkedStreamOverrunWithoutLeakingBody(t *testing.T) {
+	const canary = "xoxb-chunked-download-body-canary"
+	doer := &transferDoer{handlers: []func(*http.Request) (*http.Response, error){
+		func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusOK, `{"ok":true,"file":{"id":"F012ABC","name":"note.txt","size":3,"url_private_download":"https://files.slack.com/private"}}`), nil
+		},
+		func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:       http.StatusOK,
+				Header:           make(http.Header),
+				Body:             io.NopCloser(strings.NewReader("abc" + canary)),
+				ContentLength:    -1,
+				TransferEncoding: []string{"chunked"},
+			}, nil
+		},
+	}}
+	web := NewWeb("xoxb-test", WebAPIURL("https://api.slack.com/api/"), WebHTTPClient(doer))
+	var content bytes.Buffer
+	writer := &boundedTransferWriter{destination: &content, limit: 3, err: errors.New(canary)}
+	_, err := web.Download(context.Background(), slackapi.DownloadRequest{FileID: "F012ABC", MaximumBytes: 3}, writer)
+	failure := slackapi.Classify(err, slackapi.FailureRead)
+	if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != slackapi.DiagnosticFileTooLarge {
+		t.Fatalf("failure = %#v (%v)", failure, err)
+	}
+	if content.String() != "abc" {
+		t.Fatalf("downloaded content = %q", content.String())
+	}
+	for _, rendered := range []string{err.Error(), fmt.Sprintf("%v", err), fmt.Sprintf("%+v", err), fmt.Sprintf("%#v", err)} {
+		if strings.Contains(rendered, canary) {
+			t.Fatalf("error leaked chunked body canary: %q", rendered)
+		}
 	}
 }
 
