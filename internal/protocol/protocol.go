@@ -29,6 +29,9 @@ const (
 	CapabilitySlackReads          = "slack_reads"
 	CapabilitySlackEffects        = "slack_effects"
 	CapabilitySlackSourceMetadata = "slack_source_metadata"
+	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
+	// the gateway owns every delivery route and disconnect cleanup (T1).
+	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
 var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata}
@@ -152,6 +155,93 @@ type EffectRetryParams struct {
 }
 type FileSelector struct {
 	File string `json:"file"`
+}
+
+// DeliveryObservation is exact persisted-session evidence. It intentionally
+// contains neither session paths nor visible message contents.
+type DeliveryObservation struct {
+	DeliveryID  string `json:"delivery_id"`
+	DeliveryKey string `json:"delivery_key"`
+}
+type DeliveryOpenParams struct {
+	PiSessionID string                `json:"pi_session_id"`
+	Observed    []DeliveryObservation `json:"observed,omitempty"`
+}
+type DeliveryInsertingParams struct {
+	DeliveryID  string `json:"delivery_id"`
+	DeliveryKey string `json:"delivery_key"`
+}
+type DeliveryPersistedParams struct {
+	DeliveryID  string `json:"delivery_id"`
+	DeliveryKey string `json:"delivery_key"`
+}
+type DeliveryRejectedParams struct {
+	DeliveryID     string `json:"delivery_id"`
+	DeliveryKey    string `json:"delivery_key"`
+	DiagnosticCode string `json:"diagnostic_code"`
+}
+type DeliveryListParams struct {
+	State *string `json:"state,omitempty"`
+	Limit int     `json:"limit,omitempty"`
+}
+type DeliverySelector struct {
+	Delivery string `json:"delivery"`
+}
+type DeliveryRequeueParams struct {
+	Delivery string `json:"delivery"`
+	Reason   string `json:"reason"`
+}
+
+type DeliveryDTO struct {
+	DeliveryID            string  `json:"delivery_id"`
+	TaskID                string  `json:"task_id"`
+	TaskVersion           int64   `json:"task_version"`
+	PiSessionID           string  `json:"pi_session_id"`
+	DeliveryKey           string  `json:"delivery_key"`
+	PredecessorDeliveryID string  `json:"predecessor_delivery_id,omitempty"`
+	State                 string  `json:"state"`
+	DiagnosticCode        string  `json:"diagnostic_code,omitempty"`
+	RequeueReason         string  `json:"requeue_reason,omitempty"`
+	OfferedAt             *string `json:"offered_at,omitempty"`
+	InsertingAt           *string `json:"inserting_at,omitempty"`
+	CompletedAt           *string `json:"completed_at,omitempty"`
+	CreatedAt             string  `json:"created_at"`
+	UpdatedAt             string  `json:"updated_at"`
+}
+type DeliveryCountsDTO struct {
+	EligibleBacklogCount int64 `json:"eligible_backlog_count"`
+	UncertainCount       int64 `json:"uncertain_count"`
+	RejectedCount        int64 `json:"rejected_count"`
+}
+type DeliveryOpenDTO struct {
+	PiSessionID string `json:"pi_session_id"`
+	DeliveryCountsDTO
+}
+type DeliveryWorkDTO struct {
+	DeliveryID  string                  `json:"delivery_id"`
+	DeliveryKey string                  `json:"delivery_key"`
+	TaskID      string                  `json:"task_id"`
+	TaskVersion int64                   `json:"task_version"`
+	TaskState   string                  `json:"task_state"`
+	TaskText    string                  `json:"task_text"`
+	SourceKind  string                  `json:"source_kind"`
+	SlackSource *DeliverySlackSourceDTO `json:"slack_source,omitempty"`
+}
+type DeliverySlackSourceDTO struct {
+	AuthorUserID string `json:"author_user_id"`
+	MessageTS    string `json:"message_ts"`
+	ThreadTS     string `json:"thread_ts"`
+}
+type DeliveryPollDTO struct {
+	Work *DeliveryWorkDTO `json:"work,omitempty"`
+	DeliveryCountsDTO
+}
+type DeliveryListDTO struct {
+	Deliveries []DeliveryDTO `json:"deliveries"`
+}
+type DeliveryRequeueDTO struct {
+	Delivery                   DeliveryDTO `json:"delivery"`
+	DuplicateInsertionPossible bool        `json:"duplicate_insertion_possible"`
 }
 
 // TaskDTO deliberately represents current task text only; mutation results omit text.
@@ -384,7 +474,7 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	switch command {
 	case "hello":
 		target = &HelloParams{}
-	case "status.get", "doctor.run", "trust.list", "config.reload":
+	case "status.get", "doctor.run", "trust.list", "config.reload", "delivery.poll", "delivery.close":
 		target = &EmptyParams{}
 	case "slack.history":
 		target = &SlackHistoryParams{}
@@ -406,6 +496,20 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &EffectRetryParams{}
 	case "file.show":
 		target = &FileSelector{}
+	case "delivery.open":
+		target = &DeliveryOpenParams{}
+	case "delivery.inserting":
+		target = &DeliveryInsertingParams{}
+	case "delivery.persisted":
+		target = &DeliveryPersistedParams{}
+	case "delivery.rejected":
+		target = &DeliveryRejectedParams{}
+	case "delivery.list":
+		target = &DeliveryListParams{}
+	case "delivery.inspect":
+		target = &DeliverySelector{}
+	case "delivery.requeue":
+		target = &DeliveryRequeueParams{}
 	case "trust.add", "trust.remove":
 		target = &TrustMutationParams{}
 	case "task.create":
@@ -511,6 +615,41 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		if !validFileSelector(p.File) {
 			return errors.New("invalid file selector")
 		}
+	case *DeliveryOpenParams:
+		if !validPiSessionID(p.PiSessionID) || len(p.Observed) > 256 {
+			return errors.New("invalid delivery open")
+		}
+		seen := make(map[string]bool, len(p.Observed))
+		for _, o := range p.Observed {
+			if !validDeliveryID(o.DeliveryID) || !validDeliveryKey(o.DeliveryKey) || seen[o.DeliveryID+"\x00"+o.DeliveryKey] {
+				return errors.New("invalid delivery observation")
+			}
+			seen[o.DeliveryID+"\x00"+o.DeliveryKey] = true
+		}
+	case *DeliveryInsertingParams:
+		if !validDeliveryID(p.DeliveryID) || !validDeliveryKey(p.DeliveryKey) {
+			return errors.New("invalid delivery inserting")
+		}
+	case *DeliveryPersistedParams:
+		if !validDeliveryID(p.DeliveryID) || !validDeliveryKey(p.DeliveryKey) {
+			return errors.New("invalid delivery persisted")
+		}
+	case *DeliveryRejectedParams:
+		if !validDeliveryID(p.DeliveryID) || !validDeliveryKey(p.DeliveryKey) || !validDeliveryDiagnostic(p.DiagnosticCode) {
+			return errors.New("invalid delivery rejected")
+		}
+	case *DeliveryListParams:
+		if p.Limit < 0 || p.Limit > 1000 || (p.State != nil && !validDeliveryState(*p.State)) {
+			return errors.New("invalid delivery list")
+		}
+	case *DeliverySelector:
+		if !validDeliverySelector(p.Delivery) {
+			return errors.New("invalid delivery selector")
+		}
+	case *DeliveryRequeueParams:
+		if !validDeliverySelector(p.Delivery) || !validReason(p.Reason) {
+			return errors.New("invalid delivery requeue")
+		}
 	}
 	return nil
 }
@@ -563,7 +702,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	}
 	return false
@@ -593,6 +732,45 @@ func validTypedSelector(value, prefix string) bool {
 	}
 	return true
 }
+func validDeliveryID(value string) bool { return validDeliverySelector(value) && len(value) == 26 }
+func validDeliverySelector(value string) bool {
+	if !strings.HasPrefix(value, "dlv_") || len(value) <= 4 || len(value) > 128 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value[4:] {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+func validDeliveryKey(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, r := range value[7:] {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+func validPiSessionID(value string) bool {
+	return value != "" && len(value) <= 256 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
+func validDeliveryDiagnostic(value string) bool {
+	// This is intentionally an allowlist; diagnostic text is never an
+	// extension-to-gateway transport channel.
+	switch value {
+	case "oversized_task", "invalid_delivery_work", "invalid_visible_message":
+		return true
+	}
+	return false
+}
+func validDeliveryState(value string) bool {
+	return value == "pending" || value == "inserting" || value == "persisted" || value == "uncertain" || value == "rejected"
+}
+
 func validEffectState(value string) bool {
 	switch value {
 	case "prepared", "submitted", "confirmed", "ambiguous", "failed":

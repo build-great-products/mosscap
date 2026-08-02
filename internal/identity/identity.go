@@ -49,6 +49,9 @@ func (g Generator) NewStateEventID() (string, error) { return g.NewID("ste_") }
 // NewEffectID returns a Slack effect ID.
 func (g Generator) NewEffectID() (string, error) { return g.NewID("eff_") }
 
+// NewDeliveryID returns an opaque durable Pi delivery ID.
+func (g Generator) NewDeliveryID() (string, error) { return g.NewID("dlv_") }
+
 // NewFileID returns a durable file-metadata ID.
 func (g Generator) NewFileID() (string, error) { return g.NewID("fil_") }
 

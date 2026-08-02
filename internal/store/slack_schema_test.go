@@ -60,7 +60,7 @@ func TestOpenMigrationFailureRollsBackV2Upgrade(t *testing.T) {
 	assertFailedUpgradeRolledBack(t, path, 2, true)
 }
 
-func TestOpenUpgradesExactSchemaV2ToV3AndPreservesLedger(t *testing.T) {
+func TestOpenUpgradesExactSchemaV2ToV4AndPreservesLedger(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
 	db := schemaV2Database(t, path)
@@ -90,7 +90,7 @@ func TestOpenUpgradesExactSchemaV2ToV3AndPreservesLedger(t *testing.T) {
 	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 || migrations != 3 {
+	if version != 4 || migrations != 4 {
 		t.Fatalf("migration state version=%d rows=%d", version, migrations)
 	}
 	got, err := s.Get(ctx, "tsk_v2")
@@ -108,14 +108,14 @@ func TestOpenUpgradesExactSchemaV2ToV3AndPreservesLedger(t *testing.T) {
 }
 
 func TestSlackMigrationChecksumsAndColumns(t *testing.T) {
-	if MigrationChecksum(3) == "" || len(MigrationChecksum(3)) != 64 {
-		t.Fatalf("v3 checksum=%q", MigrationChecksum(3))
+	if MigrationChecksum(4) == "" || len(MigrationChecksum(4)) != 64 {
+		t.Fatalf("v4 checksum=%q", MigrationChecksum(4))
 	}
-	if MigrationChecksum(3) == MigrationChecksum(1) || MigrationChecksum(3) == MigrationChecksum(2) {
-		t.Fatal("v3 checksum is not migration-specific")
+	if MigrationChecksum(4) == MigrationChecksum(1) || MigrationChecksum(4) == MigrationChecksum(2) || MigrationChecksum(4) == MigrationChecksum(3) {
+		t.Fatal("v4 checksum is not migration-specific")
 	}
-	if MigrationChecksum(4) != "" {
-		t.Fatalf("unknown checksum=%q", MigrationChecksum(4))
+	if MigrationChecksum(5) != "" {
+		t.Fatalf("unknown checksum=%q", MigrationChecksum(5))
 	}
 
 	s := testStore(t)

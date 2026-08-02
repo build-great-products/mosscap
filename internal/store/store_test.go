@@ -82,7 +82,7 @@ func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=4 WHERE version=2"); err != nil {
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=5 WHERE version=2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -308,6 +308,55 @@ func breakMigration3(t *testing.T) {
 	t.Cleanup(func() { migration0003 = original })
 }
 
+func TestOpenMigrationFailureRollsBackV3ToV4Upgrade(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+	db := phase0Database(t, path)
+	if _, err := db.Exec(string(migration0002)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration0003)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(2,?,2),(3,?,3)", MigrationChecksum(2), MigrationChecksum(3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version=3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('tsk_before_v4_failure',1,'open','preserved','local',1,1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original := migration0004
+	migration0004 = append(bytes.Clone(original), []byte("\nCREATE TABLE migration_failure_probe(value INTEGER);\nSELECT FROM;\n")...)
+	t.Cleanup(func() { migration0004 = original })
+	if opened, err := Open(ctx, path, Options{}); err == nil {
+		_ = opened.Close()
+		t.Fatal("upgrade with failing v4 migration succeeded")
+	}
+	check, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var version, migrations, deliveries int
+	if err := check.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
+		t.Fatal(err)
+	}
+	if err := check.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='pi_deliveries'").Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if version != 3 || migrations != 3 || deliveries != 0 {
+		t.Fatalf("failed v4 upgrade version=%d migrations=%d deliveries=%d", version, migrations, deliveries)
+	}
+}
+
 func assertFailedUpgradeRolledBack(t *testing.T, path string, wantVersion int, wantTrustedUsers bool) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -377,7 +426,7 @@ func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('slack_task_sources','slack_source_events','slack_effects','files')").Scan(&slackTables); err != nil {
 		t.Fatal(err)
 	}
-	if version != SchemaVersion || migrations != 3 || requests != 1 || slackTables != 4 {
+	if version != SchemaVersion || migrations != 4 || requests != 1 || slackTables != 4 {
 		t.Fatalf("upgrade state version=%d migrations=%d requests=%d Slack tables=%d", version, migrations, requests, slackTables)
 	}
 	tasks, _, err := s.List(ctx, nil, true, 10, "")
@@ -457,7 +506,7 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.DB().Exec("PRAGMA user_version=4"); err != nil {
+		if _, err := s.DB().Exec("PRAGMA user_version=5"); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {
