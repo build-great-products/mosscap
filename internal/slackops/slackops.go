@@ -47,6 +47,7 @@ type uploadSource interface {
 	MtimeNS() int64
 	Close() error
 	Revalidate() error
+	RehashAndRevalidate() error
 	StreamTo(io.Writer) error
 	PreparedSize() int64
 	PreparedSHA256() string
@@ -657,7 +658,8 @@ func (s *Service) outgoingFiles(ctx context.Context, effectID string) ([]store.S
 
 // sourceReader starts its pipe only if an adapter actually stages the source.
 // Closing unconsumed readers prevents a reserve failure from leaking a blocked
-// goroutine. Wait returns the source's exact-stream/revalidation result.
+// goroutine. Wait performs the post-stage content and identity validation that
+// must finish immediately before the adapter completes the upload.
 type sourceReader struct {
 	source uploadSource
 	once   sync.Once
@@ -693,7 +695,7 @@ func (r *sourceReader) Wait() error {
 	if r.err != nil {
 		return r.err
 	}
-	return r.source.Revalidate()
+	return r.source.RehashAndRevalidate()
 }
 
 func (r *sourceReader) Close() {

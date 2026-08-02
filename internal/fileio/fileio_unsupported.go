@@ -32,6 +32,7 @@ func (s *Source) Inode() uint64                 { return 0 }
 func (s *Source) MtimeNS() int64                { return 0 }
 func (s *Source) Close() error                  { return nil }
 func (s *Source) Revalidate() error             { return ErrUnsupported }
+func (s *Source) RehashAndRevalidate() error    { return ErrUnsupported }
 func (s *Source) StreamTo(io.Writer) error      { return ErrUnsupported }
 func OpenSource(string, int64) (*Source, error) { return nil, ErrUnsupported }
 

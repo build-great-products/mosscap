@@ -130,8 +130,7 @@ func OpenSource(path string, limit int64) (*Source, error) {
 }
 
 // Revalidate proves that the retained descriptor and the current source path
-// still name the prepared regular file with the prepared logical size. Content
-// is re-hashed by StreamTo immediately before upload completion.
+// still name the prepared regular file with the prepared logical size.
 func (s *Source) Revalidate() error {
 	if s == nil || s.file == nil {
 		return os.ErrClosed
@@ -151,6 +150,23 @@ func (s *Source) Revalidate() error {
 		return ErrChanged
 	}
 	return nil
+}
+
+// RehashAndRevalidate proves that the source still has its prepared content,
+// identity, and logical size. Upload adapters call it after staging and
+// immediately before their irreversible completion request.
+func (s *Source) RehashAndRevalidate() error {
+	if err := s.Revalidate(); err != nil {
+		return err
+	}
+	digest, err := s.hashExact()
+	if err != nil {
+		return err
+	}
+	if digest != s.SHA256 {
+		return ErrChanged
+	}
+	return s.Revalidate()
 }
 
 // StreamTo seeks the retained descriptor to zero, copies exactly the prepared

@@ -181,7 +181,7 @@ func TestFileUploadPreparesOrderedIntentBeforeSlackAndConfirms(t *testing.T) {
 	}
 }
 
-func TestFileUploadChangedAfterStagingFailsWithoutCompletion(t *testing.T) {
+func TestFileUploadSameInodeSameSizeRewriteAfterStagingFailsWithoutCompletion(t *testing.T) {
 	ledger, err := store.Initialize(context.Background(), filepath.Join(t.TempDir(), "ledger.sqlite"), store.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -215,8 +215,27 @@ func TestFileUploadChangedAfterStagingFailsWithoutCompletion(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("upload staging was not reached")
 	}
-	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+	before, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	rewrite, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rewrite.WriteAt([]byte("after!"), 0); err != nil {
+		rewrite.Close()
+		t.Fatal(err)
+	}
+	if err := rewrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || before.Size() != after.Size() {
+		t.Fatalf("rewrite did not preserve source identity and size: before=%#v after=%#v", before, after)
 	}
 	barrier.Release()
 	got := <-result
