@@ -30,11 +30,14 @@ test("attached file projection is bounded, escaped, and contains retrieval hints
   assert.deepEqual(message.details, taskMessage(work, "session-1").details, "attachments never change persisted delivery evidence");
 });
 
-test("attached file parser rejects forbidden fields and invalid metadata", () => {
+test("work, source, and attached-file parsers reject unknown fields and invalid metadata", () => {
   const valid = { file_id: "fil_AbCdEfGhIjKlMnOpQrSt-_", original_name: "file", declared_mime: null, declared_size_bytes: null, transfer_state: "validated" };
   assert.equal(isAttachedFile({ ...valid, temporary_path: "/private" }), false);
   assert.equal(isAttachedFile({ ...valid, original_name: "x".repeat(maxFileNameBytes + 1) }), false);
   assert.equal(isAttachedFile({ ...valid, transfer_state: "confirmed" }), false);
   assert.equal(isWork({ ...work, attached_files: [{ ...valid, download_url: "https://private" }] }), false);
+  assert.equal(isWork({ ...work, temporary_path: "/private" }), false);
+  assert.equal(isWork({ ...work, source: { ...work.source, temporary_path: "/private" } }), false);
+  assert.equal(isWork({ ...work, source: { kind: "local", slack_author_id: "U1" } }), false);
 });
 test("all-entry scan deduplicates valid matching evidence and ignores bad entries", () => { const details = taskMessage(work, "session-1").details; assert.deepEqual(observedDeliveries([{ type: "custom_message", customType: "mosscap.task", details }, { type: "custom_message", customType: "mosscap.task", details }, { type: "custom_message", customType: "other", details }, { type: "custom_message", customType: "mosscap.task", details: { ...details, sessionId: "other" } }], "session-1"), [{ delivery_id: work.delivery_id, delivery_key: work.delivery_key }]); });

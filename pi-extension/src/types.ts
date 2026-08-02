@@ -45,8 +45,17 @@ export function isAttachedFile(value: unknown): value is AttachedFile {
   return Object.keys(file).every(key => allowed.has(key)) && isFileID(file.file_id) && typeof file.original_name === "string" && byteLength(file.original_name) <= maxFileNameBytes && (file.declared_mime === null || (typeof file.declared_mime === "string" && byteLength(file.declared_mime) <= maxMimeBytes)) && (file.declared_size_bytes === null || (Number.isInteger(file.declared_size_bytes) && (file.declared_size_bytes as number) >= 0)) && ["metadata_only", "validated", "unavailable", "oversized", "content_changed"].includes(file.transfer_state as string);
 }
 export function isWork(value: unknown): value is Work {
-  if (value === null || typeof value !== "object") return false;
-  const w = value as Record<string, unknown>, s = w.source as Record<string, unknown> | undefined;
-  return isDeliveryID(w.delivery_id) && isDeliveryKey(w.delivery_key) && isTaskID(w.task_id) && Number.isInteger(w.task_version) && (w.task_version as number) > 0 && (w.task_state === "open" || w.task_state === "working") && typeof w.task_text === "string" && byteLength(w.task_text) <= maxTaskTextBytes && s !== undefined && (s.kind === "local" || s.kind === "slack") && (w.attached_files === undefined || (Array.isArray(w.attached_files) && w.attached_files.length <= maxAttachedFiles && w.attached_files.every(isAttachedFile)));
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const w = value as Record<string, unknown>;
+  const allowed = new Set(["delivery_id", "delivery_key", "task_id", "task_version", "task_state", "task_text", "source", "attached_files"]);
+  return Object.keys(w).every(key => allowed.has(key)) && isDeliveryID(w.delivery_id) && isDeliveryKey(w.delivery_key) && isTaskID(w.task_id) && Number.isInteger(w.task_version) && (w.task_version as number) > 0 && (w.task_state === "open" || w.task_state === "working") && typeof w.task_text === "string" && byteLength(w.task_text) <= maxTaskTextBytes && isSource(w.source) && (w.attached_files === undefined || (Array.isArray(w.attached_files) && w.attached_files.length <= maxAttachedFiles && w.attached_files.every(isAttachedFile)));
+}
+function isSource(value: unknown): value is Source {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const source = value as Record<string, unknown>;
+  const allowed = new Set(["kind", "slack_author_id", "slack_message_ts", "slack_thread_ts"]);
+  if (!Object.keys(source).every(key => allowed.has(key))) return false;
+  if (source.kind === "local") return Object.keys(source).length === 1;
+  return source.kind === "slack" && ["slack_author_id", "slack_message_ts", "slack_thread_ts"].every(key => source[key] === undefined || typeof source[key] === "string");
 }
 export function isCounts(value: unknown): value is Counts { const v = value as Record<string, unknown>; return !!v && ["eligible_backlog_count", "uncertain_count", "rejected_count"].every(k => Number.isInteger(v[k]) && (v[k] as number) >= 0); }

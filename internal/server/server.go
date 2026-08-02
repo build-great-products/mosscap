@@ -995,23 +995,33 @@ func (s *Server) fileTransferStatus(ctx context.Context) (status.FileTransferSta
 			nearest = transfer.ExpiresAt
 		}
 	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !fileio.IsGeneratedName(name) {
+			out.UnsafeTemporaryEntries++
+			continue
+		}
+
+		// Open through the retained directory descriptor rather than trusting a
+		// pathname inspection. TempDir.Open refuses links and verifies regular
+		// type, effective owner, exact 0600 mode, and a single link before status
+		// or doctor reports this temporary entry as safe.
+		file, err := s.temporaryDir.Open(name)
+		if err != nil {
+			out.UnsafeTemporaryEntries++
+			continue
+		}
+		if err := file.Close(); err != nil {
+			out.UnsafeTemporaryEntries++
+			continue
+		}
+		if _, ok := known[name]; !ok {
+			out.UnsafeTemporaryEntries++
+		}
+	}
 	if !nearest.IsZero() {
 		v := stamp(nearest)
 		out.NearestExpiry = &v
-	}
-	for _, entry := range entries {
-		if !fileio.IsGeneratedName(entry.Name()) {
-			out.UnsafeTemporaryEntries++
-			continue
-		}
-		info, err := os.Lstat(filepath.Join(s.temporaryDir.Root(), entry.Name()))
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
-			out.UnsafeTemporaryEntries++
-			continue
-		}
-		if _, ok := known[entry.Name()]; !ok {
-			out.UnsafeTemporaryEntries++
-		}
 	}
 	return out, nil
 }
