@@ -13,10 +13,11 @@
 - Output-placement result:
 - Outgoing `fil_…`/effect ID and result:
 - Restart/no-replay result:
-- Leakage inspection result:
+- Credential-redaction result:
+- Durable private-transfer-URL/file-byte exclusion result:
 - Overall pass/fail:
 
-Record only non-sensitive IDs, states, counts, sizes, hashes when safe, and pass/fail outcomes. Never record credentials, tokens, configuration values, private filenames or paths, URLs, Slack message bodies, file contents, raw envelopes, or screenshots containing them.
+Never record credentials or tokens. Do not copy authenticated/private Slack transfer URLs or raw file payload bytes into this durable finding; record only whether their transient lifecycle passed. Local filenames, paths, hashes, ordinary diagnostics, non-sensitive IDs/states/counts, and pass/fail outcomes do not require redaction. Exact paths may also appear in configured model context.
 
 ## Deviations, failures, and follow-up
 

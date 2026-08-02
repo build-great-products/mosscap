@@ -14,7 +14,9 @@ The governing rule is:
 
 The SPEC groups file transfer and purge into Phase 3. This plan does **not** implement root-level durable-metadata purge. Purge needs its own referential-graph plan after the file schema is stable. Completing this plan therefore proves the bidirectional file-transfer gate, but does not by itself complete all of SPEC Phase 3.
 
-No implementation task may use real Slack credentials except the opt-in manual run in §15. No token, authenticated URL, raw response, private message body, or file byte belongs in source, SQLite, logs, fixtures, or handoff evidence.
+No implementation task may use real Slack credentials except the opt-in manual run in §15. Live tokens and authorization headers never belong in source, SQLite, logs, fixtures, protocol/Pi output, or handoff evidence. Raw transferred file bytes and authenticated or capability-bearing private Slack download/upload URLs are transient transfer data and must not be deliberately persisted in durable records. Private Slack message text is retained only through the SPEC-authorized current task/read/delivery data flow. An ordinary configured-channel permalink remains existing source metadata.
+
+Local filesystem paths and ordinary operational diagnostics are not redacted on trusted same-user operator or opted-in agent surfaces; §3.1 freezes that decision.
 
 ## 1. Outcome and representative workflows
 
@@ -90,8 +92,20 @@ Baseline `go test ./...` passes at revision `aad08b2`; retain that as the starti
 14. **Explicit retry only:** retry creates a linked effect. An ambiguous predecessor requires duplicate-risk confirmation; every current path must match the predecessor's ordered size/hash set.
 15. **Task independence:** downloads, uploads, output replacement, expiry, and file failures do not change task state. Task transitions do not transfer a file.
 16. **Single-channel authority:** upload commands contain no team/channel selector. The active verified runtime supplies the only destination.
-17. **Secret-safe evidence:** bot tokens, authorization headers, private download/upload URLs, response bodies, bytes, and source paths outside explicit file/effect inspection never enter diagnostics, status, logs, Pi messages, or mutation-result JSON.
+17. **Credential and transfer-data handling:** bot tokens and authorization headers are always redacted and never enter diagnostics, status, logs, Pi messages, or mutation-result JSON. Raw file bytes and authenticated/private Slack transfer URLs are handled transiently and are not deliberately persisted in durable records; this is a lifecycle rule, not a generic output-redaction rule.
 18. **Same-user boundary:** filesystem and socket checks prevent accidental or less-privileged races; Mosscap does not claim defense against a compromised account with the same effective UID.
+
+### 3.1 Operational observability boundary
+
+Mosscap intentionally does not redact local filesystem paths or ordinary operational diagnostics. Owner-only CLI/protocol output, status, doctor, gateway logs, explicit inspection, and opted-in Pi messages may render their complete values. This includes local source, destination, temporary, database, socket, and state paths and underlying local OS/application errors. Summary views may remain compact as a presentation choice, but no basename substitution, path allowlist, path scrubber, or path-redaction test gate is required.
+
+Pi-visible output enters model context and may persist in Pi JSONL, so the configured model provider is part of this observability boundary. Shared tickets and committed trial findings are governed by the operator's publication choices, not by a Mosscap path-confidentiality claim.
+
+Credential values remain the non-negotiable redaction class. Adapter contracts should avoid embedding tokens or authorization headers into returned errors. Existing typed Slack diagnostics may remain for stable behavior, but ordinary local diagnostic detail must not be stripped merely because it contains a path or machine-local name.
+
+File bytes and authenticated/private Slack transfer URLs remain transient by design: they are not durable metadata and routine Pi task projection does not copy them. That data-flow constraint does not create a broad output sanitizer. Pi may read an explicitly retrieved file through ordinary tool authority.
+
+The boundary offers no protection from same-effective-UID compromise and does not attempt to hide local machine structure from the operator, their agent, or their chosen model provider.
 
 ## 4. Frozen bounds and semantics
 
@@ -400,13 +414,13 @@ slack.file     { thread_ts?, file_path, comment?, task? }
 slack.send     + ordered file_paths[]
 ```
 
-File bytes and authenticated URLs are forbidden in every DTO. Paths are absolute, bounded, same-user inputs. `file.get` result contains:
+Transfer DTOs carry IDs and local paths rather than raw file bytes or private Slack transfer URLs. Credentials remain forbidden. Paths are absolute and structurally bounded for protocol safety, not redacted. `file.get` result contains:
 
 ```text
 transfer_id, file_id, temporary_path, validated_size_bytes, sha256, expires_at
 ```
 
-Expanded file inspection contains direction, Slack identity/permalink, bounded untrusted metadata, declared and validated sizes, SHA-256, relations, attachment status, transfer state/diagnostic, timestamps, and live temporary count. Only successful `file.get` returns a temporary path. Effect list remains compact/path-free; explicit `effect inspect` may include ordered child file metadata and source paths because it is the operator's exact-intent inspection command.
+Expanded file inspection contains direction, Slack identity/permalink, bounded untrusted metadata, declared and validated sizes, SHA-256, relations, attachment status, transfer state/diagnostic, timestamps, and live temporary count. A successful `file.get` returns its temporary path. Effect lists may remain compact, while inspection, status, errors, and diagnostics may render complete local paths and ordinary diagnostic detail without redaction.
 
 Fix typed `fil_`/`eff_`/optional `tsk_` protocol selectors to accept the full identity generator's raw-base64url alphabet before adding new file routes. The Phase 2 finding already documents the older lowercase-only gate; do not copy it into `xfr_` validation.
 
@@ -434,7 +448,7 @@ Rules:
 - output conflict leaves the validated gateway temp live until release/expiry so the operator can recover it; no partial destination remains.
 - without `--output`, human output prominently states expiry and retention responsibility.
 - with `--output`, success JSON reports final destination, size, hash, and file ID but not the consumed temporary path.
-- human rendering safely quotes control characters in untrusted filenames/paths; logs and normal effect-list/status output omit source paths.
+- human rendering preserves complete local paths and diagnostics; quoting control characters in untrusted filenames is delimiter safety, not path redaction.
 
 Exit mappings:
 
@@ -459,7 +473,8 @@ Phase 2 deliberately delivered text only. Restore the SPEC's useful attachment p
 - update the native TypeScript strict parser and `Work` type;
 - render each filename/MIME as escaped untrusted metadata, never as control text or HTML;
 - include `mosscap file show fil_… --json` and `mosscap file get fil_… --output PATH` examples;
-- include no bytes, hashes unless already operator-useful, private temp paths, download URLs, or local outgoing paths; and
+- keep credentials out of Pi output and keep routine attachment projection metadata-only rather than copying raw file bytes or transient private transfer URLs;
+- allow operational/recovery output to render complete local paths and diagnostics under §3.1; and
 - preserve the existing delivery key/details schema so persisted-session deduplication is unchanged.
 
 A file metadata edit already increments task version in Phase 1 and therefore produces a new delivery key. Enabling this projection does not force-redeliver already persisted historical task versions.
@@ -477,7 +492,7 @@ Add a stable `file_transfer` block:
 - outgoing counts by transfer state; and
 - unsafe/orphan temporary entry count as action required.
 
-Existing effect counts remain the authority for prepared/submitted/failed/ambiguous uploads. An ambiguous upload or unsafe temp entry is action required but does not make a responsive gateway process unhealthy. Never include filename, source path, temporary path, URL, hash, or bytes in status.
+Existing effect counts remain the authority for prepared/submitted/failed/ambiguous uploads. An ambiguous upload or unsafe temp entry is action required but does not make a responsive gateway process unhealthy. Status may render complete local filenames, paths, and ordinary diagnostics without redaction. It must redact credential values. Private transfer URLs and raw file bytes are absent because status does not own that transient transfer data, not because paths share their classification.
 
 ### 11.2 Doctor
 
@@ -495,7 +510,7 @@ Doctor remains non-destructive and must never call `files.info`, request an uplo
 
 Update `manifest.json` and the Phase 1 operations documentation to add only `files:write`; retain `files:read` and all single-channel restrictions. Reinstallation is required after scope changes.
 
-Structured logs may include request/effect/file/transfer IDs, operation phase enums, bounded byte counts, durations, and diagnostic codes. They must exclude names, MIME labels, source/destination/temp paths, SHA values unless needed only in explicit inspection, authenticated hosts/URLs, headers, bodies, and bytes.
+Structured logs may include request/effect/file/transfer IDs, operation phase enums, byte counts, durations, diagnostic codes, complete local names/paths, hashes, and ordinary local diagnostic detail. Do not redact machine-local values. Logs must redact tokens and authorization headers. Private Slack transfer URLs and file payload bytes should never be deliberately supplied to the logger because they remain transient adapter/transfer data; this is data minimization rather than a generic output filter.
 
 ## 12. Explicitly deferred
 
@@ -567,7 +582,7 @@ Owner: protocol/CLI Terra. Scope `internal/protocol/**`, `internal/app/**`, clie
 
 Deliver capability, strict commands/results, full base64url selectors, `file get/release`, `slack file`, repeated send files, help/JSON/human output, output placement, and exit mappings. No central server dispatch.
 
-Gate: table-driven parsing/help/output, no team/channel flags, count/frame/path bounds, request IDs/replay, output force matrix, no byte/URL fields, golden frames, and app/protocol tests.
+Gate: table-driven parsing/help/output, no team/channel flags, count/frame/path bounds, request IDs/replay, output force matrix, transfer DTOs contain paths/IDs rather than byte payloads or private transfer URLs, credential canaries remain absent, golden frames, and app/protocol tests.
 
 ### Increment 7 — `feat: project Slack attachments into Pi work`
 
@@ -575,7 +590,7 @@ Owner: Pi-delivery Terra. Scope the agreed delivery DTO mapping and `pi-extensio
 
 Deliver attached file metadata in polls, strict TypeScript validation, escaped visible metadata, retrieval hints, unchanged details/dedup identity, and source-loaded extension tests.
 
-Gate: attached/detached projection, control-character names cannot alter delimiters, no path/URL/bytes, frame bound, Node tests/typecheck, and existing delivery timing/dedup tests.
+Gate: attached/detached projection, control-character names cannot alter delimiters, credential canaries remain absent, routine attachment projection carries metadata rather than bytes/private transfer URLs, frame bound, Node tests/typecheck, and existing delivery timing/dedup tests.
 
 Increment 7 can run alongside Increment 6 after DTO freeze.
 
@@ -591,7 +606,7 @@ Gate: real gateway with fake Slack for incoming/output/outgoing/restart/reload, 
 
 Owner: test/security Terra after integration. Scope focused cross-package/E2E tests only, except fixes required by demonstrated failures.
 
-Add the complete fault matrix in §14, built CLI/gateway tests, secret/path/byte canaries across SQLite/log/status/doctor/protocol, and race validation. Do not add deferred features during correction.
+Add the complete fault matrix in §14, built CLI/gateway credential-canary tests, durable-record checks for private transfer URLs/file bytes, and race validation. Do not add path-redaction canaries or deferred features during correction.
 
 ### Increment 10 — `docs: add Phase 3 file transfer operations`
 
@@ -632,10 +647,10 @@ The final suite must prove:
 ### Security, protocol, and projection
 
 19. Download redirects enforce HTTPS/allowlist/hop bounds and never forward authorization cross-origin.
-20. Slack names/MIME/bytes cannot choose a temp/output path, alter Pi control delimiters, or appear unescaped in human output.
-21. SQLite contains no byte blob, token, authenticated URL, or temp path in mutation results; path fields occur only in explicit outgoing intent/live temp structures.
-22. Logs/status/doctor/list DTOs omit tokens, URLs, paths, names, hashes, message bodies, and byte canaries as specified.
-23. Protocol uses additive capability negotiation, strict bounded DTOs, full generated ID alphabet, and no byte-bearing field.
+20. Slack names/MIME/bytes cannot choose a temp/output path or alter Pi control delimiters; quoting untrusted metadata does not redact local paths or ordinary diagnostics.
+21. SQLite contains no credential, authorization header, raw file-byte blob, or authenticated/private transfer URL. Exact local paths remain allowed wherever useful; compact mutation replay records omit temporary paths for lifecycle correctness, not confidentiality.
+22. Credential canaries remain absent from SQLite, logs, status, doctor, protocol, and Pi output.
+23. Protocol uses additive capability negotiation, strict structurally bounded DTOs, the full generated ID alphabet, and path/ID transfer references rather than raw file bytes or private transfer URLs.
 24. Status reports temp count/bytes separately from health; doctor is read-only and performs zero Slack transfer calls.
 25. Every existing Phase 0/1/2 Go and Node test remains green except intentional additive DTO/status/schema expectations.
 
@@ -652,12 +667,12 @@ Create [`docs/trials/phase-3-file-transfer.md`](../trials/phase-3-file-transfer.
 - harmless local fixtures containing small text, image, PDF, archive, opaque binary, and optionally zero-byte content;
 - a private disposable XDG state root and safe output directory;
 - full automated gate passed at the revision under test; and
-- no private filenames, message bodies, source paths, URLs, tokens, or file bytes in the recorded report.
+- credentials remain absent from the report; raw file bytes and private Slack transfer URLs are not recorded because they are transient transfer data. Local paths and ordinary diagnostics need not be redacted.
 
 ### Procedure
 
 1. Start the foreground gateway; verify connected status and doctor file-transfer checks without any Slack file call.
-2. From a trusted user, post one direct mention with a harmless small attachment. Verify task/Pi metadata contains `fil_…` and a retrieval command but no temp path/URL/bytes.
+2. From a trusted user, post one direct mention with a harmless small attachment. Verify routine task/Pi metadata contains `fil_…` and a retrieval command without gratuitously adding a temporary path, authenticated/private transfer URL, or file bytes.
 3. Run `file show`, then `file get` without output. Verify path is under private `tmp/`, mode `0600`, size/hash match a separately computed local fixture, and status count/bytes increase.
 4. Run `file get --output` to a new destination; verify exact hash, mode `0600`, and no sibling staging residue.
 5. Repeat to the same path without force (must conflict), with force over a regular file (must succeed), and with force against a symlink/directory (must fail without changing its target).
@@ -665,12 +680,12 @@ Create [`docs/trials/phase-3-file-transfer.md`](../trials/phase-3-file-transfer.
 7. Run one `slack send --text ... --file ... --file ...` within the configured count and verify one comment/file operation, ordered files, and one durable upload effect.
 8. Restart the gateway and verify no confirmed/ambiguous operation is repeated. Do not deliberately cause a real ambiguous completion.
 9. In the disposable environment, temporarily set a short positive download lifetime, reload, create a no-output transfer, wait past expiry/sweep, and verify bytes disappear while `file show` metadata and task remain.
-10. Inspect status, doctor, effect/file output, and sanitized logs for secret/path/body leakage. Record only IDs, states, counts, sizes, hashes when non-sensitive, and pass/fail.
+10. Inspect status, doctor, effect/file output, Pi diagnostics, and logs. Confirm credential values remain redacted and private Slack transfer URLs/file payload bytes were not deliberately persisted. Local paths and ordinary diagnostics may be recorded in full.
 11. Restore/revoke disposable configuration and remove test outputs/state.
 
 ### Stop conditions
 
-Stop immediately if credentials appear outside config, an unknown redirect host is accepted, a symlink target is modified, partial output is exposed, bytes download before an explicit get, wrong/changed bytes complete, an ambiguous upload retries, a file operation changes task state, or temporary bytes survive verified expiry without an action-required diagnostic.
+Stop immediately if credentials are exposed, private Slack transfer URLs or raw file bytes are deliberately persisted as durable metadata, an unknown redirect host is accepted, a symlink target is modified, partial output is exposed, bytes download before an explicit get, wrong/changed bytes complete, an ambiguous upload retries, a file operation changes task state, or temporary bytes survive verified expiry without an action-required diagnostic. A complete local path or ordinary diagnostic is not a stop condition.
 
 The code may be reported **complete pending operator acceptance** when credentials are unavailable. This file-transfer phase passes only when the automated gate and this manual run both pass; the passed Phase 2 trial neither satisfies nor implies Phase 3 file-transfer acceptance.
 
@@ -691,7 +706,7 @@ pnpm --dir pi-extension typecheck
 git diff --check
 ```
 
-Also inspect the built-binary secret/path/byte canary tests and migration from a real schema-v4 fixture. `govulncheck`, durable purge, broad non-Linux portability, antivirus/content-policy certification, and repeated production threat-review cycles remain outside this increment unless separately commissioned.
+Also inspect the built-binary credential-canary tests, durable-record checks for private transfer URLs/file bytes, and migration from a real schema-v4 fixture. Do not require path-redaction canaries. `govulncheck`, durable purge, broad non-Linux portability, antivirus/content-policy certification, and repeated production threat-review cycles remain outside this increment unless separately commissioned.
 
 ## 17. Risks and decisions requiring review
 
@@ -706,7 +721,7 @@ Also inspect the built-binary secret/path/byte canary tests and migration from a
 | Repeated no-output downloads can fill disk before 24 hours | Derive live path/byte caps from configured file count × size and sweep before allocation |
 | Existing source edit deletes file metadata | Migration and repository change to attached/detached durable rows before any transfer can update state |
 | Existing one-path `files` schema cannot model repeated gets | Separate ephemeral `xfr_…` rows from durable `fil_…` identity |
-| Outgoing absolute paths are sensitive durable intent | Expose only through explicit effect/file inspection; omit from list/status/log/Pi/mutation result and future purge them with the effect graph |
+| Outgoing absolute paths reveal local user/project structure | Accept that disclosure on operator, log, protocol, status, and agent/model surfaces; retain paths for restart correctness without redaction and future purge them with the effect graph |
 | Prepared mismatch cannot honestly be `submitted` | Permit file-upload-only prepared→failed with zero attempts and no Slack call |
 | Current protocol selectors reject generated uppercase/base64url IDs | Correct selector validation before exposing file transfer; preserve protocol version via capability negotiation |
 | Pi details schema is persisted delivery evidence | Add attachment data only to visible content/work DTO, not custom-message details or delivery key |

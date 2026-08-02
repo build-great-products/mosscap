@@ -707,7 +707,19 @@ Action-required outcomes such as ambiguous effects are reported separately from 
 
 `doctor` is non-destructive. It checks configuration, redaction, path ownership and modes, SQLite integrity and a rolled-back write test, local endpoint compatibility, Slack authentication and configured-channel access, bot identity, trusted IDs, required scopes, Pi extension compatibility, and storage availability. It never sends a Slack message, downloads a file, or takes leadership.
 
-Structured logs include request, source-event, task, effect, and delivery IDs with timestamps. They exclude tokens, full message bodies, raw Slack payloads, and file bytes. Verbose mode may include bounded metadata but never secrets.
+Structured logs include request, source-event, task, effect, and delivery IDs with timestamps. They exclude tokens, full message bodies, and raw Slack payloads. Transfer components do not deliberately supply raw file bytes or private transfer URLs to the logger. Verbose mode may include complete local paths and ordinary diagnostics but never credentials.
+
+### 13.1 Observability disclosure boundary
+
+Mosscap does not redact local filesystem paths or ordinary operational diagnostics. Owner-only CLI and protocol responses, status, doctor, gateway logs, and opted-in Pi messages may render complete configuration, state, database, socket, temporary, source, and destination paths together with the underlying local diagnostic. A compact summary may omit detail for presentation, but path privacy is not a product requirement and no path-redaction acceptance gate applies.
+
+Pi-visible diagnostics participate in model context and may persist in Pi JSONL. An operator who opts into Mosscap therefore accepts that these values, including directory, user, and project names, may be disclosed to the configured model provider.
+
+Slack tokens, authorization headers, and equivalent credentials remain redacted and must never enter SQLite, logs, protocol results, or Pi messages. This is the only output-redaction boundary. Secret-bearing adapter inputs should not be embedded into errors in the first place.
+
+File bytes and authenticated or capability-bearing private Slack download/upload URLs have separate lifecycle constraints: bytes flow only through explicit transfer and temporary files, and private transfer URLs remain transient adapter data rather than durable records. Those constraints do not require a generic diagnostic scrubber. An ordinary configured-channel permalink remains permitted source metadata under §7.4, and Pi may later read an explicitly retrieved file through its ordinary tool authority.
+
+This policy does not protect paths or diagnostics from a process that already controls the same effective UID.
 
 ## 14. Failure and recovery
 
@@ -736,7 +748,8 @@ Startup must check schema compatibility and SQLite integrity, expire dead leader
 - Slack text, task text, filenames, MIME labels, and file bytes are untrusted data and must be visibly delimited from Mosscap control metadata.
 - Slack-origin text cannot directly invoke local protocol commands. Pi may choose to act on it with the authority the human gave Pi; that is the intended trust boundary.
 - The local socket trusts same-user clients and does not defend against compromise of that OS account.
-- Tokens use least Slack scope, are redacted, never enter SQLite source payloads, and never enter Pi messages.
+- Owner-only operator and opted-in agent surfaces do not redact local paths or ordinary diagnostics; these values can reach the configured model provider and persisted Pi session.
+- Tokens use least Slack scope, are redacted, never enter SQLite source payloads, and never enter Pi messages. Private Slack transfer URLs and file bytes follow transient transfer lifecycles rather than being deliberately persisted as durable metadata.
 - All Slack writes are explicit CLI operations with visible targets and durable intents.
 - File handling defends against traversal, symlink races, replacement races, oversized data, unsafe redirects, and non-regular local inputs.
 - Purge is irreversible, requires an explicit cutoff and confirmation, and reports what it removed.
@@ -857,6 +870,7 @@ V1 is complete when all acceptance criteria pass in automated tests where feasib
 
 - the trusted-user and same-user security boundaries;
 - that opted-in Slack mentions automatically trigger Pi;
+- that local paths and ordinary diagnostics are not redacted and may enter Pi/model context, while credentials remain redacted and private transfer URLs/file bytes are not deliberately persisted as durable records;
 - the Socket Mode offline receipt limitation;
 - uncertain-delivery and ambiguous-effect inspection procedures;
 - temporary file behavior;
