@@ -12,7 +12,9 @@ import (
 
 	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/fileio"
 	"github.com/stayradiated/mosscap/internal/protocol"
+	"github.com/stayradiated/mosscap/internal/slackapi"
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
@@ -97,6 +99,46 @@ func deliveryCall(t *testing.T, cl *client.Client, kind, requestID, command stri
 		t.Fatal(err)
 	}
 	return r
+}
+
+func TestFileTransferErrorCodesRemainSafeAndSpecific(t *testing.T) {
+	cases := []struct {
+		err  error
+		code string
+		kind string
+	}{
+		{fileio.ErrUnsafeFileType, "unsafe_file_type", "unsafe"},
+		{slackapi.NewExternalError(slackapi.ReasonRejected, slackapi.DiagnosticUnsafeFileRedirect, "", nil), "unsafe_file_redirect", "unsafe"},
+		{slackapi.NewExternalError(slackapi.ReasonRejected, slackapi.DiagnosticSlackFileUnavailable, "", nil), "slack_file_unavailable", "external_failed"},
+	}
+	for _, tc := range cases {
+		response := errorResponse("req_test", "test", tc.err)
+		if response.Error == nil || response.Error.Code != tc.code || response.Error.Category != tc.kind {
+			t.Fatalf("errorResponse(%v) = %#v, want %s/%s", tc.err, response.Error, tc.code, tc.kind)
+		}
+	}
+}
+
+func TestDeliveryWorkAttachedFilesAreIncomingAndAttachedOnly(t *testing.T) {
+	declared := int64(42)
+	work := &store.DeliveryWork{Delivery: store.Delivery{ID: "dlv_AbCdEfGhIjKlMnOpQrStUv", DeliveryKey: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, Task: store.Task{ID: "tsk_AbCdEfGhIjKlMnOpQrStUv", Version: 1, SourceKind: "slack"}}
+	files := []store.SlackFile{
+		{FileID: "fil_AbCdEfGhIjKlMnOpQrStUv", Direction: "from_slack", SourceAttached: true, OriginalName: "report\x1b.txt", DeclaredMIME: "text/plain", DeclaredSizeBytes: &declared, TransferState: "metadata_only"},
+		{FileID: "fil_BbCdEfGhIjKlMnOpQrStUv", Direction: "from_slack", SourceAttached: false, OriginalName: "detached", TransferState: "validated", SHA256: strings.Repeat("a", 64)},
+		{FileID: "fil_CbCdEfGhIjKlMnOpQrStUv", Direction: "to_slack", SourceAttached: true, OriginalName: "outgoing", TransferState: "confirmed", SourcePath: "/private/source"},
+	}
+	got := deliveryWorkDTO(work, files)
+	if got == nil || len(got.AttachedFiles) != 1 {
+		t.Fatalf("attached files = %#v", got)
+	}
+	file := got.AttachedFiles[0]
+	if file.FileID != files[0].FileID || file.OriginalName != files[0].OriginalName || file.DeclaredMIME == nil || *file.DeclaredMIME != "text/plain" || file.DeclaredSizeBytes != &declared || file.TransferState != "metadata_only" {
+		t.Fatalf("attachment = %#v", file)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil || strings.Contains(string(encoded), "source_path") || strings.Contains(string(encoded), `"sha256":`) || strings.Contains(string(encoded), "outgoing") {
+		t.Fatalf("delivery projection leaked forbidden data: %s (%v)", encoded, err)
+	}
 }
 
 func TestPiDeliveryConnectionBindingAndRecovery(t *testing.T) {

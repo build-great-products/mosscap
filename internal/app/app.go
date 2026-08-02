@@ -669,7 +669,7 @@ func (a App) task(_ string, args []string) error {
 // reorderTaskFlags allows the documented TASK-before-flags form while keeping
 // the standard library flag parser for all option validation.
 func reorderTaskFlags(args []string) []string {
-	valueFlags := map[string]bool{"--text": true, "--text-file": true, "--request-id": true, "--note": true, "--state": true, "--limit": true, "--thread": true, "--task": true, "--reason": true}
+	valueFlags := map[string]bool{"--text": true, "--text-file": true, "--comment": true, "--request-id": true, "--note": true, "--state": true, "--limit": true, "--thread": true, "--task": true, "--reason": true, "--file": true, "--output": true}
 	flags := make([]string, 0, len(args))
 	positionals := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {

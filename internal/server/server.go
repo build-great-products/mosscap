@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/doctor"
@@ -543,7 +544,13 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		} else {
 			work, counts, err = s.piDelivery.Poll(ctx, connection.connectionID)
 			if err == nil {
-				result = protocol.DeliveryPollDTO{Work: deliveryWorkDTO(work), DeliveryCountsDTO: deliveryCountsDTO(counts)}
+				var attached []store.SlackFile
+				if work != nil && work.Task.SourceKind == "slack" {
+					attached, err = s.store.ListSlackFiles(ctx, work.Task.ID)
+				}
+				if err == nil {
+					result = protocol.DeliveryPollDTO{Work: deliveryWorkDTO(work, attached), DeliveryCountsDTO: deliveryCountsDTO(counts)}
+				}
 			}
 		}
 	case "delivery.inserting", "delivery.persisted", "delivery.rejected":
@@ -1020,6 +1027,16 @@ func fileSize(path string) (int64, error) {
 }
 
 func errorResponse(id, version string, err error) protocol.Response {
+	// Adapter diagnostics are bounded and secret-safe. Preserve the file
+	// transfer diagnostics that have distinct CLI safety semantics instead of
+	// flattening them into a generic external failure.
+	if failure := slackapi.Classify(err, slackapi.FailureRead); failure.Diagnostic == slackapi.DiagnosticUnsafeFileRedirect {
+		return protocol.NewErrorResponse(id, version, "unsafe_file_redirect", "unsafe", err.Error(), false)
+	} else if failure.Diagnostic == slackapi.DiagnosticSlackFileUnavailable {
+		return protocol.NewErrorResponse(id, version, "slack_file_unavailable", "external_failed", err.Error(), false)
+	} else if failure.Diagnostic == slackapi.DiagnosticFileTooLarge {
+		return protocol.NewErrorResponse(id, version, "file_too_large", "usage", err.Error(), false)
+	}
 	code, category := "invalid_input", "usage"
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrFileTransferNotFound):
@@ -1034,7 +1051,9 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "file_content_changed", "conflict"
 	case errors.Is(err, filetransfer.ErrNotIncoming):
 		code, category = "invalid_input", "usage"
-	case errors.Is(err, filetransfer.ErrUnsafeTemporary), errors.Is(err, fileio.ErrUnsafePath), errors.Is(err, fileio.ErrUnsafeFileType), errors.Is(err, fileio.ErrInvalidTemporary):
+	case errors.Is(err, fileio.ErrUnsafeFileType):
+		code, category = "unsafe_file_type", "unsafe"
+	case errors.Is(err, filetransfer.ErrUnsafeTemporary), errors.Is(err, fileio.ErrUnsafePath), errors.Is(err, fileio.ErrInvalidTemporary):
 		code, category = "unsafe_file_path", "unsafe"
 	case errors.Is(err, fileio.ErrDestinationExists):
 		code, category = "destination_exists", "conflict"
@@ -1130,7 +1149,7 @@ func deliveryDTOs(deliveries []store.Delivery) []protocol.DeliveryDTO {
 	}
 	return out
 }
-func deliveryWorkDTO(work *store.DeliveryWork) *protocol.DeliveryWorkDTO {
+func deliveryWorkDTO(work *store.DeliveryWork, files []store.SlackFile) *protocol.DeliveryWorkDTO {
 	if work == nil {
 		return nil
 	}
@@ -1138,8 +1157,36 @@ func deliveryWorkDTO(work *store.DeliveryWork) *protocol.DeliveryWorkDTO {
 	if work.Slack != nil {
 		out.SlackSource = &protocol.DeliverySlackSourceDTO{AuthorUserID: work.Slack.AuthorUserID, MessageTS: work.Slack.MessageTS, ThreadTS: work.Slack.ThreadTS}
 	}
+	for _, file := range files {
+		// ListSlackFiles already returns attached incoming rows. Keep this guard at
+		// the delivery boundary so a future repository query cannot leak detached
+		// or outgoing intent metadata into a persisted Pi message.
+		if len(out.AttachedFiles) == 20 || !validDeliveryAttachedFile(file) {
+			continue
+		}
+		var mime *string
+		if file.DeclaredMIME != "" {
+			value := file.DeclaredMIME
+			mime = &value
+		}
+		out.AttachedFiles = append(out.AttachedFiles, protocol.DeliveryAttachedFileDTO{FileID: file.FileID, OriginalName: file.OriginalName, DeclaredMIME: mime, DeclaredSizeBytes: file.DeclaredSizeBytes, TransferState: file.TransferState})
+	}
 	return out
 }
+
+func validDeliveryAttachedFile(file store.SlackFile) bool {
+	return file.Direction == "from_slack" && file.SourceAttached && len(file.OriginalName) <= 1024 && utf8.ValidString(file.OriginalName) && len(file.DeclaredMIME) <= 255 && utf8.ValidString(file.DeclaredMIME) && (file.DeclaredSizeBytes == nil || *file.DeclaredSizeBytes >= 0) && deliveryIncomingTransferState(file.TransferState)
+}
+
+func deliveryIncomingTransferState(value string) bool {
+	switch value {
+	case "metadata_only", "validated", "unavailable", "oversized", "content_changed":
+		return true
+	default:
+		return false
+	}
+}
+
 func taskDTOs(tasks []store.Task) []protocol.TaskDTO {
 	a := make([]protocol.TaskDTO, len(tasks))
 	for i := range tasks {

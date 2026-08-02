@@ -233,19 +233,31 @@ type DeliveryOpenDTO struct {
 	DeliveryCountsDTO
 }
 type DeliveryWorkDTO struct {
-	DeliveryID  string                  `json:"delivery_id"`
-	DeliveryKey string                  `json:"delivery_key"`
-	TaskID      string                  `json:"task_id"`
-	TaskVersion int64                   `json:"task_version"`
-	TaskState   string                  `json:"task_state"`
-	TaskText    string                  `json:"task_text"`
-	SourceKind  string                  `json:"source_kind"`
-	SlackSource *DeliverySlackSourceDTO `json:"slack_source,omitempty"`
+	DeliveryID    string                    `json:"delivery_id"`
+	DeliveryKey   string                    `json:"delivery_key"`
+	TaskID        string                    `json:"task_id"`
+	TaskVersion   int64                     `json:"task_version"`
+	TaskState     string                    `json:"task_state"`
+	TaskText      string                    `json:"task_text"`
+	SourceKind    string                    `json:"source_kind"`
+	SlackSource   *DeliverySlackSourceDTO   `json:"slack_source,omitempty"`
+	AttachedFiles []DeliveryAttachedFileDTO `json:"attached_files,omitempty"`
 }
 type DeliverySlackSourceDTO struct {
 	AuthorUserID string `json:"author_user_id"`
 	MessageTS    string `json:"message_ts"`
 	ThreadTS     string `json:"thread_ts"`
+}
+
+// DeliveryAttachedFileDTO is the deliberately narrow attachment projection for
+// Pi work. It is incoming metadata only: no URLs, paths, bytes, hashes, or
+// outgoing/detached records are ever represented here.
+type DeliveryAttachedFileDTO struct {
+	FileID            string  `json:"file_id"`
+	OriginalName      string  `json:"original_name"`
+	DeclaredMIME      *string `json:"declared_mime"`
+	DeclaredSizeBytes *int64  `json:"declared_size_bytes"`
+	TransferState     string  `json:"transfer_state"`
 }
 type DeliveryPollDTO struct {
 	Work *DeliveryWorkDTO `json:"work,omitempty"`
