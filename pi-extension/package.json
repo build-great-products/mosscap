@@ -1,0 +1,16 @@
+{
+  "name": "mosscap-pi-extension",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "26.x" },
+  "packageManager": "pnpm@11.17.0",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}

@@ -1,8 +1,12 @@
 # Phase 2 Pi delivery MVP findings
 
-**Status:** pending implementation and manual trial
+**Status:** automated implementation pending final validation; manual trial deliberately deferred
 
 Use this document to record evidence that may change [`docs/SPEC.md`](../SPEC.md). Keep entries concise. Do not include Slack tokens, raw envelopes, private transcript content, task/message bodies, model credentials, or session-file paths.
+
+## Automated implementation note
+
+- The source-loaded extension pins Pi development types to `@earendil-works/pi-coding-agent` `0.83.0`; automated fake timing tests cover post-handler persistence scanning and no live Slack, gateway, provider, or manual Pi trial was run. The Phase 2 manual trial remains required and is not claimed as passed.
 
 ## Workflow observations
 
