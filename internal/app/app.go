@@ -98,6 +98,8 @@ func (a App) Execute(_ context.Context, args []string) error {
 		return a.effect(args[1:])
 	case "file":
 		return a.file(args[1:])
+	case "delivery":
+		return a.delivery(args[1:])
 	default:
 		return usage(fmt.Sprintf("unknown command %q", args[0]))
 	}
@@ -765,7 +767,7 @@ func (a App) leaf(name string, args []string) error {
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  task        manage local tasks\n  slack       read and operate in the configured Slack channel\n  effect      inspect durable Slack effects\n  file        show incoming Slack file metadata\n\nRun \"mosscap <command> --help\" for command help.\n")
+	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  task        manage local tasks\n  slack       read and operate in the configured Slack channel\n  effect      inspect durable Slack effects\n  file        show incoming Slack file metadata\n  delivery    inspect and recover Pi delivery attempts\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)
