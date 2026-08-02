@@ -166,6 +166,21 @@ type SlackFileTransferCounts struct {
 	TemporaryBytes int64            `json:"temporary_bytes"`
 }
 
+// SlackEffectOutgoingSource is the ordered, exact-effect source metadata needed
+// to recover or explicitly retry a durable file upload. It deliberately exposes
+// a path only through this narrow inspection API; it contains no file bytes,
+// transfer status, or Slack response data.
+type SlackEffectOutgoingSource struct {
+	FileID        string
+	SourcePath    string
+	OriginalName  string
+	SizeBytes     int64
+	SHA256        string
+	SourceDevice  *int64
+	SourceInode   *int64
+	SourceMTimeNS *int64
+}
+
 // SlackUploadFile is exact byte identity prepared before any Slack exchange.
 type SlackUploadFile struct {
 	FileID        string

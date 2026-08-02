@@ -289,6 +289,58 @@ func (s *Store) CommitSlackFileUploadOutcome(ctx context.Context, effectID strin
 	return updated, nil
 }
 
+// InspectSlackFileUploadSources returns ordered, exact source identity for one
+// file-upload effect. Paths are exposed only by this recovery/retry inspection
+// method, never through status or general file listing APIs.
+func (s *Store) InspectSlackFileUploadSources(ctx context.Context, effectID string) ([]SlackEffectOutgoingSource, error) {
+	if !validFullSlackEffectID(effectID) {
+		return nil, ErrSlackEffectNotFound
+	}
+	effect, err := getSlackEffectExact(ctx, s.db, effectID)
+	if err != nil {
+		return nil, err
+	}
+	if effect.Kind != SlackEffectFileUpload {
+		return nil, invalidInput("effect is not a Slack file upload")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT file_id,source_path,original_name,validated_size_bytes,sha256,source_device,source_inode,source_mtime_ns FROM files WHERE direction='to_slack' AND related_effect_id=? ORDER BY effect_ordinal,file_id`, effectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sources []SlackEffectOutgoingSource
+	for rows.Next() {
+		var source SlackEffectOutgoingSource
+		var size sql.NullInt64
+		var path sql.NullString
+		var device, inode, mtime sql.NullInt64
+		if err := rows.Scan(&source.FileID, &path, &source.OriginalName, &size, &source.SHA256, &device, &inode, &mtime); err != nil {
+			return nil, err
+		}
+		if !path.Valid || !size.Valid {
+			return nil, ErrSlackInvariant
+		}
+		source.SourcePath = path.String
+		source.SizeBytes = size.Int64
+		source.SourceDevice = nullableIntPointer(device)
+		source.SourceInode = nullableIntPointer(inode)
+		source.SourceMTimeNS = nullableIntPointer(mtime)
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return sources, nil
+}
+
+func nullableIntPointer(value sql.NullInt64) *int64 {
+	if !value.Valid {
+		return nil
+	}
+	result := value.Int64
+	return &result
+}
+
 func listOutgoingFilesForEffectTx(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, effectID string) ([]SlackFile, error) {

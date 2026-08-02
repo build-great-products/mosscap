@@ -98,9 +98,12 @@ func TestFileUploadPrepareFailRetryCloneAndConfirm(t *testing.T) {
 	if err != nil || prepared.Kind != SlackEffectFileUpload || prepared.State != SlackEffectPrepared {
 		t.Fatalf("prepare=%+v err=%v", prepared, err)
 	}
-	original, err := listOutgoingFilesForEffectTx(ctx, s.DB(), prepared.EffectID)
-	if err != nil || len(original) != 1 || original[0].EffectOrdinal == nil || *original[0].EffectOrdinal != 0 || original[0].SourcePath != "/safe/input" {
-		t.Fatalf("prepared files=%+v err=%v", original, err)
+	original, err := s.InspectSlackFileUploadSources(ctx, prepared.EffectID)
+	if err != nil || len(original) != 1 || original[0].SourcePath != "/safe/input" || original[0].OriginalName != "input.txt" || original[0].SizeBytes != 0 {
+		t.Fatalf("prepared sources=%+v err=%v", original, err)
+	}
+	if _, err := s.InspectSlackFileUploadSources(ctx, prepared.EffectID[:5]); !errors.Is(err, ErrSlackEffectNotFound) {
+		t.Fatalf("short effect ID inspection error=%v", err)
 	}
 	if _, err := s.FailPreparedSlackFileUpload(ctx, prepared.EffectID, SlackEffectDiagnosticFileChanged); err != nil {
 		t.Fatal(err)
@@ -113,7 +116,7 @@ func TestFileUploadPrepareFailRetryCloneAndConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cloned, err := listOutgoingFilesForEffectTx(ctx, s.DB(), retry.EffectID)
+	cloned, err := s.InspectSlackFileUploadSources(ctx, retry.EffectID)
 	if err != nil || len(cloned) != 1 || cloned[0].FileID == original[0].FileID || cloned[0].SourcePath != original[0].SourcePath || cloned[0].SHA256 != original[0].SHA256 {
 		t.Fatalf("cloned=%+v err=%v", cloned, err)
 	}

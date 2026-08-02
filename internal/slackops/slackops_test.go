@@ -167,9 +167,9 @@ func TestFileUploadPreparesOrderedIntentBeforeSlackAndConfirms(t *testing.T) {
 	if err != nil || len(effects) != 1 || effects[0].Kind != store.SlackEffectFileUpload || effects[0].State != store.SlackEffectSubmitted {
 		t.Fatalf("effect before first exchange = %#v, %v", effects, err)
 	}
-	var count int
-	if err := ledger.DB().QueryRow(`SELECT count(*) FROM files WHERE related_effect_id=? AND direction='to_slack'`, effects[0].ID).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("ordered file intent = %d, %v", count, err)
+	sources, err := ledger.InspectSlackFileUploadSources(context.Background(), effects[0].ID)
+	if err != nil || len(sources) != 2 || sources[0].OriginalName != "one.txt" || sources[1].OriginalName != "two.bin" {
+		t.Fatalf("ordered file intent = %#v, %v", sources, err)
 	}
 	barrier.Release()
 	got := <-result

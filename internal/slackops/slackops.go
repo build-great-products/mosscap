@@ -3,7 +3,6 @@ package slackops
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +19,8 @@ import (
 const maxUploadFiles = 20
 
 var (
-	ErrUnavailable       = errors.New("Slack operations are unavailable")
-	ErrInvalidTarget     = errors.New("Slack target is not in the configured channel")
-	errUploadStoreLookup = errors.New("upload effect file lookup failed")
+	ErrUnavailable   = errors.New("Slack operations are unavailable")
+	ErrInvalidTarget = errors.New("Slack target is not in the configured channel")
 )
 
 // EffectStore is the narrow durable boundary used by Service.
@@ -37,14 +35,7 @@ type EffectStore interface {
 	ReconcileSubmittedSlackEffects(context.Context) (int64, error)
 	ListSlackEffects(context.Context, *store.SlackEffectState, int) ([]store.SlackEffect, error)
 	RetrySlackEffect(context.Context, string, string, string, bool) (store.SlackEffectMutationResult, error)
-}
-
-// uploadEffectFileStore is deliberately read-only. Store exposes DB only for
-// diagnostics/tests, so this keeps the upload executor independent of the
-// rest of the repository while the v5 store does not yet publish an inspection
-// method for ordered outgoing rows.
-type uploadEffectFileStore interface {
-	DB() *sql.DB
+	InspectSlackFileUploadSources(context.Context, string) ([]store.SlackEffectOutgoingSource, error)
 }
 
 // uploadSource is the minimal race-safe source contract required by this
@@ -306,7 +297,7 @@ func (s *Service) executeExistingLocked(ctx context.Context, effect store.SlackE
 		}
 		sources, err := s.openStoredUploadSources(ctx, effect.ID)
 		if err != nil {
-			if errors.Is(err, errUploadStoreLookup) || errors.Is(err, ErrUnavailable) {
+			if errors.Is(err, ErrUnavailable) {
 				return effect, err
 			}
 			// A recovered prepared upload has not crossed a Slack boundary. Record
@@ -598,7 +589,7 @@ func (s *Service) bindUploadSourceIDs(ctx context.Context, effectID string, sour
 		return fmt.Errorf("stored upload file count mismatch")
 	}
 	for index, file := range files {
-		if file.ValidatedSizeBytes == nil || file.FileID == "" || file.SourcePath != sources[index].file.SourcePath || file.OriginalName != sources[index].file.OriginalName || *file.ValidatedSizeBytes != sources[index].file.SizeBytes || file.SHA256 != sources[index].file.SHA256 {
+		if file.FileID == "" || file.SourcePath != sources[index].file.SourcePath || file.OriginalName != sources[index].file.OriginalName || file.SizeBytes != sources[index].file.SizeBytes || file.SHA256 != sources[index].file.SHA256 {
 			return fmt.Errorf("stored upload file mismatch")
 		}
 		sources[index].file.FileID = file.FileID
@@ -634,7 +625,7 @@ func (s *Service) openStoredUploadSources(ctx context.Context, effectID string) 
 	}
 	result := make([]preparedUploadSource, 0, len(files))
 	for _, file := range files {
-		if file.ValidatedSizeBytes == nil || file.SHA256 == "" || file.SourcePath == "" || file.EffectOrdinal == nil {
+		if file.FileID == "" || file.SHA256 == "" || file.SourcePath == "" {
 			closePreparedSources(result)
 			return nil, fmt.Errorf("invalid stored upload file")
 		}
@@ -643,14 +634,14 @@ func (s *Service) openStoredUploadSources(ctx context.Context, effectID string) 
 			closePreparedSources(result)
 			return nil, err
 		}
-		if source.PreparedSize() != *file.ValidatedSizeBytes || source.PreparedSHA256() != file.SHA256 {
+		if source.PreparedSize() != file.SizeBytes || source.PreparedSHA256() != file.SHA256 {
 			source.Close()
 			closePreparedSources(result)
 			return nil, fileio.ErrChanged
 		}
 		prepared := preparedUploadSource{source: source, file: store.SlackUploadFile{
 			FileID: file.FileID, SourcePath: file.SourcePath, OriginalName: file.OriginalName,
-			SizeBytes: *file.ValidatedSizeBytes, SHA256: file.SHA256,
+			SizeBytes: file.SizeBytes, SHA256: file.SHA256,
 			SourceDevice: file.SourceDevice, SourceInode: file.SourceInode, SourceMTimeNS: file.SourceMTimeNS,
 		}}
 		result = append(result, prepared)
@@ -658,45 +649,10 @@ func (s *Service) openStoredUploadSources(ctx context.Context, effectID string) 
 	return result, nil
 }
 
-// outgoingFiles contains the sole SQL shape needed while the store's public
-// inspection API is intentionally compact/path-free. It is exact-ID only and
-// returns no file bytes or remote URLs.
-func (s *Service) outgoingFiles(ctx context.Context, effectID string) ([]store.SlackFile, error) {
-	dbStore, ok := s.store.(uploadEffectFileStore)
-	if !ok || dbStore.DB() == nil {
-		return nil, ErrUnavailable
-	}
-	rows, err := dbStore.DB().QueryContext(ctx, `SELECT file_id,original_name,validated_size_bytes,sha256,source_path,source_device,source_inode,source_mtime_ns,effect_ordinal FROM files WHERE direction='to_slack' AND related_effect_id=? ORDER BY effect_ordinal,file_id`, effectID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errUploadStoreLookup, err)
-	}
-	defer rows.Close()
-	var files []store.SlackFile
-	for rows.Next() {
-		var file store.SlackFile
-		var size, device, inode, mtime, ordinal sql.NullInt64
-		if err := rows.Scan(&file.FileID, &file.OriginalName, &size, &file.SHA256, &file.SourcePath, &device, &inode, &mtime, &ordinal); err != nil {
-			return nil, fmt.Errorf("%w: %v", errUploadStoreLookup, err)
-		}
-		file.ValidatedSizeBytes = nullableInt(size)
-		file.SourceDevice = nullableInt(device)
-		file.SourceInode = nullableInt(inode)
-		file.SourceMTimeNS = nullableInt(mtime)
-		file.EffectOrdinal = nullableInt(ordinal)
-		files = append(files, file)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("%w: %v", errUploadStoreLookup, err)
-	}
-	return files, nil
-}
-
-func nullableInt(value sql.NullInt64) *int64 {
-	if !value.Valid {
-		return nil
-	}
-	result := value.Int64
-	return &result
+// outgoingFiles delegates exact, ordered source inspection to the durable
+// store boundary. The returned data contains no bytes or remote URLs.
+func (s *Service) outgoingFiles(ctx context.Context, effectID string) ([]store.SlackEffectOutgoingSource, error) {
+	return s.store.InspectSlackFileUploadSources(ctx, effectID)
 }
 
 // sourceReader starts its pipe only if an adapter actually stages the source.
