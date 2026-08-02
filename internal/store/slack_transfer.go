@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/stayradiated/mosscap/internal/identity"
+	"github.com/stayradiated/mosscap/internal/slackapi"
 )
 
 const (
@@ -463,6 +464,58 @@ func (s *Store) ListExpiredFileTemporaryTransfers(ctx context.Context, before ti
 		transfers = append(transfers, t)
 	}
 	return transfers, rows.Err()
+}
+
+// ListFileTemporaryTransfers returns bounded liveness metadata for private
+// directory reconciliation. It contains generated basenames only, never paths.
+func (s *Store) ListFileTemporaryTransfers(ctx context.Context, limit int) ([]FileTemporaryTransfer, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, invalidInput("invalid temporary transfer list limit")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT transfer_id,file_id,generated_name,size_bytes,sha256,expires_at_us,created_at_us FROM file_temporary_transfers ORDER BY transfer_id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var transfers []FileTemporaryTransfer
+	for rows.Next() {
+		var transfer FileTemporaryTransfer
+		var expires, created int64
+		if err := rows.Scan(&transfer.TransferID, &transfer.FileID, &transfer.GeneratedName, &transfer.SizeBytes, &transfer.SHA256, &expires, &created); err != nil {
+			return nil, err
+		}
+		transfer.ExpiresAt, transfer.CreatedAt = time.UnixMicro(expires).UTC(), time.UnixMicro(created).UTC()
+		transfers = append(transfers, transfer)
+	}
+	return transfers, rows.Err()
+}
+
+// RecordIncomingFileFailure preserves incoming durable identity while making a
+// bounded transfer outcome visible. It never stores adapter errors or paths.
+func (s *Store) RecordIncomingFileFailure(ctx context.Context, fileID, code string) error {
+	state := "unavailable"
+	switch code {
+	case "file_too_large":
+		state = "oversized"
+	case "file_content_changed":
+		state = "content_changed"
+	default:
+		if !slackapi.DiagnosticCode(code).Valid() {
+			return invalidInput("invalid incoming file diagnostic")
+		}
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE files SET transfer_state=?,diagnostic_code=?,updated_at_us=max(updated_at_us,?) WHERE file_id=? AND direction='from_slack'`, state, code, s.now(), fileID)
+	if err != nil {
+		return err
+	}
+	changed, err := rowsChanged(result)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteFileTemporaryTransfer removes only the row; lifecycle code must unlink

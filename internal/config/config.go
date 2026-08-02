@@ -391,8 +391,8 @@ func Validate(c Config) error {
 	if c.MaximumFileSize < 1 || c.MaximumFileSize > ByteSize(1<<40) {
 		return errors.New("maximum_file_size must be between 1 and 1099511627776")
 	}
-	if c.MaximumFilesPerSlackOperation < 1 || c.MaximumFilesPerSlackOperation > 1000 {
-		return errors.New("maximum_files_per_slack_operation must be between 1 and 1000")
+	if c.MaximumFilesPerSlackOperation < 1 || c.MaximumFilesPerSlackOperation > 20 {
+		return errors.New("maximum_files_per_slack_operation must be between 1 and 20")
 	}
 	if c.LocalProtocolMaximumFrame < 64<<10 || c.LocalProtocolMaximumFrame > 16<<20 {
 		return errors.New("local_protocol_maximum_frame must be between 65536 and 16777216")

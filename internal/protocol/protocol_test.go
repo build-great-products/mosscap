@@ -174,6 +174,10 @@ func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
 		{"effect.inspect", `{"effect":"eff_abc"}`},
 		{"effect.retry", `{"effect":"eff_abc","reason":"reviewed","confirm_duplicate_risk":true}`},
 		{"file.show", `{"file":"fil_abc"}`},
+		{"file.get", `{"file":"fil_AbC-_123"}`},
+		{"file.release", `{"transfer_id":"xfr_AbC-_123"}`},
+		{"slack.file", `{"file_path":"/tmp/source","comment":"one"}`},
+		{"slack.send", `{"text":"hello","file_paths":["/tmp/one","/tmp/two"]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.command, func(t *testing.T) {
@@ -193,6 +197,8 @@ func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
 		{"slack.delete", `{"message_ts":"1.000001","reason":""}`}, {"slack.react", `{"message_ts":"1.000001","emoji":"bad emoji"}`},
 		{"effect.list", `{"state":"unknown"}`}, {"effect.inspect", `{"effect":"tsk_abc"}`},
 		{"effect.retry", `{"effect":"eff_abc","reason":""}`}, {"file.show", `{"file":"/tmp/file"}`},
+		{"file.get", `{"file":"fil_abc","bytes":"forbidden"}`}, {"file.release", `{"transfer_id":"fil_abc"}`},
+		{"slack.file", `{"file_path":"relative"}`}, {"slack.send", `{"text":"ok","file_paths":["/tmp/a"],"channel":"CINJECT"}`},
 	} {
 		if err := ValidateParams(tc.command, []byte(tc.params)); err == nil {
 			t.Fatalf("accepted invalid %s %s", tc.command, tc.params)
@@ -201,7 +207,7 @@ func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
 }
 
 func TestPhase1CapabilitiesAndSafeDTOs(t *testing.T) {
-	for _, capability := range []string{CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata} {
+	for _, capability := range []string{CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer} {
 		found := false
 		for _, advertised := range ServerCapabilities {
 			found = found || advertised == capability

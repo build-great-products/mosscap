@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"unicode/utf8"
 
@@ -29,12 +30,13 @@ const (
 	CapabilitySlackReads          = "slack_reads"
 	CapabilitySlackEffects        = "slack_effects"
 	CapabilitySlackSourceMetadata = "slack_source_metadata"
+	CapabilityFileTransfer        = "file_transfer_v1"
 	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
 	// the gateway owns every delivery route and disconnect cleanup (T1).
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -122,8 +124,15 @@ type SlackThreadParams struct {
 	ThreadTS string `json:"thread_ts"`
 }
 type SlackSendParams struct {
+	ThreadTS  string   `json:"thread_ts,omitempty"`
+	Text      string   `json:"text"`
+	Task      string   `json:"task,omitempty"`
+	FilePaths []string `json:"file_paths,omitempty"`
+}
+type SlackFileParams struct {
 	ThreadTS string `json:"thread_ts,omitempty"`
-	Text     string `json:"text"`
+	FilePath string `json:"file_path"`
+	Comment  string `json:"comment,omitempty"`
 	Task     string `json:"task,omitempty"`
 }
 type SlackEditParams struct {
@@ -155,6 +164,12 @@ type EffectRetryParams struct {
 }
 type FileSelector struct {
 	File string `json:"file"`
+}
+type FileGetParams struct {
+	File string `json:"file"`
+}
+type FileReleaseParams struct {
+	TransferID string `json:"transfer_id"`
 }
 
 // DeliveryObservation is exact persisted-session evidence. It intentionally
@@ -272,16 +287,32 @@ type SlackSourceDTO struct {
 	SourceDeletedAt      *string `json:"source_deleted_at,omitempty"`
 }
 type SlackFileDTO struct {
-	FileID        string `json:"file_id"`
-	SlackFileID   string `json:"slack_file_id"`
-	Permalink     string `json:"permalink,omitempty"`
-	OriginalName  string `json:"original_name"`
-	DeclaredMIME  string `json:"declared_mime,omitempty"`
-	SizeBytes     *int64 `json:"size_bytes,omitempty"`
-	RelatedTaskID string `json:"related_task_id"`
-	TransferState string `json:"transfer_state"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	FileID             string  `json:"file_id"`
+	Direction          string  `json:"direction"`
+	SlackFileID        string  `json:"slack_file_id,omitempty"`
+	Permalink          string  `json:"permalink,omitempty"`
+	OriginalName       string  `json:"original_name"`
+	DeclaredMIME       string  `json:"declared_mime,omitempty"`
+	DeclaredSizeBytes  *int64  `json:"declared_size_bytes,omitempty"`
+	ValidatedSizeBytes *int64  `json:"validated_size_bytes,omitempty"`
+	SHA256             string  `json:"sha256,omitempty"`
+	RelatedTaskID      string  `json:"related_task_id,omitempty"`
+	RelatedEffectID    string  `json:"related_effect_id,omitempty"`
+	EffectOrdinal      *int64  `json:"effect_ordinal,omitempty"`
+	SourceAttached     bool    `json:"source_attached"`
+	SourceDetachedAt   *string `json:"source_detached_at,omitempty"`
+	TransferState      string  `json:"transfer_state"`
+	DiagnosticCode     string  `json:"diagnostic_code,omitempty"`
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
+}
+type FileGetDTO struct {
+	TransferID         string `json:"transfer_id"`
+	FileID             string `json:"file_id"`
+	TemporaryPath      string `json:"temporary_path"`
+	ValidatedSizeBytes int64  `json:"validated_size_bytes"`
+	SHA256             string `json:"sha256"`
+	ExpiresAt          string `json:"expires_at"`
 }
 
 // SlackMessageDTO is returned only to the requesting reader and is never a
@@ -324,9 +355,17 @@ type SlackEffectIntentDTO struct {
 	Emoji          string `json:"emoji,omitempty"`
 	OperatorReason string `json:"operator_reason,omitempty"`
 }
+type FileUploadSourceDTO struct {
+	FileID       string `json:"file_id"`
+	SourcePath   string `json:"source_path"`
+	OriginalName string `json:"original_name"`
+	SizeBytes    int64  `json:"validated_size_bytes"`
+	SHA256       string `json:"sha256"`
+}
 type EffectInspectDTO struct {
-	Effect SlackEffectDTO       `json:"effect"`
-	Intent SlackEffectIntentDTO `json:"intent"`
+	Effect        SlackEffectDTO        `json:"effect"`
+	Intent        SlackEffectIntentDTO  `json:"intent"`
+	OutgoingFiles []FileUploadSourceDTO `json:"outgoing_files,omitempty"`
 }
 type EffectListDTO struct {
 	Effects []SlackEffectDTO `json:"effects"`
@@ -482,6 +521,8 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &SlackThreadParams{}
 	case "slack.send":
 		target = &SlackSendParams{}
+	case "slack.file":
+		target = &SlackFileParams{}
 	case "slack.edit":
 		target = &SlackEditParams{}
 	case "slack.delete":
@@ -496,6 +537,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &EffectRetryParams{}
 	case "file.show":
 		target = &FileSelector{}
+	case "file.get":
+		target = &FileGetParams{}
+	case "file.release":
+		target = &FileReleaseParams{}
 	case "delivery.open":
 		target = &DeliveryOpenParams{}
 	case "delivery.inserting":
@@ -579,8 +624,12 @@ func ValidateParams(command string, raw json.RawMessage) error {
 			return errors.New("invalid Slack thread timestamp")
 		}
 	case *SlackSendParams:
-		if (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validText(p.Text, true) || !validTask(p.Task) {
+		if (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validText(p.Text, true) || !validTask(p.Task) || !validPaths(p.FilePaths) {
 			return errors.New("invalid Slack send")
+		}
+	case *SlackFileParams:
+		if (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validPath(p.FilePath) || !validText(p.Comment, false) || !validTask(p.Task) {
+			return errors.New("invalid Slack file")
 		}
 	case *SlackEditParams:
 		if !validTimestamp(p.MessageTS) || !validText(p.Text, true) || !validTask(p.Task) {
@@ -614,6 +663,14 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	case *FileSelector:
 		if !validFileSelector(p.File) {
 			return errors.New("invalid file selector")
+		}
+	case *FileGetParams:
+		if !validFileSelector(p.File) {
+			return errors.New("invalid file selector")
+		}
+	case *FileReleaseParams:
+		if !validTransferSelector(p.TransferID) {
+			return errors.New("invalid transfer selector")
 		}
 	case *DeliveryOpenParams:
 		if !validPiSessionID(p.PiSessionID) || len(p.Observed) > 256 {
@@ -702,7 +759,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	}
 	return false
@@ -718,15 +775,30 @@ func validText(value string, required bool) bool {
 func validReason(value string) bool {
 	return value != "" && len(value) <= 4096 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
-func validTask(value string) bool           { return value == "" || validTypedSelector(value, "tsk_") }
-func validEffectSelector(value string) bool { return validTypedSelector(value, "eff_") }
-func validFileSelector(value string) bool   { return validTypedSelector(value, "fil_") }
+func validTask(value string) bool             { return value == "" || validTypedSelector(value, "tsk_") }
+func validEffectSelector(value string) bool   { return validTypedSelector(value, "eff_") }
+func validFileSelector(value string) bool     { return validTypedSelector(value, "fil_") }
+func validTransferSelector(value string) bool { return validTypedSelector(value, "xfr_") }
 func validTypedSelector(value, prefix string) bool {
 	if !strings.HasPrefix(value, prefix) || len(value) <= len(prefix) || len(value) > 128 || !utf8.ValidString(value) {
 		return false
 	}
 	for _, r := range value[len(prefix):] {
-		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+func validPath(value string) bool {
+	return value != "" && len(value) <= 4096 && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && strings.HasPrefix(value, "/") && path.Clean(value) == value
+}
+func validPaths(values []string) bool {
+	if len(values) > 20 {
+		return false
+	}
+	for _, value := range values {
+		if !validPath(value) {
 			return false
 		}
 	}

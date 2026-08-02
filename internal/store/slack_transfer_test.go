@@ -35,6 +35,10 @@ func TestIncomingTransferCommitReplayExpiryAndDetachedIdentity(t *testing.T) {
 	if err != nil || replay != first {
 		t.Fatalf("live replay=%+v err=%v", replay, err)
 	}
+	live, err := s.ListFileTemporaryTransfers(ctx, 10)
+	if err != nil || len(live) != 1 || live[0].TransferID != transfer.TransferID {
+		t.Fatalf("live temporary transfers=%+v err=%v", live, err)
+	}
 	replayedCommit, err := s.CommitIncomingFileTransfer(ctx, "file-get", FileTemporaryTransfer{TransferID: "xfr_bcdefghijklmnopqrstuvw", FileID: files[0].FileID, GeneratedName: "mosscap-xfr-fedcba9876543210fedcba9876543210", SizeBytes: 3, SHA256: strings.Repeat("a", 64), CreatedAt: time.UnixMicro(20), ExpiresAt: time.UnixMicro(30)})
 	if err != nil || replayedCommit != first {
 		t.Fatalf("reused request=%+v err=%v", replayedCommit, err)
@@ -71,6 +75,13 @@ func TestIncomingTransferCommitReplayExpiryAndDetachedIdentity(t *testing.T) {
 	attached, err := s.ListSlackFiles(ctx, admitted.TaskID)
 	if err != nil || len(attached) != 1 || attached[0].FileID != files[0].FileID || !attached[0].SourceAttached || attached[0].SHA256 != transfer.SHA256 {
 		t.Fatalf("re-added=%+v err=%v", attached, err)
+	}
+	if err := s.RecordIncomingFileFailure(ctx, files[0].FileID, "file_content_changed"); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := s.GetSlackFile(ctx, files[0].FileID)
+	if err != nil || failed.TransferState != "content_changed" || failed.DiagnosticCode != "file_content_changed" {
+		t.Fatalf("failed incoming file=%+v err=%v", failed, err)
 	}
 }
 
