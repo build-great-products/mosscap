@@ -41,6 +41,51 @@ func TestGetCommitsValidatedBytesAndReplaysWithoutDownload(t *testing.T) {
 	}
 }
 
+func TestGetConcurrentSameRequestDownloadsOnceAndReturnsWinner(t *testing.T) {
+	repo := newRepository("fil_abcdefghijklmnopqrstuv", "F12345678")
+	repo.replayMiss = make(chan struct{}, 2)
+	files := newMemoryFiles()
+	proceed := make(chan struct{})
+	slack := &gatedDownloadSlack{bytes: []byte("verified bytes"), started: make(chan struct{}, 1), proceed: proceed}
+	svc := newService(t, repo, files, slack, clock.Fixed{Time: time.Unix(100, 0)}, 100, 2)
+
+	type response struct {
+		result Result
+		err    error
+	}
+	responses := make(chan response, 2)
+	go func() {
+		result, err := svc.Get(context.Background(), "get-race", repo.file.FileID)
+		responses <- response{result, err}
+	}()
+	<-slack.started // The first call owns the slot but has not committed.
+	<-repo.replayMiss
+	go func() {
+		result, err := svc.Get(context.Background(), "get-race", repo.file.FileID)
+		responses <- response{result, err}
+	}()
+	<-repo.replayMiss // Both calls missed replay before either can commit.
+	close(proceed)
+
+	first, second := <-responses, <-responses
+	if first.err != nil || second.err != nil {
+		t.Fatalf("errors: first=%v second=%v", first.err, second.err)
+	}
+	if slack.Downloads() != 1 {
+		t.Fatalf("downloads=%d, want 1", slack.Downloads())
+	}
+	if first.result != second.result {
+		t.Fatalf("results differ: first=%+v second=%+v", first.result, second.result)
+	}
+	if len(repo.transfers) != 1 || len(files.entries) != 1 {
+		t.Fatalf("live transfers=%d entries=%d, want 1 each", len(repo.transfers), len(files.entries))
+	}
+	transfer := repo.transfers[first.result.TransferID]
+	if first.result.Path != files.Root()+"/"+transfer.GeneratedName {
+		t.Fatalf("path=%q, want durable winner path", first.result.Path)
+	}
+}
+
 func TestGetRejectsDeclaredOversizeBeforeSlack(t *testing.T) {
 	repo := newRepository("fil_abcdefghijklmnopqrstuv", "F12345678")
 	declared := int64(11)
@@ -95,7 +140,7 @@ func TestReleaseMissingFileDeletesStaleRow(t *testing.T) {
 	}
 }
 
-func newService(t *testing.T, repo *memoryRepository, files *memoryFiles, slack *downloadSlack, c clock.Clock, max int64, count int) *Service {
+func newService(t *testing.T, repo *memoryRepository, files *memoryFiles, slack slackapi.FileTransfer, c clock.Clock, max int64, count int) *Service {
 	t.Helper()
 	svc, err := New(repo, files, slack, fixedSettings{Settings{MaximumBytes: max, MaximumLiveFiles: count, Lifetime: time.Hour}}, fixedIDs{}, c)
 	if err != nil {
@@ -116,6 +161,33 @@ type downloadSlack struct {
 	bytes     []byte
 	err       error
 	downloads int
+}
+
+type gatedDownloadSlack struct {
+	bytes   []byte
+	started chan struct{}
+	proceed chan struct{}
+
+	mu        sync.Mutex
+	downloads int
+}
+
+func (s *gatedDownloadSlack) Download(_ context.Context, _ slackapi.DownloadRequest, w io.Writer) (slackapi.File, error) {
+	s.mu.Lock()
+	s.downloads++
+	s.mu.Unlock()
+	s.started <- struct{}{}
+	<-s.proceed
+	_, err := w.Write(s.bytes)
+	return slackapi.File{}, err
+}
+func (*gatedDownloadSlack) Upload(context.Context, slackapi.UploadRequest) (slackapi.UploadResult, error) {
+	return slackapi.UploadResult{}, errors.New("unused")
+}
+func (s *gatedDownloadSlack) Downloads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.downloads
 }
 
 func (s *downloadSlack) Download(_ context.Context, _ slackapi.DownloadRequest, w io.Writer) (slackapi.File, error) {
@@ -199,11 +271,12 @@ func (m *memoryTemp) Name() string { return m.name }
 func (m *memoryTemp) Path() string { return m.path }
 
 type memoryRepository struct {
-	mu        sync.Mutex
-	file      store.SlackFile
-	transfers map[string]store.FileTemporaryTransfer
-	replay    map[string]store.FileGetRequestResult
-	failure   string
+	mu         sync.Mutex
+	file       store.SlackFile
+	transfers  map[string]store.FileTemporaryTransfer
+	replay     map[string]store.FileGetRequestResult
+	failure    string
+	replayMiss chan struct{}
 }
 
 func newRepository(id, slackID string) *memoryRepository {
@@ -222,6 +295,9 @@ func (r *memoryRepository) ReplayIncomingFileTransfer(_ context.Context, request
 	defer r.mu.Unlock()
 	v, ok := r.replay[request]
 	if !ok {
+		if r.replayMiss != nil {
+			r.replayMiss <- struct{}{}
+		}
 		return store.FileGetRequestResult{}, store.ErrFileTransferNotFound
 	}
 	if v.FileID != file {

@@ -217,20 +217,24 @@ func (s *Service) Get(ctx context.Context, requestID, fileID string) (Result, er
 		s.recordFailure(ctx, file.FileID, "file_too_large")
 		return Result{}, ErrTooLarge
 	}
-	if err := s.Cleanup(ctx); err != nil {
-		return Result{}, err
-	}
-	if err := s.ensureCapacity(ctx, cfg); err != nil {
-		return Result{}, err
-	}
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
 	}
-	// Capacity is checked again inside the slot: concurrent callers may all
-	// have passed the first check before the prior attempt committed.
+	// Recheck durable replay inside the slot. A waiter must return the winner
+	// rather than clean up, create, or download another temporary file.
+	if replay, err := s.repo.ReplayIncomingFileTransfer(ctx, requestID, file.FileID); err == nil {
+		return s.liveResult(ctx, replay)
+	} else if !errors.Is(err, store.ErrFileTransferNotFound) {
+		if errors.Is(err, store.ErrFileTransferExpired) {
+			return Result{}, ErrExpired
+		}
+		return Result{}, err
+	}
+	// Cleanup and capacity admission happen inside the slot so a concurrent Get
+	// cannot reconcile this attempt's unpublished temp before it is committed.
 	if err := s.Cleanup(ctx); err != nil {
 		return Result{}, err
 	}
@@ -280,8 +284,13 @@ func (s *Service) Get(ctx context.Context, requestID, fileID string) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	if committed.TransferID != transfer.TransferID {
+		// Another process committed the request after this attempt's replay
+		// check. The deferred cleanup removes this unpublished loser.
+		return s.liveResult(ctx, committed)
+	}
 	published = true
-	return Result{TransferID: committed.TransferID, FileID: file.FileID, Path: tmp.Path(), SizeBytes: writer.n, SHA256: digest, ExpiresAt: transfer.ExpiresAt}, nil
+	return s.liveResult(ctx, committed)
 }
 
 // Release unlinks the verified generated entry before deleting durable liveness.
@@ -314,7 +323,9 @@ func (s *Service) Cleanup(ctx context.Context) error {
 		for _, transfer := range expired {
 			err := s.files.Remove(transfer.GeneratedName)
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				continue // preserve row if a path is unsafe; never unlink blindly.
+				// Preserve the row if the path is unsafe, but make the failed
+				// expiry cleanup visible to the caller.
+				return fmt.Errorf("%w: %v", ErrUnsafeTemporary, err)
 			}
 			if err := s.repo.DeleteFileTemporaryTransfer(ctx, transfer.TransferID); err != nil && !errors.Is(err, store.ErrFileTransferNotFound) {
 				return err
@@ -366,7 +377,9 @@ func (s *Service) liveResult(ctx context.Context, replay store.FileGetRequestRes
 		return Result{}, err
 	}
 	if !transfer.ExpiresAt.After(s.clock.Now()) {
-		_ = s.Release(ctx, transfer.TransferID)
+		if err := s.Release(ctx, transfer.TransferID); err != nil {
+			return Result{}, err
+		}
 		return Result{}, ErrExpired
 	}
 	if err := s.files.Exists(transfer.GeneratedName); err != nil {
