@@ -4,9 +4,11 @@ Phase 1 connects **one configured Slack channel** to the local Mosscap ledger. I
 
 ## Slack app setup
 
-Create an app for the intended workspace and enable Socket Mode. Generate an app-level Socket Mode token (`xapp-…`) and a bot token (`xoxb-…`) for the same app. Install the app in the workspace and invite the bot to the one channel Mosscap will use.
+Import [`../slack/phase-1-public-channel-manifest.json`](../slack/phase-1-public-channel-manifest.json) in Slack's app-manifest UI for the configured public `C...` channel. The manifest enables Socket Mode, requests only its listed scopes, and subscribes only to `app_mention` and `message.channels`; it deliberately has no interactivity, slash commands, request URLs, or file-write/upload permissions. Slack's manifest UI validation is authoritative: correct any schema or scope feedback there before proceeding.
 
-Configure Event Subscriptions for Socket Mode and subscribe the bot to the message events needed for direct mentions, message changes, and message deletions. Enable the least bot scopes required by the gateway verification and operations: identity/workspace/channel inspection, channel history/replies/permalinks, `chat:write`, and reactions. Private channels require the corresponding private-channel scopes and an explicit bot invite. Treat Slack's OAuth scope display as authoritative when it requests a narrower or additional read scope.
+For one configured private `G...` channel, use the same manifest except replace only `channels:read` and `channels:history` with `groups:read` and `groups:history`, and replace `message.channels` with `message.groups`. Retain every other scope and event, including `app_mention`, unchanged. Install (or reinstall after any manifest/scope change) the app in the intended workspace, then explicitly invite the bot to the configured channel.
+
+Generate an app-level Socket Mode token (`xapp-…`) and a bot token (`xoxb-…`) for the same installed app. Do not add IM/MPIM, administrative, broad join, interactivity, or file-write/upload access for Phase 1.
 
 Record only immutable IDs, not names: channel ID is configured; workspace/team ID and bot user ID are derived from the bot token. Mosscap rejects an identity, scope, membership, or configured-channel mismatch before Socket intake becomes active.
 
