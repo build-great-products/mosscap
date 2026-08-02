@@ -24,7 +24,7 @@ func TestIncomingTransferCommitReplayExpiryAndDetachedIdentity(t *testing.T) {
 	}
 	transfer := FileTemporaryTransfer{
 		TransferID: "xfr_abcdefghijklmnopqrstuv", FileID: files[0].FileID,
-		GeneratedName: "mosscap_xfr_abcdefghijklmnopqrstuv", SizeBytes: 3,
+		GeneratedName: "mosscap-xfr-0123456789abcdef0123456789abcdef", SizeBytes: 3,
 		SHA256: strings.Repeat("a", 64), CreatedAt: time.UnixMicro(20), ExpiresAt: time.UnixMicro(30),
 	}
 	first, err := s.CommitIncomingFileTransfer(ctx, "file-get", transfer)
@@ -35,7 +35,7 @@ func TestIncomingTransferCommitReplayExpiryAndDetachedIdentity(t *testing.T) {
 	if err != nil || replay != first {
 		t.Fatalf("live replay=%+v err=%v", replay, err)
 	}
-	replayedCommit, err := s.CommitIncomingFileTransfer(ctx, "file-get", FileTemporaryTransfer{TransferID: "xfr_bcdefghijklmnopqrstuvw", FileID: files[0].FileID, GeneratedName: "mosscap_xfr_bcdefghijklmnopqrstuvw", SizeBytes: 3, SHA256: strings.Repeat("a", 64), CreatedAt: time.UnixMicro(20), ExpiresAt: time.UnixMicro(30)})
+	replayedCommit, err := s.CommitIncomingFileTransfer(ctx, "file-get", FileTemporaryTransfer{TransferID: "xfr_bcdefghijklmnopqrstuvw", FileID: files[0].FileID, GeneratedName: "mosscap-xfr-fedcba9876543210fedcba9876543210", SizeBytes: 3, SHA256: strings.Repeat("a", 64), CreatedAt: time.UnixMicro(20), ExpiresAt: time.UnixMicro(30)})
 	if err != nil || replayedCommit != first {
 		t.Fatalf("reused request=%+v err=%v", replayedCommit, err)
 	}
@@ -71,6 +71,22 @@ func TestIncomingTransferCommitReplayExpiryAndDetachedIdentity(t *testing.T) {
 	attached, err := s.ListSlackFiles(ctx, admitted.TaskID)
 	if err != nil || len(attached) != 1 || attached[0].FileID != files[0].FileID || !attached[0].SourceAttached || attached[0].SHA256 != transfer.SHA256 {
 		t.Fatalf("re-added=%+v err=%v", attached, err)
+	}
+}
+
+func TestValidTemporaryGeneratedNameContract(t *testing.T) {
+	valid := "mosscap-xfr-0123456789abcdef0123456789abcdef"
+	for _, name := range []string{
+		valid,
+		"mosscap_xfr_abcdefghijklmnopqrstuv",
+		"mosscap-xfr-0123456789ABCDEF0123456789abcdef",
+		"mosscap-xfr-0123456789abcdef0123456789abcde",
+		"mosscap-xfr-0123456789abcdef0123456789abcdef/child",
+	} {
+		want := name == valid
+		if got := validTemporaryGeneratedName(name); got != want {
+			t.Errorf("validTemporaryGeneratedName(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 

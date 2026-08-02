@@ -75,7 +75,7 @@ ALTER TABLE files_v5 RENAME TO files;
 CREATE TABLE file_temporary_transfers (
   transfer_id TEXT PRIMARY KEY CHECK (length(transfer_id) = 26 AND substr(transfer_id, 1, 4) = 'xfr_' AND substr(transfer_id, 5) NOT GLOB '*[^A-Za-z0-9_-]*'),
   file_id TEXT NOT NULL REFERENCES files(file_id) ON DELETE RESTRICT,
-  generated_name TEXT NOT NULL UNIQUE CHECK (length(generated_name) = 34 AND substr(generated_name, 1, 12) = 'mosscap_xfr_' AND substr(generated_name, 13) NOT GLOB '*[^A-Za-z0-9_-]*'),
+  generated_name TEXT NOT NULL UNIQUE CHECK (length(generated_name) = 44 AND substr(generated_name, 1, 12) = 'mosscap-xfr-' AND substr(generated_name, 13) NOT GLOB '*[^0-9a-f]*'),
   size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
   sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
   expires_at_us INTEGER NOT NULL CHECK (expires_at_us > 0),

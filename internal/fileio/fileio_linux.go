@@ -409,8 +409,12 @@ func IsGeneratedName(name string) bool {
 	if !strings.HasPrefix(name, generatedPrefix) || len(name) != len(generatedPrefix)+32 {
 		return false
 	}
-	_, err := hex.DecodeString(strings.TrimPrefix(name, generatedPrefix))
-	return err == nil
+	for i := len(generatedPrefix); i < len(name); i++ {
+		if (name[i] < '0' || name[i] > '9') && (name[i] < 'a' || name[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // PlaceOutput copies a verified generated temporary source into a 0600 random

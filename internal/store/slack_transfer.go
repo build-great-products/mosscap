@@ -321,9 +321,21 @@ func (s *Store) InsertFileTemporaryTransfer(ctx context.Context, transfer FileTe
 }
 
 func validTemporaryTransfer(transfer FileTemporaryTransfer) bool {
-	return len(transfer.TransferID) == 26 && validTypedSelector(transfer.TransferID, "xfr_") && validFullFileID(transfer.FileID) && len(transfer.GeneratedName) == 34 && strings.HasPrefix(transfer.GeneratedName, "mosscap_xfr_") && strings.IndexFunc(transfer.GeneratedName[12:], func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-')
-	}) == -1 && transfer.SizeBytes >= 0 && validSHA256(transfer.SHA256) && !transfer.CreatedAt.IsZero() && !transfer.ExpiresAt.Before(transfer.CreatedAt)
+	return len(transfer.TransferID) == 26 && validTypedSelector(transfer.TransferID, "xfr_") && validFullFileID(transfer.FileID) && validTemporaryGeneratedName(transfer.GeneratedName) && transfer.SizeBytes >= 0 && validSHA256(transfer.SHA256) && !transfer.CreatedAt.IsZero() && !transfer.ExpiresAt.Before(transfer.CreatedAt)
+}
+
+// validTemporaryGeneratedName accepts only the basename created by fileio.TempDir:
+// mosscap-xfr- followed by 32 lowercase hexadecimal characters (128 bits).
+func validTemporaryGeneratedName(name string) bool {
+	if len(name) != 44 || !strings.HasPrefix(name, "mosscap-xfr-") {
+		return false
+	}
+	for i := len("mosscap-xfr-"); i < len(name); i++ {
+		if (name[i] < '0' || name[i] > '9') && (name[i] < 'a' || name[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) GetFileTemporaryTransfer(ctx context.Context, transferID string) (FileTemporaryTransfer, error) {

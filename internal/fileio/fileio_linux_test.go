@@ -206,6 +206,22 @@ func TestSourceDeterministicMutationRaces(t *testing.T) {
 	}
 }
 
+func TestIsGeneratedNameContract(t *testing.T) {
+	valid := "mosscap-xfr-0123456789abcdef0123456789abcdef"
+	for _, name := range []string{
+		valid,
+		"mosscap_xfr_abcdefghijklmnopqrstuv",
+		"mosscap-xfr-0123456789ABCDEF0123456789abcdef",
+		"mosscap-xfr-0123456789abcdef0123456789abcde",
+		"mosscap-xfr-0123456789abcdef0123456789abcdef/child",
+	} {
+		want := name == valid
+		if got := IsGeneratedName(name); got != want {
+			t.Errorf("IsGeneratedName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestTempDirCreationVerificationAndReconciliation(t *testing.T) {
 	root := privateDir(t)
 	dir, err := OpenTempDir(root)
