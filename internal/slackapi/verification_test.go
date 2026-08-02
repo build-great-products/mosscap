@@ -89,12 +89,12 @@ func TestVerifyReportsSortedRequiredMissingScopesSafely(t *testing.T) {
 		{
 			name: "public", want: []slackapi.Scope{
 				slackapi.ScopeAppMentionsRead, slackapi.ScopeChannelsHistory, slackapi.ScopeChannelsRead,
-				slackapi.ScopeFilesRead, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeTeamRead, slackapi.ScopeUsersRead,
+				slackapi.ScopeFilesRead, slackapi.ScopeFilesWrite, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeTeamRead, slackapi.ScopeUsersRead,
 			},
 		},
 		{
 			name: "private", private: true, want: []slackapi.Scope{
-				slackapi.ScopeAppMentionsRead, slackapi.ScopeFilesRead, slackapi.ScopeGroupsHistory,
+				slackapi.ScopeAppMentionsRead, slackapi.ScopeFilesRead, slackapi.ScopeFilesWrite, slackapi.ScopeGroupsHistory,
 				slackapi.ScopeGroupsRead, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeTeamRead, slackapi.ScopeUsersRead,
 			},
 		},

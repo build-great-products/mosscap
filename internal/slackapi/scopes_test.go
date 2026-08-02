@@ -8,7 +8,7 @@ import (
 func TestRequiredAndMissingScopes(t *testing.T) {
 	public := RequiredBotScopes(false)
 	private := RequiredBotScopes(true)
-	if len(public) != 9 || len(private) != 9 {
+	if len(public) != 10 || len(private) != 10 {
 		t.Fatalf("scope counts public=%d private=%d", len(public), len(private))
 	}
 	missing, err := MissingScopes(

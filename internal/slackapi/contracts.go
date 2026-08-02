@@ -1,6 +1,9 @@
 package slackapi
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Web is the SDK-free subset of Slack Web API operations required by Phase 1.
 // Implementations must return bounded DTOs and classified, secret-safe errors.
@@ -24,6 +27,55 @@ type Web interface {
 // Open means the candidate transport is ready to receive envelopes.
 type Socket interface {
 	Open(context.Context) (EnvelopeStream, error)
+}
+
+// FileTransfer is the deliberately small file-byte boundary. It owns fresh
+// Slack metadata lookup, bounded download redirects, and Slack's external
+// three-step upload protocol. File bytes and authenticated URLs never cross
+// this contract except as streaming readers/writers.
+type FileTransfer interface {
+	Download(context.Context, DownloadRequest, io.Writer) (File, error)
+	Upload(context.Context, UploadRequest) (UploadResult, error)
+}
+
+// DownloadRequest identifies one admitted Slack file and its immutable byte
+// limit. The writer is owned by the caller and receives at most limit+1 bytes
+// so it can distinguish a streamed overrun without unbounded allocation.
+type DownloadRequest struct {
+	FileID       string
+	MaximumBytes int64
+}
+
+// UploadSource is one prepared local file. Validate is invoked after its bytes
+// have staged and before completion; a validation failure must prevent any
+// completion request. Reader is consumed exactly once.
+type UploadSource struct {
+	Name          string
+	SizeBytes     int64
+	Reader        io.Reader
+	ValidateAfter func(context.Context) error
+}
+
+// UploadRequest is one ordered file operation for the active, already
+// verified channel. It deliberately has no team or arbitrary destination.
+type UploadRequest struct {
+	ChannelID      string
+	ThreadTS       Timestamp
+	InitialComment string
+	Files          []UploadSource
+}
+
+// UploadedFile is completion evidence for one reserved file.
+type UploadedFile struct {
+	ID         string
+	Permalink  string
+	Diagnostic DiagnosticCode
+}
+
+// UploadResult is conclusive only when Files exactly matches the reservation
+// count and order.
+type UploadResult struct {
+	Files []UploadedFile
 }
 
 // EnvelopeStream emits normalized envelopes. Exactly one Receive may be active

@@ -14,6 +14,7 @@ const (
 	ScopeUsersRead        Scope = "users:read"
 	ScopeTeamRead         Scope = "team:read"
 	ScopeFilesRead        Scope = "files:read"
+	ScopeFilesWrite       Scope = "files:write"
 	ScopeChannelsRead     Scope = "channels:read"
 	ScopeChannelsHistory  Scope = "channels:history"
 	ScopeGroupsRead       Scope = "groups:read"
@@ -54,6 +55,7 @@ func RequiredBotScopes(privateChannel bool) []Scope {
 		ScopeUsersRead,
 		ScopeTeamRead,
 		ScopeFilesRead,
+		ScopeFilesWrite,
 	}
 	if privateChannel {
 		required = append(required, ScopeGroupsRead, ScopeGroupsHistory)

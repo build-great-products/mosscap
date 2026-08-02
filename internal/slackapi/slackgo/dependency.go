@@ -10,6 +10,7 @@ const sdkVersion = "v0.27.0"
 func Version() string { return "slack-go/" + sdkVersion }
 
 var (
-	_ slackapi.Web    = (*Web)(nil)
-	_ slackapi.Socket = (*Socket)(nil)
+	_ slackapi.Web          = (*Web)(nil)
+	_ slackapi.FileTransfer = (*Web)(nil)
+	_ slackapi.Socket       = (*Socket)(nil)
 )
