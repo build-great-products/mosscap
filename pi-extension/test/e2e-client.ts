@@ -1,4 +1,5 @@
 import { GatewayClient } from "../src/client.ts";
+import { isWork } from "../src/types.ts";
 
 const endpoint = process.argv[2];
 if (!endpoint) throw new Error("endpoint required");
@@ -6,7 +7,7 @@ const session = "node-e2e-session";
 const client = new GatewayClient({ endpoint, timeoutMs: 3_000 });
 const open = await client.deliveryOpen(session, []);
 const poll = await client.poll();
-if (!poll.work) throw new Error("expected delivery work");
+if (!poll.work || !isWork(poll.work)) throw new Error("expected valid delivery work");
 await client.inserting(poll.work.delivery_id, poll.work.delivery_key);
 await client.persisted(poll.work.delivery_id, poll.work.delivery_key);
 await client.close();

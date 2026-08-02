@@ -7,6 +7,7 @@ Use this document to record evidence that may change [`docs/SPEC.md`](../SPEC.md
 ## Automated implementation note
 
 - The source-loaded extension pins Pi development types to `@earendil-works/pi-coding-agent` `0.83.0`; automated fake timing tests cover post-handler persistence scanning and no live Slack, gateway, provider, or manual Pi trial was run. The Phase 2 manual trial remains required and is not claimed as passed.
+- The extension task-ID gate matches Go generation exactly: `tsk_` plus 22 raw-base64url characters. The adjacent delivery selectors and store task selectors already accept that alphabet. The older generic Phase 1 protocol selector remains lowercase-only for optional task metadata on Slack effect/file operations; it is outside the Pi delivery poll/evidence/recovery path and is deliberately not changed by this focused repair.
 
 ## Workflow observations
 

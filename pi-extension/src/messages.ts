@@ -1,4 +1,4 @@
-import { byteLength, isDeliveryID, isDeliveryKey, isDetails, maxObservations, maxTaskTextBytes, type DeliveryDetails, type Observation, type Work } from "./types.ts";
+import { byteLength, isDeliveryID, isDeliveryKey, isDetails, isTaskID, maxObservations, maxTaskTextBytes, type DeliveryDetails, type Observation, type Work } from "./types.ts";
 
 export type SessionEntryLike = { type?: unknown; customType?: unknown; details?: unknown };
 export type CustomMessage = { customType: "mosscap.task"; display: true; content: string; details: DeliveryDetails };
@@ -18,7 +18,7 @@ export function hasDelivery(entries: readonly SessionEntryLike[], details: Deliv
 }
 export function validateWork(work: Work): string | undefined {
   if (byteLength(work.task_text) > maxTaskTextBytes) return "oversized_task";
-  if (!isDeliveryID(work.delivery_id) || !isDeliveryKey(work.delivery_key)) return "invalid_delivery_work";
+  if (!isDeliveryID(work.delivery_id) || !isDeliveryKey(work.delivery_key) || !isTaskID(work.task_id)) return "invalid_delivery_work";
   if (work.source.kind === "slack" && (!work.source.slack_author_id || !work.source.slack_message_ts || !work.source.slack_thread_ts)) return "invalid_delivery_work";
   return undefined;
 }
