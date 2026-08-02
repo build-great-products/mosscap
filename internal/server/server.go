@@ -17,6 +17,7 @@ import (
 
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/doctor"
+	"github.com/stayradiated/mosscap/internal/pidelivery"
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/securepath"
 	"github.com/stayradiated/mosscap/internal/slackapi"
@@ -70,6 +71,8 @@ type Server struct {
 	active         map[*net.UnixConn]context.CancelFunc
 	started        time.Time
 	connections    atomic.Int32
+	connectionIDs  atomic.Int64
+	piDelivery     *pidelivery.Coordinator
 	activeConfig   atomic.Pointer[config.Config]
 	generation     atomic.Int64
 	reloadMu       sync.Mutex
@@ -187,6 +190,11 @@ func (s *Server) open(ctx context.Context) error {
 		return err
 	}
 	s.store = db
+	s.piDelivery = pidelivery.New(db)
+	// Delivery uncertainty is reconciled before the endpoint is reachable.
+	if _, err := s.piDelivery.Recover(ctx); err != nil {
+		return err
+	}
 	// Reconcile uncertainty before any prepared effect can be submitted, then
 	// verify Socket readiness before making the local endpoint reachable.
 	if err := s.startSlack(ctx, c); err != nil {
@@ -300,6 +308,10 @@ func (s *Server) shutdown() {
 			_ = s.listener.Close()
 		}
 		s.admissionMu.Unlock()
+		// An opened extension intentionally has no idle deadline. Close active
+		// sockets now so their deferred delivery reconciliation completes before
+		// the ledger is retired, rather than waiting for the normal grace period.
+		s.closeActive()
 		done := make(chan struct{})
 		go func() { s.wg.Wait(); close(done) }()
 		select {
@@ -350,6 +362,12 @@ func (s *Server) closeActive() {
 	}
 }
 
+type connectionState struct {
+	connectionID string
+	clientKind   string
+	opened       bool
+}
+
 func (s *Server) handle(c *net.UnixConn) {
 	s.connections.Add(1)
 	defer s.connections.Add(-1)
@@ -358,7 +376,11 @@ func (s *Server) handle(c *net.UnixConn) {
 	s.activeMu.Lock()
 	s.active[c] = cancel
 	s.activeMu.Unlock()
+	state := &connectionState{connectionID: fmt.Sprintf("connection-%d", s.connectionIDs.Add(1))}
 	defer func() {
+		if s.piDelivery != nil {
+			_, _ = s.piDelivery.Close(context.Background(), state.connectionID)
+		}
 		s.activeMu.Lock()
 		delete(s.active, c)
 		s.activeMu.Unlock()
@@ -370,7 +392,11 @@ func (s *Server) handle(c *net.UnixConn) {
 	codec := protocol.NewCodec(c, c, uint32(active.LocalProtocolMaximumFrame))
 	hello := false
 	for {
-		_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+		if state.opened {
+			_ = c.SetDeadline(time.Time{})
+		} else {
+			_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+		}
 		payload, err := codec.ReadFrame()
 		if err != nil {
 			return
@@ -393,11 +419,18 @@ func (s *Server) handle(c *net.UnixConn) {
 			if r.Command != "hello" {
 				response = protocol.NewErrorResponse(r.RequestID, s.Version, "hello_required", "usage", "hello is required", false)
 			} else {
-				response = s.dispatch(ctx, r)
+				response = s.dispatchConnection(ctx, r, state)
 				hello = response.Error == nil
+				if hello {
+					state.clientKind = r.ClientKind
+				}
 			}
+		} else if r.Command == "hello" {
+			response = protocol.NewErrorResponse(r.RequestID, s.Version, "hello_already_completed", "conflict", "hello already completed", false)
+		} else if r.ClientKind != state.clientKind {
+			response = protocol.NewErrorResponse(r.RequestID, s.Version, "client_kind_changed", "conflict", "client kind is bound to this connection", false)
 		} else {
-			response = s.dispatch(ctx, r)
+			response = s.dispatchConnection(ctx, r, state)
 		}
 		out, err := protocol.EncodeResponse(response)
 		if err != nil {
@@ -408,7 +441,14 @@ func (s *Server) handle(c *net.UnixConn) {
 		}
 	}
 }
+
+// dispatch supports direct unit tests. Socket connections use dispatchConnection
+// so their hello/client/session ownership is enforced.
 func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Response {
+	return s.dispatchConnection(ctx, r, nil)
+}
+
+func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, connection *connectionState) protocol.Response {
 	// Reload needs exclusive ownership while it replaces the live SQLite pool.
 	// Every other dispatch holds a read lock so it cannot observe a half-swapped
 	// store or configuration snapshot.
@@ -428,13 +468,130 @@ func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Resp
 	resultType := ""
 	var result any
 	var err error
+	if connection != nil {
+		extensionCommand := r.Command == "delivery.open" || r.Command == "delivery.poll" || r.Command == "delivery.inserting" || r.Command == "delivery.persisted" || r.Command == "delivery.rejected" || r.Command == "delivery.close"
+		operatorCommand := r.Command == "delivery.list" || r.Command == "delivery.inspect" || r.Command == "delivery.requeue"
+		if extensionCommand && connection.clientKind != "extension" {
+			return protocol.NewErrorResponse(r.RequestID, s.Version, "extension_client_required", "unsafe", "delivery extension command requires extension client", false)
+		}
+		if operatorCommand && connection.clientKind != "cli" {
+			return protocol.NewErrorResponse(r.RequestID, s.Version, "operator_client_required", "unsafe", "delivery operator command requires CLI client", false)
+		}
+		if extensionCommand && r.Command != "delivery.open" && !connection.opened {
+			return protocol.NewErrorResponse(r.RequestID, s.Version, "delivery_open_required", "conflict", "delivery open is required", false)
+		}
+		if connection.clientKind == "extension" && !extensionCommand && r.Command != "status.get" {
+			return protocol.NewErrorResponse(r.RequestID, s.Version, "operator_client_required", "unsafe", "operator command requires CLI client", false)
+		}
+	}
 	switch r.Command {
 	case "hello":
 		resultType = "hello"
-		result = protocol.HelloResult{SelectedVersion: protocol.Version, Capabilities: protocol.ServerCapabilities}
+		capabilities := append([]string(nil), protocol.ServerCapabilities...)
+		capabilities = append(capabilities, protocol.CapabilityPiDeliveryMVP)
+		result = protocol.HelloResult{SelectedVersion: protocol.Version, Capabilities: capabilities}
 	case "status.get":
 		resultType = "gateway_status"
 		result, err = s.status(ctx)
+	case "delivery.open":
+		var p protocol.DeliveryOpenParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "delivery_open"
+		if s.piDelivery == nil || connection == nil {
+			err = errors.New("Pi delivery coordinator is unavailable")
+			break
+		}
+		observed := make([]store.DeliveryObservation, len(p.Observed))
+		for i, item := range p.Observed {
+			observed[i] = store.DeliveryObservation{DeliveryID: item.DeliveryID, DeliveryKey: item.DeliveryKey}
+		}
+		var counts store.DeliveryCounts
+		counts, err = s.piDelivery.Open(ctx, r.RequestID, connection.connectionID, p.PiSessionID, observed)
+		if err == nil {
+			connection.opened = true
+			result = protocol.DeliveryOpenDTO{PiSessionID: p.PiSessionID, DeliveryCountsDTO: deliveryCountsDTO(counts)}
+		}
+	case "delivery.poll":
+		resultType = "delivery_poll"
+		var work *store.DeliveryWork
+		var counts store.DeliveryCounts
+		if s.piDelivery == nil || connection == nil {
+			err = errors.New("Pi delivery coordinator is unavailable")
+		} else {
+			work, counts, err = s.piDelivery.Poll(ctx, connection.connectionID)
+			if err == nil {
+				result = protocol.DeliveryPollDTO{Work: deliveryWorkDTO(work), DeliveryCountsDTO: deliveryCountsDTO(counts)}
+			}
+		}
+	case "delivery.inserting", "delivery.persisted", "delivery.rejected":
+		resultType = "delivery"
+		var id, key, diagnostic string
+		switch r.Command {
+		case "delivery.inserting", "delivery.persisted":
+			var p protocol.DeliveryInsertingParams
+			_ = json.Unmarshal(r.Params, &p)
+			id, key = p.DeliveryID, p.DeliveryKey
+		case "delivery.rejected":
+			var p protocol.DeliveryRejectedParams
+			_ = json.Unmarshal(r.Params, &p)
+			id, key, diagnostic = p.DeliveryID, p.DeliveryKey, p.DiagnosticCode
+		}
+		var delivery store.Delivery
+		if s.piDelivery == nil || connection == nil {
+			err = errors.New("Pi delivery coordinator is unavailable")
+		} else if r.Command == "delivery.inserting" {
+			delivery, err = s.piDelivery.Inserting(ctx, r.RequestID, connection.connectionID, id, key)
+		} else if r.Command == "delivery.persisted" {
+			delivery, err = s.piDelivery.Persisted(ctx, r.RequestID, connection.connectionID, id, key)
+		} else {
+			delivery, err = s.piDelivery.Rejected(ctx, r.RequestID, connection.connectionID, id, key, diagnostic)
+		}
+		if err == nil {
+			result = deliveryDTO(delivery)
+		}
+	case "delivery.close":
+		resultType = "delivery_close"
+		if s.piDelivery == nil || connection == nil {
+			err = errors.New("Pi delivery coordinator is unavailable")
+		} else {
+			_, err = s.piDelivery.Close(ctx, connection.connectionID)
+			if err == nil {
+				connection.opened = false
+				result = protocol.EmptyParams{}
+			}
+		}
+	case "delivery.list":
+		var p protocol.DeliveryListParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "delivery_list"
+		var state *store.DeliveryState
+		if p.State != nil {
+			v := store.DeliveryState(*p.State)
+			state = &v
+		}
+		var deliveries []store.Delivery
+		deliveries, err = s.store.ListDeliveries(ctx, state, p.Limit)
+		if err == nil {
+			result = protocol.DeliveryListDTO{Deliveries: deliveryDTOs(deliveries)}
+		}
+	case "delivery.inspect":
+		var p protocol.DeliverySelector
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "delivery"
+		var delivery store.Delivery
+		delivery, err = s.store.GetDelivery(ctx, p.Delivery)
+		if err == nil {
+			result = deliveryDTO(delivery)
+		}
+	case "delivery.requeue":
+		var p protocol.DeliveryRequeueParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "delivery_requeue"
+		var delivery store.Delivery
+		delivery, err = s.store.RequeueDelivery(ctx, r.RequestID, p.Delivery, p.Reason)
+		if err == nil {
+			result = protocol.DeliveryRequeueDTO{Delivery: deliveryDTO(delivery), DuplicateInsertionPossible: true}
+		}
 	case "doctor.run":
 		resultType = "doctor_report"
 		checks := s.store.Doctor(ctx)
@@ -635,6 +792,15 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 			_ = replacement.Close()
 		}
 	}
+	if replacement != nil && s.piDelivery != nil && prepareErr == nil {
+		// Reconcile against the old ledger before a replacement can be published
+		// or the old SQLite handle is closed.
+		if _, err := s.piDelivery.ReconcileActive(ctx); err != nil {
+			cleanupCandidate()
+			return protocol.ConfigReloadDTO{}, err
+		}
+		s.closeActive()
+	}
 	result, replay, err := s.store.ReloadConfig(ctx, requestID, digest, func() (store.ConfigReloadResult, error) {
 		if prepareErr != nil {
 			return store.ConfigReloadResult{}, prepareErr
@@ -656,6 +822,9 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 	s.store, s.runtime, s.ingest, s.slackState = replacement, candidateRuntime, candidateIngest, candidateState
 	if replacement == nil {
 		s.store = oldStore
+	}
+	if s.piDelivery != nil {
+		s.piDelivery.ReplaceStore(s.store)
 	}
 	s.activeConfig.Store(&candidate)
 	s.activeDigest = digest
@@ -698,7 +867,17 @@ func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
 	if err != nil {
 		return status.Snapshot{}, err
 	}
-	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "available", SlackCapability: string(s.slackState), PiCapability: "not_implemented", Slack: slack}, nil
+	piCapability := "not_implemented"
+	pi := status.PiDeliveryStatus{}
+	if s.piDelivery != nil {
+		piCapability = "available"
+		current, err := s.piDelivery.Status(ctx)
+		if err != nil {
+			return status.Snapshot{}, err
+		}
+		pi = status.PiDeliveryStatus{ActivePiSessionID: current.ActivePiSessionID, Pending: current.Pending, Inserting: current.Inserting, Persisted: current.Persisted, Uncertain: current.Uncertain, Rejected: current.Rejected}
+	}
+	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "available", SlackCapability: string(s.slackState), PiCapability: piCapability, PiDelivery: pi, Slack: slack}, nil
 }
 func fileSize(path string) (int64, error) {
 	info, err := os.Stat(path)
@@ -720,13 +899,20 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "ambiguous", "ambiguous"
 	case errors.Is(err, store.ErrRequestConflict):
 		code, category = "request_id_conflict", "conflict"
+	case errors.Is(err, store.ErrDeliveryNotFound):
+		code, category = "delivery_not_found", "not_found"
+	case errors.Is(err, store.ErrDeliveryOwnership), errors.Is(err, store.ErrDeliveryTransition), errors.Is(err, store.ErrDeliveryRequeueDenied), errors.Is(err, pidelivery.ErrNotOpen), errors.Is(err, pidelivery.ErrSessionBound):
+		code, category = "delivery_conflict", "conflict"
 	case errors.Is(err, slackops.ErrUnavailable), errors.Is(err, slackruntime.ErrClosed):
 		code, category = "slack_unavailable", "unavailable"
 	default:
 		var failure *slackops.FailureError
 		var reload *reloadError
 		var durableReload *store.ConfigReloadError
-		if errors.As(err, &failure) {
+		var active *pidelivery.ActiveSessionError
+		if errors.As(err, &active) {
+			return protocol.Response{ProtocolVersion: protocol.Version, RequestID: id, ServerVersion: version, Error: &protocol.Error{Code: "pi_session_active", Category: "conflict", Message: "another Pi delivery session is active", Retriable: false, Details: map[string]string{"active_pi_session_id": active.PiSessionID}}}
+		} else if errors.As(err, &failure) {
 			if failure.State == store.SlackEffectAmbiguous {
 				code, category = "ambiguous_external_outcome", "ambiguous"
 			} else {
@@ -770,6 +956,42 @@ func dto(v any) any {
 	default:
 		return v
 	}
+}
+func deliveryCountsDTO(c store.DeliveryCounts) protocol.DeliveryCountsDTO {
+	return protocol.DeliveryCountsDTO{EligibleBacklogCount: c.Eligible, UncertainCount: c.Uncertain, RejectedCount: c.Rejected}
+}
+func deliveryDTO(d store.Delivery) protocol.DeliveryDTO {
+	out := protocol.DeliveryDTO{DeliveryID: d.ID, TaskID: d.TaskID, TaskVersion: d.TaskVersion, PiSessionID: d.PiSessionID, DeliveryKey: d.DeliveryKey, PredecessorDeliveryID: d.PredecessorDeliveryID, State: string(d.State), DiagnosticCode: d.DiagnosticCode, RequeueReason: d.RequeueReason, CreatedAt: stamp(d.CreatedAt), UpdatedAt: stamp(d.UpdatedAt)}
+	if d.OfferedAt != nil {
+		v := stamp(*d.OfferedAt)
+		out.OfferedAt = &v
+	}
+	if d.InsertingAt != nil {
+		v := stamp(*d.InsertingAt)
+		out.InsertingAt = &v
+	}
+	if d.CompletedAt != nil {
+		v := stamp(*d.CompletedAt)
+		out.CompletedAt = &v
+	}
+	return out
+}
+func deliveryDTOs(deliveries []store.Delivery) []protocol.DeliveryDTO {
+	out := make([]protocol.DeliveryDTO, len(deliveries))
+	for i := range deliveries {
+		out[i] = deliveryDTO(deliveries[i])
+	}
+	return out
+}
+func deliveryWorkDTO(work *store.DeliveryWork) *protocol.DeliveryWorkDTO {
+	if work == nil {
+		return nil
+	}
+	out := &protocol.DeliveryWorkDTO{DeliveryID: work.Delivery.ID, DeliveryKey: work.Delivery.DeliveryKey, TaskID: work.Task.ID, TaskVersion: work.Task.Version, TaskState: string(work.Task.State), TaskText: work.Task.Text, SourceKind: work.Task.SourceKind}
+	if work.Slack != nil {
+		out.SlackSource = &protocol.DeliverySlackSourceDTO{AuthorUserID: work.Slack.AuthorUserID, MessageTS: work.Slack.MessageTS, ThreadTS: work.Slack.ThreadTS}
+	}
+	return out
 }
 func taskDTOs(tasks []store.Task) []protocol.TaskDTO {
 	a := make([]protocol.TaskDTO, len(tasks))
