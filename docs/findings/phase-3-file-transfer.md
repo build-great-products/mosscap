@@ -1,26 +1,26 @@
 # Phase 3 file-transfer trial findings
 
-**Status: PARTIALLY EXECUTED.** The manual trial confirmed one real Slack outgoing upload and passed the restart/no-replay check. The incoming path has not been exercised.
+**Status: PASSED.** The authorized manual trial confirmed real outgoing upload, incoming retrieval/output placement, persisted Pi attachment delivery, and restart/no-replay behavior.
 
 ## Safe record fields
 
 - Date/time: not retained in this durable finding
 - Revision under test: not retained in this durable finding
-- Automated-gate result: not recorded by this partial manual trial
-- Disposable environment label (no path): not recorded
-- Gateway/status/doctor result: sufficient for the confirmed outgoing upload; detailed diagnostics not retained
-- Incoming `fil_…` ID and retrieval result: UNEXECUTED — no fresh trusted direct mention with an attachment was available
-- Output-placement result: UNEXECUTED — depends on incoming retrieval
-- Pi session acceptance result: UNEXECUTED — depends on incoming admission and output placement
+- Automated-gate result: PASS — Go, race, vet, build, extension test/typecheck, and diff gates passed
+- Disposable environment label (no path): isolated disposable environment removed after review
+- Gateway/status/doctor result: PASS — connected/healthy gateway and doctor checks before/after operations
+- Incoming `fil_…` ID and retrieval result: PASS — one admitted attachment retrieved only by explicit `file get`; temporary mode/hash/size checks passed
+- Output-placement result: PASS — safe output placement matched hash/size, used mode `0600`, left no staging residue, and non-forced repeat conflicted
+- Pi session acceptance result: PASS — real Pi 0.83 persisted-TUI opt-in showed one metadata-only attachment delivery; reconnect deduplicated; explicit opt-off passed
 - Outgoing `fil_…`/effect ID and result: PASS — one real Slack outgoing upload confirmed (effect ID intentionally not retained)
 - Restart/no-replay result: PASS — restart completed without replaying the confirmed outgoing effect
 - Credential-redaction result: PASS — no credentials or tokens retained here
 - Durable private-transfer-URL/file-byte exclusion result: PASS — no private Slack transfer URLs or raw file bytes retained here
-- Overall pass/fail: PARTIAL PASS — outgoing upload and restart/no-replay passed; incoming coverage remains unexecuted
+- Overall pass/fail: PASS
 
 Never record credentials or tokens. Do not copy authenticated/private Slack transfer URLs or raw file payload bytes into this durable finding; record only whether their transient lifecycle passed. Local filenames, paths, hashes, ordinary diagnostics, non-sensitive IDs/states/counts, and pass/fail outcomes do not require redaction. Exact paths may also appear in configured model context.
 
 ## Deviations, failures, and follow-up
 
-- Incoming admission, retrieval, output placement, and Pi session acceptance are blocked pending a future fresh trusted direct mention containing one harmless attachment.
-- Do not infer incoming-path coverage from this outgoing-only partial trial.
+- Early attempts used the wrong workspace user identity for isolated trust and were not admitted. The final fresh direct mention used the derived isolated-workspace human author and completed the incoming acceptance.
+- No outstanding Phase 3 file-transfer acceptance deviation.
