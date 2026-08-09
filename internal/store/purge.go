@@ -11,9 +11,16 @@ import (
 	"github.com/stayradiated/mosscap/internal/identity"
 )
 
-// PurgeBatchSize bounds each irreversible metadata transaction. This store-only
-// increment deliberately does not remove temporary bytes or their rows.
-const PurgeBatchSize = 100
+// This store-only increment deliberately does not remove temporary bytes or
+// their rows.
+const (
+	// PurgeBatchSize is the total root and dependent-row deletion budget for
+	// one confirmed invocation. It is deliberately not a per-table limit.
+	PurgeBatchSize = 100
+	// PurgeRootLimit independently caps the number of root candidates, even
+	// when their dependent graphs are tiny.
+	PurgeRootLimit = 100
+)
 
 // PurgeCounts is deliberately keyed to the durable tables in schema version 5.
 type PurgeCounts struct {
@@ -95,16 +102,17 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 	}
 
 	out := PurgeResult{Cutoff: cutoff}
-	if err := purgeTasks(ctx, conn, cutoffUS, &out); err != nil {
+	budget := purgeBudget{rows: PurgeBatchSize, roots: PurgeRootLimit}
+	if err := purgeTasks(ctx, conn, cutoffUS, &budget, &out); err != nil {
 		return PurgeResult{}, err
 	}
-	if err := purgeStandaloneEffects(ctx, conn, cutoffUS, &out); err != nil {
+	if err := purgeStandaloneEffects(ctx, conn, cutoffUS, &budget, &out); err != nil {
 		return PurgeResult{}, err
 	}
-	if err := purgeUnlinkedSources(ctx, conn, cutoffUS, &out); err != nil {
+	if err := purgeUnlinkedSources(ctx, conn, cutoffUS, &budget, &out); err != nil {
 		return PurgeResult{}, err
 	}
-	if err := purgeRequests(ctx, conn, cutoffUS, requestID, &out); err != nil {
+	if err := purgeRequests(ctx, conn, cutoffUS, requestID, &budget, &out); err != nil {
 		return PurgeResult{}, err
 	}
 	raw, err := json.Marshal(out)
@@ -128,8 +136,28 @@ type purgeConn interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, out *PurgeResult) error {
-	rows, err := q.QueryContext(ctx, "SELECT task_id FROM tasks WHERE state='done' AND done_at < ? ORDER BY done_at,task_id LIMIT ?", cutoff, PurgeBatchSize)
+type purgeBudget struct{ rows, roots int64 }
+
+func (b *purgeBudget) take(rows int64) bool {
+	if rows < 1 || rows > b.rows || b.roots < 1 {
+		return false
+	}
+	b.rows -= rows
+	b.roots--
+	return true
+}
+func (b purgeBudget) candidates() int64 {
+	if b.roots < b.rows {
+		return b.roots
+	}
+	return b.rows
+}
+
+func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
+	if budget.candidates() == 0 {
+		return nil
+	}
+	rows, err := q.QueryContext(ctx, "SELECT task_id FROM tasks WHERE state='done' AND done_at < ? ORDER BY done_at,task_id LIMIT ?", cutoff, budget.candidates())
 	if err != nil {
 		return err
 	}
@@ -139,14 +167,14 @@ func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, out *PurgeResult
 		if err := rows.Scan(&id); err != nil {
 			return err
 		}
-		if err := purgeTask(ctx, q, id, cutoff, out); err != nil {
+		if err := purgeTask(ctx, q, id, cutoff, budget, out); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, out *PurgeResult) error {
+func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
 	var eligible bool
 	if err := q.QueryRowContext(ctx, "SELECT state='done' AND done_at < ? FROM tasks WHERE task_id=?", cutoff, taskID).Scan(&eligible); errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -186,7 +214,28 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, ou
 		out.Skipped.Tasks++
 		return nil
 	}
+	rows, err := taskGraphRows(ctx, q, taskID)
+	if err != nil {
+		return err
+	}
+	if !budget.take(rows) {
+		out.Skipped.Tasks++
+		return nil
+	}
 	return deleteTaskGraph(ctx, q, taskID, out)
+}
+
+func taskGraphRows(ctx context.Context, q purgeConn, taskID string) (int64, error) {
+	var rows int64
+	err := q.QueryRowContext(ctx, `SELECT
+		1 +
+		(SELECT count(*) FROM files WHERE related_task_id=?) +
+		(SELECT count(*) FROM slack_task_sources WHERE task_id=?) +
+		(SELECT count(*) FROM task_state_events WHERE task_id=?) +
+		(SELECT count(*) FROM slack_source_events WHERE task_id=?) +
+		(SELECT count(*) FROM pi_deliveries WHERE task_id=?) +
+		(SELECT count(*) FROM slack_effects WHERE related_task_id=?)`, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&rows)
+	return rows, err
 }
 
 func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *PurgeResult) error {
@@ -225,8 +274,11 @@ func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *Purge
 	return nil
 }
 
-func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, out *PurgeResult) error {
-	rows, err := q.QueryContext(ctx, "SELECT effect_id FROM slack_effects WHERE related_task_id IS NULL AND state='confirmed' AND completed_at_us < ? ORDER BY completed_at_us,effect_id LIMIT ?", cutoff, PurgeBatchSize)
+func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
+	if budget.candidates() == 0 {
+		return nil
+	}
+	rows, err := q.QueryContext(ctx, "SELECT effect_id FROM slack_effects WHERE related_task_id IS NULL AND state='confirmed' AND completed_at_us < ? ORDER BY completed_at_us,effect_id LIMIT ?", cutoff, budget.candidates())
 	if err != nil {
 		return err
 	}
@@ -245,6 +297,14 @@ func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, out 
 			out.Skipped.SlackEffects++
 			continue
 		}
+		var fileRows int64
+		if err := q.QueryRowContext(ctx, "SELECT count(*) FROM files WHERE related_effect_id=?", id).Scan(&fileRows); err != nil {
+			return err
+		}
+		if !budget.take(1 + fileRows) {
+			out.Skipped.SlackEffects++
+			continue
+		}
 		if n, err := deleteCount(ctx, q, "DELETE FROM files WHERE related_effect_id=?", id); err != nil {
 			return err
 		} else {
@@ -259,22 +319,56 @@ func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, out 
 	return rows.Err()
 }
 
-func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, out *PurgeResult) error {
+func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
 	const results = "'duplicate','ignored_workspace','ignored_channel','ignored_untrusted','ignored_unmentioned','ignored_bot','ignored_stale','ignored_untracked','malformed'"
-	n, err := deleteCount(ctx, q, "DELETE FROM slack_source_events WHERE source_event_id IN (SELECT source_event_id FROM slack_source_events WHERE task_id IS NULL AND admission_result IN ("+results+") AND committed_at_us < ? ORDER BY committed_at_us,source_event_id LIMIT ?)", cutoff, PurgeBatchSize)
+	if budget.candidates() == 0 {
+		return nil
+	}
+	rows, err := q.QueryContext(ctx, "SELECT source_event_id FROM slack_source_events WHERE task_id IS NULL AND admission_result IN ("+results+") AND committed_at_us < ? ORDER BY committed_at_us,source_event_id LIMIT ?", cutoff, budget.candidates())
 	if err != nil {
 		return err
 	}
-	out.Removed.SlackSourceEvents += n
-	return nil
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		if !budget.take(1) {
+			break
+		}
+		n, err := deleteCount(ctx, q, "DELETE FROM slack_source_events WHERE source_event_id=?", id)
+		if err != nil {
+			return err
+		}
+		out.Removed.SlackSourceEvents += n
+	}
+	return rows.Err()
 }
-func purgeRequests(ctx context.Context, q purgeConn, cutoff int64, requestID string, out *PurgeResult) error {
-	n, err := deleteCount(ctx, q, "DELETE FROM mutation_requests WHERE request_id IN (SELECT request_id FROM mutation_requests WHERE request_id<>? AND expiry_eligible_at < ? ORDER BY expiry_eligible_at,request_id LIMIT ?)", requestID, cutoff, PurgeBatchSize)
+func purgeRequests(ctx context.Context, q purgeConn, cutoff int64, requestID string, budget *purgeBudget, out *PurgeResult) error {
+	if budget.candidates() == 0 {
+		return nil
+	}
+	rows, err := q.QueryContext(ctx, "SELECT request_id FROM mutation_requests WHERE request_id<>? AND expiry_eligible_at < ? ORDER BY expiry_eligible_at,request_id LIMIT ?", requestID, cutoff, budget.candidates())
 	if err != nil {
 		return err
 	}
-	out.Removed.MutationRequests += n
-	return nil
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		if !budget.take(1) {
+			break
+		}
+		n, err := deleteCount(ctx, q, "DELETE FROM mutation_requests WHERE request_id=?", id)
+		if err != nil {
+			return err
+		}
+		out.Removed.MutationRequests += n
+	}
+	return rows.Err()
 }
 func deleteCount(ctx context.Context, q purgeConn, query string, args ...any) (int64, error) {
 	r, err := q.ExecContext(ctx, query, args...)

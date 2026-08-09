@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -72,6 +73,85 @@ func TestConfirmMetadataPurgeRetainsNonFinalizedOrUnknownCompletionDelivery(t *t
 			assertPurgeIntegrity(t, s)
 		})
 	}
+}
+
+func TestConfirmMetadataPurgeCapsAllRootsInOneInvocation(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	for i := 0; i < PurgeBatchSize+1; i++ {
+		id := fmt.Sprintf("source-bounded-%03d", i)
+		if _, err := s.DB().Exec(`INSERT INTO slack_source_events(source_event_id,event_kind,received_at_us,committed_at_us,admission_result,task_version,changed,last_seen_at_us) VALUES(?,'message',?,?, 'duplicate',0,0,?)`, id, old, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-root-budget", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.SlackSourceEvents != PurgeBatchSize {
+		t.Fatalf("source removals = %d", got.Removed.SlackSourceEvents)
+	}
+	var remaining int
+	if err := s.DB().QueryRow("SELECT count(*) FROM slack_source_events").Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("remaining = %d, %v", remaining, err)
+	}
+	assertPurgeIntegrity(t, s)
+}
+
+func TestConfirmMetadataPurgeSharesBudgetAcrossRootTables(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	if _, err := s.DB().Exec(`INSERT INTO slack_source_events(source_event_id,event_kind,received_at_us,committed_at_us,admission_result,task_version,changed,last_seen_at_us) VALUES('source-shared-budget','message',?,?,'duplicate',0,0,?)`, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < PurgeBatchSize; i++ {
+		id := fmt.Sprintf("request-shared-budget-%03d", i)
+		hash := fmt.Sprintf("%064x", i)
+		if _, err := s.DB().Exec(`INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,result_type,result_json,created_at,completed_at,expiry_eligible_at) VALUES(?, 'x', ?, 'success','x','{}',?,?,?)`, id, hash, old, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-shared-budget", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.SlackSourceEvents != 1 || got.Removed.MutationRequests != PurgeBatchSize-1 {
+		t.Fatalf("removed = %#v", got.Removed)
+	}
+	var requests int
+	if err := s.DB().QueryRow("SELECT count(*) FROM mutation_requests").Scan(&requests); err != nil || requests != 2 {
+		t.Fatalf("requests = %d, %v", requests, err)
+	} // one old root plus this purge request
+	assertPurgeIntegrity(t, s)
+}
+
+func TestConfirmMetadataPurgeSkipsOversizedDependentGraph(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	if _, err := s.DB().Exec(`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES('tsk_purge_oversized',1,'done','done','local',?,?,?)`, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < PurgeBatchSize; i++ {
+		id, requestID := fmt.Sprintf("event-oversized-%03d", i), fmt.Sprintf("request-oversized-%03d", i)
+		if _, err := s.DB().Exec(`INSERT INTO task_state_events(event_id,task_id,prior_state,new_state,actor,request_id,committed_at) VALUES(?, 'tsk_purge_oversized','open','done','local',?,?)`, id, requestID, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-oversized", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.Tasks != 0 || got.Skipped.Tasks != 1 {
+		t.Fatalf("result = %#v", got)
+	}
+	var tasks, events int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks WHERE task_id='tsk_purge_oversized'").Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("tasks = %d, %v", tasks, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM task_state_events WHERE task_id='tsk_purge_oversized'").Scan(&events); err != nil || events != PurgeBatchSize {
+		t.Fatalf("events = %d, %v", events, err)
+	}
+	assertPurgeIntegrity(t, s)
 }
 
 func TestConfirmMetadataPurgeStandaloneEffectPreservesRetainedPredecessorGraph(t *testing.T) {
