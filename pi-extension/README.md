@@ -1,6 +1,6 @@
 # Mosscap Pi extension
 
-This is the Phase 2 source-loaded extension for exactly Pi `0.83.0`. It has no
+This is the Phase 2 source-loaded extension for exactly Pi `0.84.1`. It has no
 background connection, timer, or watcher until a human runs `/mosscap` in a
 persisted interactive TUI session.
 
