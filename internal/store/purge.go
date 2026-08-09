@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/stayradiated/mosscap/internal/identity"
@@ -62,27 +63,9 @@ func (s *Store) PreviewMetadataPurge(ctx context.Context, cutoff time.Time) (Pur
 		return PurgeResult{}, invalidInput("invalid purge cutoff")
 	}
 	out := PurgeResult{Cutoff: cutoff}
-	// The preview is deliberately bounded by the same root limit. It reports
-	// roots which meet the timestamp/state rule; graph-sensitive confirmation
-	// remains authoritative and can skip rows changed by concurrent writers.
-	queries := []struct {
-		query string
-		count *int64
-	}{
-		{"SELECT count(*) FROM (SELECT 1 FROM tasks WHERE state='done' AND done_at < ? ORDER BY done_at,task_id LIMIT ?)", &out.Eligible.Tasks},
-		{"SELECT count(*) FROM (SELECT 1 FROM slack_effects WHERE related_task_id IS NULL AND state='confirmed' AND completed_at_us < ? ORDER BY completed_at_us,effect_id LIMIT ?)", &out.Eligible.SlackEffects},
-		{"SELECT count(*) FROM (SELECT 1 FROM slack_source_events WHERE task_id IS NULL AND admission_result IN ('duplicate','ignored_workspace','ignored_channel','ignored_untrusted','ignored_unmentioned','ignored_bot','ignored_stale','ignored_untracked','malformed') AND committed_at_us < ? ORDER BY committed_at_us,source_event_id LIMIT ?)", &out.Eligible.SlackSourceEvents},
-		{"SELECT count(*) FROM (SELECT 1 FROM mutation_requests WHERE expiry_eligible_at < ? ORDER BY expiry_eligible_at,request_id LIMIT ?)", &out.Eligible.MutationRequests},
-	}
-	remaining := int64(PurgeRootLimit)
-	for _, q := range queries {
-		if remaining == 0 {
-			break
-		}
-		if err := s.db.QueryRowContext(ctx, q.query, cutoffUS, remaining).Scan(q.count); err != nil {
-			return PurgeResult{}, err
-		}
-		remaining -= *q.count
+	budget := purgeBudget{rows: PurgeBatchSize, roots: PurgeRootLimit}
+	if err := selectMetadataPurge(ctx, s.db, cutoffUS, "", &budget, &out, false); err != nil {
+		return PurgeResult{}, classifyPurgeError(err, out)
 	}
 	return out, nil
 }
@@ -109,11 +92,11 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 	defer s.mu.Unlock()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return PurgeResult{}, err
+		return PurgeResult{}, classifyPurgeError(err, PurgeResult{Cutoff: cutoff})
 	}
 	defer conn.Close()
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return PurgeResult{}, err
+		return PurgeResult{}, classifyPurgeError(err, PurgeResult{Cutoff: cutoff})
 	}
 	committed := false
 	defer func() {
@@ -147,17 +130,8 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 
 	out := PurgeResult{Cutoff: cutoff}
 	budget := purgeBudget{rows: PurgeBatchSize, roots: PurgeRootLimit}
-	if err := purgeTasks(ctx, conn, cutoffUS, &budget, &out); err != nil {
-		return PurgeResult{}, err
-	}
-	if err := purgeStandaloneEffects(ctx, conn, cutoffUS, &budget, &out); err != nil {
-		return PurgeResult{}, err
-	}
-	if err := purgeUnlinkedSources(ctx, conn, cutoffUS, &budget, &out); err != nil {
-		return PurgeResult{}, err
-	}
-	if err := purgeRequests(ctx, conn, cutoffUS, requestID, &budget, &out); err != nil {
-		return PurgeResult{}, err
+	if err := selectMetadataPurge(ctx, conn, cutoffUS, requestID, &budget, &out, true); err != nil {
+		return PurgeResult{}, classifyPurgeError(err, out)
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
@@ -165,10 +139,10 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 	}
 	now := s.now()
 	if _, err := conn.ExecContext(ctx, "INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,result_type,result_json,created_at,completed_at,expiry_eligible_at) VALUES(?,?,?,'success','metadata_purge',?,?,?,?)", requestID, req.operation, req.hash, string(raw), now, now, now+RequestRetention.Microseconds()); err != nil {
-		return PurgeResult{}, err
+		return PurgeResult{}, classifyPurgeError(err, out)
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return PurgeResult{}, err
+		return PurgeResult{}, classifyPurgeError(err, out)
 	}
 	committed = true
 	return out, nil
@@ -178,6 +152,51 @@ type purgeConn interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// PurgeError records that no in-flight transaction was committed. Result is
+// the last durable progress (zero for this one-batch invocation) and is safe
+// to render for an operator retry.
+type PurgeError struct {
+	Cause    error
+	Progress PurgeResult
+}
+
+func (e *PurgeError) Error() string { return "metadata purge interrupted; retry safely" }
+func (e *PurgeError) Unwrap() error { return e.Cause }
+
+func classifyPurgeError(err error, progress PurgeResult) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &PurgeError{Cause: err, Progress: progress}
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "database is locked") || strings.Contains(message, "database is busy") || strings.Contains(message, "database or disk is full") || strings.Contains(message, "disk full") || strings.Contains(message, "interrupted") {
+		return &PurgeError{Cause: err, Progress: progress}
+	}
+	return err
+}
+
+func addCounts(dst *PurgeCounts, c PurgeCounts) {
+	dst.Tasks += c.Tasks
+	dst.TaskStateEvents += c.TaskStateEvents
+	dst.SlackSourceEvents += c.SlackSourceEvents
+	dst.SlackTaskSources += c.SlackTaskSources
+	dst.PiDeliveries += c.PiDeliveries
+	dst.SlackEffects += c.SlackEffects
+	dst.Files += c.Files
+	dst.FileTemporaryTransfers += c.FileTemporaryTransfers
+	dst.MutationRequests += c.MutationRequests
+}
+func (c PurgeCounts) total() int64 {
+	return c.Tasks + c.TaskStateEvents + c.SlackSourceEvents + c.SlackTaskSources + c.PiDeliveries + c.SlackEffects + c.Files + c.FileTemporaryTransfers + c.MutationRequests
+}
+func skipLive(out *PurgeResult, c PurgeCounts) {
+	addCounts(&out.SkippedLive, c)
+	addCounts(&out.Skipped, c)
+}
+func skipReferenced(out *PurgeResult, c PurgeCounts) {
+	addCounts(&out.SkippedReferenced, c)
+	addCounts(&out.Skipped, c)
 }
 
 type purgeBudget struct{ rows, roots int64 }
@@ -208,7 +227,20 @@ func (b purgeBudget) candidates() int64 {
 	return b.rows
 }
 
-func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
+func selectMetadataPurge(ctx context.Context, q purgeConn, cutoff int64, requestID string, budget *purgeBudget, out *PurgeResult, remove bool) error {
+	if err := purgeTasks(ctx, q, cutoff, budget, out, remove); err != nil {
+		return err
+	}
+	if err := purgeStandaloneEffects(ctx, q, cutoff, budget, out, remove); err != nil {
+		return err
+	}
+	if err := purgeUnlinkedSources(ctx, q, cutoff, budget, out, remove); err != nil {
+		return err
+	}
+	return purgeRequests(ctx, q, cutoff, requestID, budget, out, remove)
+}
+
+func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult, remove bool) error {
 	if budget.candidates() == 0 {
 		return nil
 	}
@@ -225,14 +257,14 @@ func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBud
 		if !budget.takeCandidate() {
 			break
 		}
-		if err := purgeTask(ctx, q, id, cutoff, budget, out); err != nil {
+		if err := purgeTask(ctx, q, id, cutoff, budget, out, remove); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
+func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, budget *purgeBudget, out *PurgeResult, remove bool) error {
 	var eligible bool
 	if err := q.QueryRowContext(ctx, "SELECT state='done' AND done_at < ? FROM tasks WHERE task_id=?", cutoff, taskID).Scan(&eligible); errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -240,7 +272,7 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, bu
 		return err
 	}
 	if !eligible {
-		out.Skipped.Tasks++
+		skipLive(out, PurgeCounts{Tasks: 1})
 		return nil
 	}
 	// Every task-owned delivery must be finalized using the deliberately
@@ -251,7 +283,7 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, bu
 		return err
 	}
 	if live != 0 {
-		out.Skipped.Tasks++
+		skipLive(out, PurgeCounts{Tasks: 1})
 		return nil
 	}
 	var effects int64
@@ -261,7 +293,7 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, bu
 		return err
 	}
 	if effects != 0 {
-		out.Skipped.Tasks++
+		skipReferenced(out, PurgeCounts{Tasks: 1})
 		return nil
 	}
 	// Files may be directly task-owned or owned through an outgoing upload
@@ -272,31 +304,34 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, bu
 		return err
 	}
 	if files != 0 {
-		out.Skipped.Tasks++
+		skipReferenced(out, PurgeCounts{Tasks: 1})
 		return nil
 	}
-	rows, err := taskGraphRows(ctx, q, taskID)
+	graph, err := taskGraphCounts(ctx, q, taskID)
 	if err != nil {
 		return err
 	}
-	if !budget.take(rows) {
-		out.Skipped.Tasks++
+	if !budget.take(graph.total()) {
+		skipReferenced(out, PurgeCounts{Tasks: 1})
+		return nil
+	}
+	addCounts(&out.Eligible, graph)
+	if !remove {
 		return nil
 	}
 	return deleteTaskGraph(ctx, q, taskID, out)
 }
 
-func taskGraphRows(ctx context.Context, q purgeConn, taskID string) (int64, error) {
-	var rows int64
-	err := q.QueryRowContext(ctx, `SELECT
-		1 +
-		(SELECT count(*) FROM files f WHERE f.related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=?)) +
-		(SELECT count(*) FROM slack_task_sources WHERE task_id=?) +
-		(SELECT count(*) FROM task_state_events WHERE task_id=?) +
-		(SELECT count(*) FROM slack_source_events WHERE task_id=?) +
-		(SELECT count(*) FROM pi_deliveries WHERE task_id=?) +
-		(SELECT count(*) FROM slack_effects WHERE related_task_id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&rows)
-	return rows, err
+func taskGraphCounts(ctx context.Context, q purgeConn, taskID string) (PurgeCounts, error) {
+	var c PurgeCounts
+	err := q.QueryRowContext(ctx, `SELECT 1,
+		(SELECT count(*) FROM task_state_events WHERE task_id=?),
+		(SELECT count(*) FROM slack_source_events WHERE task_id=?),
+		(SELECT count(*) FROM slack_task_sources WHERE task_id=?),
+		(SELECT count(*) FROM pi_deliveries WHERE task_id=?),
+		(SELECT count(*) FROM slack_effects WHERE related_task_id=?),
+		(SELECT count(*) FROM files f WHERE f.related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=?))`, taskID, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&c.Tasks, &c.TaskStateEvents, &c.SlackSourceEvents, &c.SlackTaskSources, &c.PiDeliveries, &c.SlackEffects, &c.Files)
+	return c, err
 }
 
 func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *PurgeResult) error {
@@ -339,7 +374,7 @@ func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *Purge
 	return nil
 }
 
-func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
+func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult, remove bool) error {
 	if budget.candidates() == 0 {
 		return nil
 	}
@@ -362,7 +397,7 @@ func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budg
 			return err
 		}
 		if blocked != 0 {
-			out.Skipped.SlackEffects++
+			skipReferenced(out, PurgeCounts{SlackEffects: 1})
 			continue
 		}
 		var fileRows int64
@@ -370,7 +405,11 @@ func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budg
 			return err
 		}
 		if !budget.take(1 + fileRows) {
-			out.Skipped.SlackEffects++
+			skipReferenced(out, PurgeCounts{SlackEffects: 1})
+			continue
+		}
+		addCounts(&out.Eligible, PurgeCounts{SlackEffects: 1, Files: fileRows})
+		if !remove {
 			continue
 		}
 		if n, err := deleteCount(ctx, q, "DELETE FROM files WHERE related_effect_id=?", id); err != nil {
@@ -387,7 +426,7 @@ func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budg
 	return rows.Err()
 }
 
-func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult) error {
+func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBudget, out *PurgeResult, remove bool) error {
 	const results = "'duplicate','ignored_workspace','ignored_channel','ignored_untrusted','ignored_unmentioned','ignored_bot','ignored_stale','ignored_untracked','malformed'"
 	if budget.candidates() == 0 {
 		return nil
@@ -408,6 +447,10 @@ func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, budget
 		if !budget.take(1) {
 			break
 		}
+		out.Eligible.SlackSourceEvents++
+		if !remove {
+			continue
+		}
 		n, err := deleteCount(ctx, q, "DELETE FROM slack_source_events WHERE source_event_id=?", id)
 		if err != nil {
 			return err
@@ -416,7 +459,7 @@ func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, budget
 	}
 	return rows.Err()
 }
-func purgeRequests(ctx context.Context, q purgeConn, cutoff int64, requestID string, budget *purgeBudget, out *PurgeResult) error {
+func purgeRequests(ctx context.Context, q purgeConn, cutoff int64, requestID string, budget *purgeBudget, out *PurgeResult, remove bool) error {
 	if budget.candidates() == 0 {
 		return nil
 	}
@@ -435,6 +478,10 @@ func purgeRequests(ctx context.Context, q purgeConn, cutoff int64, requestID str
 		}
 		if !budget.take(1) {
 			break
+		}
+		out.Eligible.MutationRequests++
+		if !remove {
+			continue
 		}
 		n, err := deleteCount(ctx, q, "DELETE FROM mutation_requests WHERE request_id=?", id)
 		if err != nil {

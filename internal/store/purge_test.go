@@ -430,6 +430,38 @@ func insertPurgeUpload(t *testing.T, s *Store, effectID, fileID, taskID string, 
 	}
 }
 
+func TestConfirmMetadataPurgeClassifiesCancellationAsRetriable(t *testing.T) {
+	s := testStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.ConfirmMetadataPurge(ctx, "purge-cancelled", time.Now().UTC())
+	var purgeErr *PurgeError
+	if !errors.As(err, &purgeErr) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want retriable purge cancellation", err)
+	}
+}
+
+func TestPreviewMetadataPurgeUsesConfirmGraphClassification(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	insertPurgeTask(t, s, "tsk_preview_graph", old)
+	if _, err := s.DB().Exec(`INSERT INTO pi_deliveries(delivery_id,task_id,task_version,pi_session_id,delivery_key,state,created_at_us,updated_at_us) VALUES('dlv_abcdefghijklmnopqrstuv', 'tsk_preview_graph',1,'session','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','pending',?,?)`, old, old); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.UnixMicro(old + 1).UTC()
+	preview, err := s.PreviewMetadataPurge(context.Background(), cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm, err := s.ConfirmMetadataPurge(context.Background(), "purge-preview-graph", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Eligible != confirm.Eligible || preview.SkippedLive != confirm.SkippedLive || preview.SkippedReferenced != confirm.SkippedReferenced || preview.SkippedLive.Tasks != 1 {
+		t.Fatalf("preview %#v differs from confirm %#v", preview, confirm)
+	}
+}
+
 func TestPreviewMetadataPurgeIsReadOnly(t *testing.T) {
 	s := testStore(t)
 	old := int64(1_700_000_000_000_000)

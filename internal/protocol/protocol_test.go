@@ -269,10 +269,10 @@ func TestMetadataPurgeParamsStrictAndNormalize(t *testing.T) {
 	if err != nil || got.Format("2006-01-02T15:04:05.000000Z") != "2026-01-02T03:04:05.100000Z" {
 		t.Fatalf("normalization = %s, %v", got, err)
 	}
-	if err := ValidateParams("metadata.purge", []byte(`{"cutoff":"2026-01-02T03:04:05Z","mode":"dry_run"}`)); err != nil {
+	if err := ValidateParams("metadata.purge", []byte(`{"cutoff":"2026-01-02T03:04:05.000000Z","mode":"dry_run"}`)); err != nil {
 		t.Fatal(err)
 	}
-	for _, raw := range []string{`{"cutoff":"2026-01-02T03:04:05","mode":"dry_run"}`, `{"cutoff":"2026-01-02T03:04:05Z","mode":"other"}`, `{"cutoff":"2026-01-02T03:04:05Z","mode":"dry_run","extra":true}`} {
+	for _, raw := range []string{`{"cutoff":"2026-01-02T03:04:05","mode":"dry_run"}`, `{"cutoff":"2026-01-02T03:04:05Z","mode":"other"}`, `{"cutoff":"2026-01-02T03:04:05,1Z","mode":"dry_run"}`, `{"cutoff":"2026-01-02T03:04:05Z","mode":"dry_run","extra":true}`} {
 		if err := ValidateParams("metadata.purge", []byte(raw)); err == nil {
 			t.Fatalf("accepted invalid params %s", raw)
 		}

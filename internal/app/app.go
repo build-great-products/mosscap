@@ -580,7 +580,8 @@ func (a App) purge(args []string) error {
 		fmt.Fprintln(a.Out, "Usage: mosscap purge --before RFC3339 (--dry-run|--confirm) [--request-id ID] [--json]\n\nPreview is read-only. Confirmed removal is irreversible.")
 		return nil
 	}
-	if fs.NArg() != 0 || *before == "" || (*dryRun == *confirm) || countFlag(args, "--dry-run") > 1 || countFlag(args, "--confirm") > 1 || countFlag(args, "--before") > 1 {
+	dryRuns, confirms := countFlag(args, "--dry-run"), countFlag(args, "--confirm")
+	if fs.NArg() != 0 || *before == "" || dryRuns+confirms != 1 || (!*dryRun && !*confirm) || !validPurgeModeFlags(args) || countFlag(args, "--before") != 1 {
 		return usage("purge requires --before and exactly one of --dry-run or --confirm")
 	}
 	cutoff, err := protocol.ParsePurgeCutoff(*before)
@@ -632,6 +633,19 @@ func countFlag(args []string, name string) int {
 		}
 	}
 	return count
+}
+
+// Bool flags select an irreversible mode: spelling one with an explicit false
+// value is not a harmless synonym for omitting it.
+func validPurgeModeFlags(args []string) bool {
+	for _, arg := range args {
+		for _, name := range []string{"--dry-run", "--confirm"} {
+			if strings.HasPrefix(arg, name+"=") && arg != name+"=true" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (a App) trust(args []string) error {

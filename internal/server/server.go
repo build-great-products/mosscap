@@ -1101,6 +1101,10 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "ambiguous", "ambiguous"
 	case errors.Is(err, store.ErrRequestConflict):
 		code, category = "request_id_conflict", "conflict"
+	case func() bool { var purge *store.PurgeError; return errors.As(err, &purge) }():
+		var purge *store.PurgeError
+		_ = errors.As(err, &purge)
+		return protocol.Response{ProtocolVersion: protocol.Version, RequestID: id, ServerVersion: version, Error: &protocol.Error{Code: "purge_interrupted", Category: "unavailable", Message: "metadata purge interrupted; retry safely", Retriable: true, Progress: &protocol.PurgeProgressDTO{Removed: purgeCountsDTO(purge.Progress.Removed)}}}
 	case errors.Is(err, store.ErrDeliveryNotFound):
 		code, category = "delivery_not_found", "not_found"
 	case errors.Is(err, store.ErrDeliveryOwnership), errors.Is(err, store.ErrDeliveryTransition), errors.Is(err, store.ErrDeliveryRequeueDenied), errors.Is(err, pidelivery.ErrNotOpen), errors.Is(err, pidelivery.ErrSessionBound):
@@ -1162,19 +1166,10 @@ func dto(v any) any {
 	}
 }
 func metadataPurgeDTO(result store.PurgeResult, mode string) protocol.MetadataPurgeDTO {
-	// Store increment 1 recorded generic skips. Preserve those outcomes as live
-	// evidence until graph-level skip classification is added in a later store
-	// increment; the wire shape is already stable and bounded.
-	skippedLive := result.SkippedLive
-	if skippedLive == (store.PurgeCounts{}) {
-		skippedLive = result.Skipped
-	}
 	return protocol.MetadataPurgeDTO{
 		Cutoff: stamp(result.Cutoff), Mode: mode,
-		Eligible:          purgeCountsDTO(result.Eligible),
-		SkippedLive:       purgeCountsDTO(skippedLive),
-		SkippedReferenced: purgeCountsDTO(result.SkippedReferenced),
-		Removed:           purgeCountsDTO(result.Removed),
+		Eligible: purgeCountsDTO(result.Eligible), SkippedLive: purgeCountsDTO(result.SkippedLive),
+		SkippedReferenced: purgeCountsDTO(result.SkippedReferenced), Removed: purgeCountsDTO(result.Removed),
 	}
 }
 func purgeCountsDTO(c store.PurgeCounts) protocol.PurgeCountsDTO {

@@ -252,6 +252,8 @@ func TestPurgeRejectsAmbiguousModesAndInvalidCutoffsBeforeDialing(t *testing.T) 
 		{"purge", "--before", "2026-01-01T00:00:00Z", "--dry-run", "--confirm"},
 		{"purge", "--before", "2026-01-01T00:00:00", "--dry-run"},
 		{"purge", "--before", "2026-01-01T00:00:00Z", "--dry-run", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run=false"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run", "--confirm=false"},
 	} {
 		var out, errOut bytes.Buffer
 		if got := (App{Out: &out, Err: &errOut}).Run(context.Background(), args); got != ExitUsage {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -73,6 +74,7 @@ type Error struct {
 	Message   string            `json:"message"`
 	Retriable bool              `json:"retriable"`
 	Details   map[string]string `json:"details,omitempty"`
+	Progress  *PurgeProgressDTO `json:"progress,omitempty"`
 }
 
 // HelloParams initiates a connection. SupportedVersions must include Version.
@@ -118,6 +120,12 @@ type MetadataPurgeDTO struct {
 	SkippedLive       PurgeCountsDTO `json:"skipped_live"`
 	SkippedReferenced PurgeCountsDTO `json:"skipped_referenced"`
 	Removed           PurgeCountsDTO `json:"removed"`
+}
+
+// PurgeProgressDTO is included only on a retriable purge error. It reports
+// work committed before the interrupted batch, never speculative deletions.
+type PurgeProgressDTO struct {
+	Removed PurgeCountsDTO `json:"removed"`
 }
 
 // TrustMutationParams identifies one immutable Slack user.
@@ -821,43 +829,21 @@ func validCommand(c string) bool {
 	return false
 }
 
-// ParsePurgeCutoff accepts only RFC3339 timestamps with Z or a numeric offset,
-// at most microsecond precision. Its result is normalized to UTC microseconds.
+// ParsePurgeCutoff accepts the canonical RFC3339 lexical form used by purge:
+// calendar date, T separator, explicit dot fraction (one to six digits), and
+// either Z or a numeric ±HH:MM offset.  time.Parse is intentionally preceded
+// by this grammar check because it accepts useful-but-noncanonical variants.
+var purgeCutoffSyntax = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{1,6}(Z|[+-][0-9]{2}:[0-9]{2})$`)
+
 func ParsePurgeCutoff(value string) (time.Time, error) {
-	if len(value) == 0 || len(value) > 64 || strings.ContainsAny(value, " \t\r\n") {
-		return time.Time{}, errors.New("invalid RFC3339 cutoff")
-	}
-	// RFC3339Nano accepts local/date-only variants through neither layout, but
-	// make the required zone explicit rather than accepting a forgiving parser.
-	t := strings.IndexByte(value, 'T')
-	if t < 1 || (!strings.HasSuffix(value, "Z") && !hasRFC3339Offset(value, t)) {
-		return time.Time{}, errors.New("cutoff requires RFC3339 offset")
-	}
-	fraction := ""
-	if dot := strings.IndexByte(value[t+1:], '.'); dot >= 0 {
-		dot += t + 1
-		end := len(value)
-		if z := strings.IndexAny(value[dot+1:], "Z+-"); z >= 0 {
-			end = dot + 1 + z
-		}
-		fraction = value[dot+1 : end]
-	}
-	if len(fraction) > 6 {
-		return time.Time{}, errors.New("cutoff precision exceeds microseconds")
+	if len(value) == 0 || len(value) > 64 || !purgeCutoffSyntax.MatchString(value) {
+		return time.Time{}, errors.New("invalid canonical RFC3339 cutoff")
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, errors.New("invalid canonical RFC3339 cutoff")
 	}
 	return parsed.UTC().Truncate(time.Microsecond), nil
-}
-func hasRFC3339Offset(value string, timeIndex int) bool {
-	for i := len(value) - 1; i > timeIndex; i-- {
-		if value[i] == '+' || value[i] == '-' {
-			return len(value)-i == 6 && value[i+3] == ':'
-		}
-	}
-	return false
 }
 
 func validTimestamp(value string) bool {
