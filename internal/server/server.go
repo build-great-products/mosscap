@@ -635,6 +635,25 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		checks = append(checks, s.phase1Doctor(ctx)...)
 		checks = append(checks, s.fileTransferDoctor(ctx)...)
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
+	case "metadata.purge":
+		var p protocol.MetadataPurgeParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "metadata_purge"
+		var cutoff time.Time
+		cutoff, err = protocol.ParsePurgeCutoff(p.Cutoff)
+		if err == nil {
+			var purge store.PurgeResult
+			if p.Mode == "dry_run" {
+				purge, err = s.store.PreviewMetadataPurge(ctx, cutoff)
+			} else if p.Mode == "confirm" {
+				purge, err = s.store.ConfirmMetadataPurge(ctx, r.RequestID, cutoff)
+			} else {
+				err = errors.New("invalid metadata purge mode")
+			}
+			if err == nil {
+				result = metadataPurgeDTO(purge, p.Mode)
+			}
+		}
 	case "trust.list":
 		resultType = "trusted_user_list"
 		var users []string
@@ -1141,6 +1160,25 @@ func dto(v any) any {
 	default:
 		return v
 	}
+}
+func metadataPurgeDTO(result store.PurgeResult, mode string) protocol.MetadataPurgeDTO {
+	// Store increment 1 recorded generic skips. Preserve those outcomes as live
+	// evidence until graph-level skip classification is added in a later store
+	// increment; the wire shape is already stable and bounded.
+	skippedLive := result.SkippedLive
+	if skippedLive == (store.PurgeCounts{}) {
+		skippedLive = result.Skipped
+	}
+	return protocol.MetadataPurgeDTO{
+		Cutoff: stamp(result.Cutoff), Mode: mode,
+		Eligible:          purgeCountsDTO(result.Eligible),
+		SkippedLive:       purgeCountsDTO(skippedLive),
+		SkippedReferenced: purgeCountsDTO(result.SkippedReferenced),
+		Removed:           purgeCountsDTO(result.Removed),
+	}
+}
+func purgeCountsDTO(c store.PurgeCounts) protocol.PurgeCountsDTO {
+	return protocol.PurgeCountsDTO{Tasks: c.Tasks, TaskStateEvents: c.TaskStateEvents, SlackSourceEvents: c.SlackSourceEvents, SlackTaskSources: c.SlackTaskSources, PiDeliveries: c.PiDeliveries, SlackEffects: c.SlackEffects, Files: c.Files, FileTemporaryTransfers: c.FileTemporaryTransfers, MutationRequests: c.MutationRequests}
 }
 func deliveryCountsDTO(c store.DeliveryCounts) protocol.DeliveryCountsDTO {
 	return protocol.DeliveryCountsDTO{EligibleBacklogCount: c.Eligible, UncertainCount: c.Uncertain, RejectedCount: c.Rejected}

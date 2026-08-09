@@ -430,6 +430,36 @@ func insertPurgeUpload(t *testing.T, s *Store, effectID, fileID, taskID string, 
 	}
 }
 
+func TestPreviewMetadataPurgeIsReadOnly(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	if _, err := s.DB().Exec(`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES('tsk_preview',1,'done','done','local',?,?,?)`, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.DB().Query("SELECT request_id FROM mutation_requests ORDER BY request_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer before.Close()
+	result, err := s.PreviewMetadataPurge(context.Background(), time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Eligible.Tasks != 1 || result.Removed.Tasks != 0 {
+		t.Fatalf("preview = %#v", result)
+	}
+	var tasks, requests int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM mutation_requests").Scan(&requests); err != nil {
+		t.Fatal(err)
+	}
+	if tasks != 1 || requests != 0 {
+		t.Fatalf("preview mutated database: tasks=%d requests=%d", tasks, requests)
+	}
+}
+
 func assertPurgeIntegrity(t *testing.T, s *Store) {
 	t.Helper()
 	var foreign, integrity string

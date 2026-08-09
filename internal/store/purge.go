@@ -39,9 +39,52 @@ type PurgeCounts struct {
 // PurgeResult is the replayable result of one bounded confirmed batch. A
 // caller is responsible for iteration and for all temporary-byte handling.
 type PurgeResult struct {
-	Cutoff  time.Time   `json:"cutoff"`
-	Removed PurgeCounts `json:"removed"`
-	Skipped PurgeCounts `json:"skipped"`
+	Cutoff            time.Time   `json:"cutoff"`
+	Eligible          PurgeCounts `json:"eligible"`
+	SkippedLive       PurgeCounts `json:"skipped_live"`
+	SkippedReferenced PurgeCounts `json:"skipped_referenced"`
+	Removed           PurgeCounts `json:"removed"`
+	// Skipped is retained internally for compatibility with the store-only
+	// increment. New callers must use the typed skip groups above.
+	Skipped PurgeCounts `json:"-"`
+}
+
+// PreviewMetadataPurge is an advisory, strictly read-only bounded preview. It
+// never enters a write transaction, records no mutation request, and does not
+// touch temporary-byte or SQLite-maintenance state.
+func (s *Store) PreviewMetadataPurge(ctx context.Context, cutoff time.Time) (PurgeResult, error) {
+	if cutoff.Location() == nil {
+		return PurgeResult{}, invalidInput("invalid purge cutoff")
+	}
+	cutoff = cutoff.UTC().Truncate(time.Microsecond)
+	cutoffUS := cutoff.UnixMicro()
+	if cutoffUS <= 0 {
+		return PurgeResult{}, invalidInput("invalid purge cutoff")
+	}
+	out := PurgeResult{Cutoff: cutoff}
+	// The preview is deliberately bounded by the same root limit. It reports
+	// roots which meet the timestamp/state rule; graph-sensitive confirmation
+	// remains authoritative and can skip rows changed by concurrent writers.
+	queries := []struct {
+		query string
+		count *int64
+	}{
+		{"SELECT count(*) FROM (SELECT 1 FROM tasks WHERE state='done' AND done_at < ? ORDER BY done_at,task_id LIMIT ?)", &out.Eligible.Tasks},
+		{"SELECT count(*) FROM (SELECT 1 FROM slack_effects WHERE related_task_id IS NULL AND state='confirmed' AND completed_at_us < ? ORDER BY completed_at_us,effect_id LIMIT ?)", &out.Eligible.SlackEffects},
+		{"SELECT count(*) FROM (SELECT 1 FROM slack_source_events WHERE task_id IS NULL AND admission_result IN ('duplicate','ignored_workspace','ignored_channel','ignored_untrusted','ignored_unmentioned','ignored_bot','ignored_stale','ignored_untracked','malformed') AND committed_at_us < ? ORDER BY committed_at_us,source_event_id LIMIT ?)", &out.Eligible.SlackSourceEvents},
+		{"SELECT count(*) FROM (SELECT 1 FROM mutation_requests WHERE expiry_eligible_at < ? ORDER BY expiry_eligible_at,request_id LIMIT ?)", &out.Eligible.MutationRequests},
+	}
+	remaining := int64(PurgeRootLimit)
+	for _, q := range queries {
+		if remaining == 0 {
+			break
+		}
+		if err := s.db.QueryRowContext(ctx, q.query, cutoffUS, remaining).Scan(q.count); err != nil {
+			return PurgeResult{}, err
+		}
+		remaining -= *q.count
+	}
+	return out, nil
 }
 
 // ConfirmMetadataPurge removes one bounded, FK-safe batch. The cutoff is
