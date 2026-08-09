@@ -1,5 +1,8 @@
 package store
 
+// This store-only increment deliberately does not remove temporary bytes or
+// their rows.
+
 import (
 	"context"
 	"database/sql"
@@ -11,8 +14,6 @@ import (
 	"github.com/stayradiated/mosscap/internal/identity"
 )
 
-// This store-only increment deliberately does not remove temporary bytes or
-// their rows.
 const (
 	// PurgeBatchSize is the total root and dependent-row deletion budget for
 	// one confirmed invocation. It is deliberately not a per-table limit.
@@ -197,17 +198,20 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, bu
 		return nil
 	}
 	var effects int64
-	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM slack_effects e WHERE e.related_task_id=? AND (e.state <> 'confirmed' OR e.completed_at_us IS NULL OR e.completed_at_us >= ? OR EXISTS (SELECT 1 FROM slack_effects r WHERE r.predecessor_effect_id=e.effect_id AND r.related_task_id<>?))`, taskID, cutoff, taskID).Scan(&effects); err != nil {
+	// A successor is selected only when it belongs to this task. In particular,
+	// a NULL related_task_id is retained; SQLite's <> would silently miss it.
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM slack_effects e WHERE e.related_task_id=? AND (e.state <> 'confirmed' OR e.completed_at_us IS NULL OR e.completed_at_us >= ? OR EXISTS (SELECT 1 FROM slack_effects r WHERE r.predecessor_effect_id=e.effect_id AND (r.related_task_id IS NULL OR r.related_task_id <> ?)))`, taskID, cutoff, taskID).Scan(&effects); err != nil {
 		return err
 	}
 	if effects != 0 {
 		out.Skipped.Tasks++
 		return nil
 	}
-	// A file can have both owners. It is removable only when its other owner is
-	// also selected here, and never while temporary-byte metadata remains.
+	// Files may be directly task-owned or owned through an outgoing upload
+	// effect. Temporary transfer rows represent private bytes managed outside
+	// this metadata-only operation, so retaining either owner is required.
 	var files int64
-	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM files f WHERE f.related_task_id=? AND (f.related_effect_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=? AND e.state='confirmed' AND e.completed_at_us < ?) OR EXISTS (SELECT 1 FROM file_temporary_transfers x WHERE x.file_id=f.file_id))`, taskID, taskID, cutoff).Scan(&files); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM files f WHERE (f.related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=?)) AND EXISTS (SELECT 1 FROM file_temporary_transfers x WHERE x.file_id=f.file_id)`, taskID, taskID).Scan(&files); err != nil {
 		return err
 	}
 	if files != 0 {
@@ -229,18 +233,22 @@ func taskGraphRows(ctx context.Context, q purgeConn, taskID string) (int64, erro
 	var rows int64
 	err := q.QueryRowContext(ctx, `SELECT
 		1 +
-		(SELECT count(*) FROM files WHERE related_task_id=?) +
+		(SELECT count(*) FROM files f WHERE f.related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=?)) +
 		(SELECT count(*) FROM slack_task_sources WHERE task_id=?) +
 		(SELECT count(*) FROM task_state_events WHERE task_id=?) +
 		(SELECT count(*) FROM slack_source_events WHERE task_id=?) +
 		(SELECT count(*) FROM pi_deliveries WHERE task_id=?) +
-		(SELECT count(*) FROM slack_effects WHERE related_task_id=?)`, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&rows)
+		(SELECT count(*) FROM slack_effects WHERE related_task_id=?)`, taskID, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&rows)
 	return rows, err
 }
 
 func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *PurgeResult) error {
 	// The child-before-parent order follows every schema-v5 RESTRICT edge.
-	if n, err := deleteCount(ctx, q, "DELETE FROM files WHERE related_task_id=?", taskID); err != nil {
+	// Outgoing upload files are owned through their task-owned effect, not
+	// directly through the task. Preflight retains any file with temporary-byte
+	// metadata, so every selected file can be deleted before its effect.
+	fileOwner := `related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=files.related_effect_id AND e.related_task_id=?)`
+	if n, err := deleteCount(ctx, q, "DELETE FROM files WHERE "+fileOwner, taskID, taskID); err != nil {
 		return err
 	} else {
 		out.Removed.Files += n

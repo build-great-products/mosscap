@@ -262,6 +262,146 @@ func TestConfirmMetadataPurgeSourceAndRequestStrictCutoff(t *testing.T) {
 	assertPurgeIntegrity(t, s)
 }
 
+func TestConfirmMetadataPurgeDeletesTaskUploadFileAndChargesItsGraph(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	insertPurgeTask(t, s, "tsk_purge_upload", old)
+	insertPurgeUpload(t, s, "eff_0000000000000000000001", "fil_0000000000000000000001", "tsk_purge_upload", old)
+
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-upload", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.Tasks != 1 || got.Removed.SlackEffects != 1 || got.Removed.Files != 1 {
+		t.Fatalf("removed = %#v", got.Removed)
+	}
+	assertPurgeIntegrity(t, s)
+}
+
+func TestConfirmMetadataPurgeRetainsUploadGraphWithTemporaryTransfer(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	insertPurgeTask(t, s, "tsk_purge_upload_temp", old)
+	insertPurgeUpload(t, s, "eff_0000000000000000000002", "fil_0000000000000000000002", "tsk_purge_upload_temp", old)
+	if _, err := s.DB().Exec(`INSERT INTO file_temporary_transfers(transfer_id,file_id,generated_name,size_bytes,sha256,expires_at_us,created_at_us) VALUES('xfr_0000000000000000000002','fil_0000000000000000000002','mosscap-xfr-00000000000000000000000000000002',1,?,?,?)`, fmt.Sprintf("%064x", 2), old+100, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-upload-temp", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.Tasks != 0 || got.Skipped.Tasks != 1 || got.Removed.FileTemporaryTransfers != 0 {
+		t.Fatalf("result = %#v", got)
+	}
+	var tasks, effects, files, transfers int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("tasks = %d, %v", tasks, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM slack_effects").Scan(&effects); err != nil || effects != 1 {
+		t.Fatalf("effects = %d, %v", effects, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM files").Scan(&files); err != nil || files != 1 {
+		t.Fatalf("files = %d, %v", files, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM file_temporary_transfers").Scan(&transfers); err != nil || transfers != 1 {
+		t.Fatalf("transfers = %d, %v", transfers, err)
+	}
+	assertPurgeIntegrity(t, s)
+}
+
+func TestConfirmMetadataPurgeSkipsOversizedTaskUploadGraph(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	insertPurgeTask(t, s, "tsk_purge_upload_large", old)
+	for i := 0; i < 50; i++ { // task + 50 effects + 50 files exceeds the 100-row budget.
+		insertPurgeUpload(t, s, fmt.Sprintf("eff_%022d", i), fmt.Sprintf("fil_%022d", i), "tsk_purge_upload_large", old)
+	}
+
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-upload-large", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.Tasks != 0 || got.Skipped.Tasks != 1 {
+		t.Fatalf("result = %#v", got)
+	}
+	var tasks, effects, files int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks WHERE task_id='tsk_purge_upload_large'").Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("tasks = %d, %v", tasks, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM slack_effects WHERE related_task_id='tsk_purge_upload_large'").Scan(&effects); err != nil || effects != 50 {
+		t.Fatalf("effects = %d, %v", effects, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM files").Scan(&files); err != nil || files != 50 {
+		t.Fatalf("files = %d, %v", files, err)
+	}
+	assertPurgeIntegrity(t, s)
+}
+
+func TestConfirmMetadataPurgeRetainsTaskWithNullOrOtherTaskEffectSuccessor(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	insertPurgeTask(t, s, "tsk_purge_successor_parent", old)
+	insertPurgeTask(t, s, "tsk_purge_successor_other", old)
+	parentID := "eff_0000000000000000000010"
+	insertPurgeEffect(t, s, parentID, "tsk_purge_successor_parent", "confirmed", "", old)
+	// Prepared successors must keep their predecessors' task graphs intact.
+	// This covers both SQL NULL and a different task owner.
+	insertPurgeEffect(t, s, "eff_0000000000000000000011", "", "prepared", parentID, old)
+	insertPurgeEffect(t, s, "eff_0000000000000000000012", "tsk_purge_successor_other", "prepared", parentID, old)
+
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-external-successor", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Removed.Tasks != 0 || got.Skipped.Tasks != 2 {
+		t.Fatalf("result = %#v", got)
+	}
+	var tasks, effects int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil || tasks != 2 {
+		t.Fatalf("tasks = %d, %v", tasks, err)
+	}
+	if err := s.DB().QueryRow("SELECT count(*) FROM slack_effects").Scan(&effects); err != nil || effects != 3 {
+		t.Fatalf("effects = %d, %v", effects, err)
+	}
+	assertPurgeIntegrity(t, s)
+}
+
+func insertPurgeTask(t *testing.T, s *Store, id string, at int64) {
+	t.Helper()
+	if _, err := s.DB().Exec(`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES(?,1,'done','done','local',?,?,?)`, id, at, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertPurgeEffect(t *testing.T, s *Store, id, taskID, state, predecessor string, at int64) {
+	t.Helper()
+	var relatedTask, predecessorID any
+	if taskID != "" {
+		relatedTask = taskID
+	}
+	if predecessor != "" {
+		predecessorID = predecessor
+	}
+	if state == "confirmed" {
+		if _, err := s.DB().Exec(`INSERT INTO slack_effects(effect_id,idempotency_key,predecessor_effect_id,related_task_id,kind,team_id,channel_id,payload_hash,state,attempt_count,prepared_at_us,submitted_at_us,completed_at_us,created_at_us,updated_at_us) VALUES(?,?,?,?,'file_upload','T1','C1',?,'confirmed',1,?,?,?,?,?)`, id, "purge-"+id, predecessorID, relatedTask, fmt.Sprintf("%064x", len(id)), at, at, at, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if _, err := s.DB().Exec(`INSERT INTO slack_effects(effect_id,idempotency_key,predecessor_effect_id,related_task_id,kind,team_id,channel_id,payload_hash,state,attempt_count,prepared_at_us,created_at_us,updated_at_us) VALUES(?,?,?,?,'send','T1','C1',?,'prepared',0,?,?,?)`, id, "purge-"+id, predecessorID, relatedTask, fmt.Sprintf("%064x", len(id)), at, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertPurgeUpload(t *testing.T, s *Store, effectID, fileID, taskID string, at int64) {
+	t.Helper()
+	insertPurgeEffect(t, s, effectID, taskID, "confirmed", "", at)
+	if _, err := s.DB().Exec(`INSERT INTO files(file_id,direction,original_name,declared_size_bytes,validated_size_bytes,sha256,related_effect_id,effect_ordinal,source_attached,source_path,transfer_state,created_at_us,updated_at_us) VALUES(?,'to_slack','upload.txt',1,1,?, ?,0,0,'/tmp/upload.txt','confirmed',?,?)`, fileID, fmt.Sprintf("%064x", len(fileID)), effectID, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertPurgeIntegrity(t *testing.T, s *Store) {
 	t.Helper()
 	var foreign, integrity string
