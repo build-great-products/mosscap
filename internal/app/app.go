@@ -97,6 +97,8 @@ func (a App) Execute(_ context.Context, args []string) error {
 		return a.gateway("", args[1:])
 	case "trust":
 		return a.trust(args[1:])
+	case "purge":
+		return a.purge(args[1:])
 	case "task":
 		return a.task("", args[1:])
 	case "slack":
@@ -561,6 +563,91 @@ func localDoctorChecks(loc config.Location, c config.Config, loadErr error) []do
 	return checks
 }
 
+func (a App) purge(args []string) error {
+	fs := flag.NewFlagSet("purge", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	before := fs.String("before", "", "")
+	dryRun := fs.Bool("dry-run", false, "")
+	confirm := fs.Bool("confirm", false, "")
+	requestID := fs.String("request-id", "", "")
+	jsonOut := fs.Bool("json", false, "")
+	help := fs.Bool("help", false, "")
+	fs.BoolVar(help, "h", false, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if *help {
+		fmt.Fprintln(a.Out, "Usage: mosscap purge --before RFC3339 (--dry-run|--confirm) [--request-id ID] [--json]\n\nPreview is read-only. Confirmed removal is irreversible.")
+		return nil
+	}
+	dryRuns, confirms := countFlag(args, "--dry-run"), countFlag(args, "--confirm")
+	if fs.NArg() != 0 || *before == "" || dryRuns+confirms != 1 || (!*dryRun && !*confirm) || !validPurgeModeFlags(args) || countFlag(args, "--before") != 1 {
+		return usage("purge requires --before and exactly one of --dry-run or --confirm")
+	}
+	cutoff, err := protocol.ParsePurgeCutoff(*before)
+	if err != nil {
+		return usage("--before must be RFC3339 with an offset and at most microsecond precision")
+	}
+	if *dryRun && *requestID != "" {
+		return usage("--request-id is confirm-only")
+	}
+	if *confirm && *requestID == "" {
+		*requestID, err = identity.NewGenerator(nil).NewRequestID()
+		if err != nil {
+			return err
+		}
+	}
+	if *dryRun {
+		*requestID = "req_purge_preview"
+	}
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		return err
+	}
+	c, err := config.Default(loc)
+	if err != nil {
+		return err
+	}
+	mode := "dry_run"
+	if *confirm {
+		mode = "confirm"
+		if !*jsonOut {
+			fmt.Fprintln(a.Err, "Warning: confirmed metadata removal is irreversible.")
+		}
+	}
+	result, err := a.gatewayCall(c, "metadata.purge", *requestID, protocol.MetadataPurgeParams{Cutoff: cutoff.Format("2006-01-02T15:04:05.000000Z"), Mode: mode}, protocol.CapabilityMetadataPurge)
+	if err != nil {
+		return err
+	}
+	if *confirm {
+		result = map[string]any{"request_id": *requestID, "result": result}
+	}
+	return a.render(result, *jsonOut)
+}
+
+func countFlag(args []string, name string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			count++
+		}
+	}
+	return count
+}
+
+// Bool flags select an irreversible mode: spelling one with an explicit false
+// value is not a harmless synonym for omitting it.
+func validPurgeModeFlags(args []string) bool {
+	for _, arg := range args {
+		for _, name := range []string{"--dry-run", "--confirm"} {
+			if strings.HasPrefix(arg, name+"=") && arg != name+"=true" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (a App) trust(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		a.printBranchHelp("trust", []string{"list", "add", "remove"})
@@ -887,7 +974,7 @@ func (a App) leaf(name string, args []string) error {
 	return unsupported(fmt.Sprintf("%s is not implemented in this build", name))
 }
 func (a App) printRootHelp() {
-	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  task        manage local tasks\n  slack       read and operate in the configured Slack channel\n  effect      inspect durable Slack effects\n  file        show incoming Slack file metadata\n  delivery    inspect and recover Pi delivery attempts\n\nRun \"mosscap <command> --help\" for command help.\n")
+	fmt.Fprint(a.Out, "Usage: mosscap <command> [arguments]\n\nMosscap is a durable local work coordinator.\n\nCommands:\n  setup       initialize private local state\n  config      inspect or stage configuration\n  gateway     run, reload, or inspect the local gateway\n  doctor      run non-destructive local diagnostics\n  trust       manage trusted Slack users\n  purge       preview or confirm bounded metadata purge\n  task        manage local tasks\n  slack       read and operate in the configured Slack channel\n  effect      inspect durable Slack effects\n  file        show incoming Slack file metadata\n  delivery    inspect and recover Pi delivery attempts\n\nRun \"mosscap <command> --help\" for command help.\n")
 }
 func (a App) printBranchHelp(name string, children []string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s <command> [arguments]\n\nCommands:\n", name)

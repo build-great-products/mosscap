@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stayradiated/mosscap/internal/identity"
@@ -31,12 +33,13 @@ const (
 	CapabilitySlackEffects        = "slack_effects"
 	CapabilitySlackSourceMetadata = "slack_source_metadata"
 	CapabilityFileTransfer        = "file_transfer_v1"
+	CapabilityMetadataPurge       = "metadata_purge_v1"
 	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
 	// the gateway owns every delivery route and disconnect cleanup (T1).
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -71,6 +74,7 @@ type Error struct {
 	Message   string            `json:"message"`
 	Retriable bool              `json:"retriable"`
 	Details   map[string]string `json:"details,omitempty"`
+	Progress  *PurgeProgressDTO `json:"progress,omitempty"`
 }
 
 // HelloParams initiates a connection. SupportedVersions must include Version.
@@ -87,6 +91,42 @@ type HelloResult struct {
 }
 
 type EmptyParams struct{}
+
+// MetadataPurgeParams deliberately carries only a canonical RFC3339 cutoff
+// and an explicit mode. The request envelope carries the confirm request ID.
+type MetadataPurgeParams struct {
+	Cutoff string `json:"cutoff"`
+	Mode   string `json:"mode"`
+}
+
+// PurgeCountsDTO is bounded to the schema-v5 tables; arbitrary selectors are
+// intentionally not part of the protocol.
+type PurgeCountsDTO struct {
+	Tasks                  int64 `json:"tasks"`
+	TaskStateEvents        int64 `json:"task_state_events"`
+	SlackSourceEvents      int64 `json:"slack_source_events"`
+	SlackTaskSources       int64 `json:"slack_task_sources"`
+	PiDeliveries           int64 `json:"pi_deliveries"`
+	SlackEffects           int64 `json:"slack_effects"`
+	Files                  int64 `json:"files"`
+	FileTemporaryTransfers int64 `json:"file_temporary_transfers"`
+	MutationRequests       int64 `json:"mutation_requests"`
+}
+
+type MetadataPurgeDTO struct {
+	Cutoff            string         `json:"cutoff"`
+	Mode              string         `json:"mode"`
+	Eligible          PurgeCountsDTO `json:"eligible"`
+	SkippedLive       PurgeCountsDTO `json:"skipped_live"`
+	SkippedReferenced PurgeCountsDTO `json:"skipped_referenced"`
+	Removed           PurgeCountsDTO `json:"removed"`
+}
+
+// PurgeProgressDTO is included only on a retriable purge error. It reports
+// work committed before the interrupted batch, never speculative deletions.
+type PurgeProgressDTO struct {
+	Removed PurgeCountsDTO `json:"removed"`
+}
 
 // TrustMutationParams identifies one immutable Slack user.
 type TrustMutationParams struct {
@@ -530,6 +570,8 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &HelloParams{}
 	case "status.get", "doctor.run", "trust.list", "config.reload", "delivery.poll", "delivery.close":
 		target = &EmptyParams{}
+	case "metadata.purge":
+		target = &MetadataPurgeParams{}
 	case "slack.history":
 		target = &SlackHistoryParams{}
 	case "slack.thread":
@@ -602,6 +644,13 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		}
 		if !supported {
 			return errors.New("unsupported hello version")
+		}
+	case *MetadataPurgeParams:
+		if p.Mode != "dry_run" && p.Mode != "confirm" {
+			return errors.New("invalid metadata purge mode")
+		}
+		if _, err := ParsePurgeCutoff(p.Cutoff); err != nil {
+			return errors.New("invalid metadata purge cutoff")
 		}
 	case *TrustMutationParams:
 		if !validSlackUserID(p.SlackUserID) {
@@ -774,10 +823,27 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	}
 	return false
+}
+
+// ParsePurgeCutoff accepts the canonical RFC3339 lexical form used by purge:
+// calendar date, T separator, exactly six fractional microseconds, and either
+// Z or a numeric ±HH:MM offset. time.Parse is intentionally preceded by this
+// grammar check because it accepts useful-but-noncanonical variants.
+var purgeCutoffSyntax = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}(Z|[+-][0-9]{2}:[0-9]{2})$`)
+
+func ParsePurgeCutoff(value string) (time.Time, error) {
+	if len(value) == 0 || len(value) > 64 || !purgeCutoffSyntax.MatchString(value) {
+		return time.Time{}, errors.New("invalid canonical RFC3339 cutoff")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, errors.New("invalid canonical RFC3339 cutoff")
+	}
+	return parsed.UTC().Truncate(time.Microsecond), nil
 }
 
 func validTimestamp(value string) bool {

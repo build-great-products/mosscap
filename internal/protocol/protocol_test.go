@@ -248,6 +248,35 @@ func TestStrictDecode(t *testing.T) {
 		}
 	}
 }
+func TestMetadataPurgeParamsStrictAndNormalize(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{"2026-01-02T03:04:05.123456Z", true},
+		{"2026-01-02T04:04:05.123456+01:00", true},
+		{"2026-01-02", false}, {"2026-01-02T03:04:05", false},
+		{"2026-01-02T03:04:05Z", false}, {"2026-01-02T03:04:05.1Z", false},
+		{"2026-01-02T03:04:05.12345Z", false}, {"2026-01-02T03:04:05,123456Z", false},
+		{"2026-01-02T03:04:05.123456", false}, {"2026-01-02T03:04:05.1234567Z", false}, {"not-a-time", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			_, err := ParsePurgeCutoff(tc.value)
+			if (err == nil) != tc.valid {
+				t.Fatalf("ParsePurgeCutoff(%q) = %v", tc.value, err)
+			}
+		})
+	}
+	if err := ValidateParams("metadata.purge", []byte(`{"cutoff":"2026-01-02T03:04:05.000000Z","mode":"dry_run"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{`{"cutoff":"2026-01-02T03:04:05","mode":"dry_run"}`, `{"cutoff":"2026-01-02T03:04:05Z","mode":"other"}`, `{"cutoff":"2026-01-02T03:04:05,1Z","mode":"dry_run"}`, `{"cutoff":"2026-01-02T03:04:05Z","mode":"dry_run","extra":true}`} {
+		if err := ValidateParams("metadata.purge", []byte(raw)); err == nil {
+			t.Fatalf("accepted invalid params %s", raw)
+		}
+	}
+}
+
 func FuzzDecodeRequest(f *testing.F) {
 	f.Add([]byte(`{"protocol_version":1,"request_id":"req_abcdefghijklmnopqrstuv","client_kind":"cli","client_version":"x","command":"hello","params":{"supported_versions":[1],"capabilities":[]}}`))
 	f.Fuzz(func(t *testing.T, payload []byte) { _, _ = DecodeRequest(payload) })

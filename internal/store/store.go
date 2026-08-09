@@ -66,6 +66,12 @@ type Store struct {
 	mu    sync.Mutex
 	clock clock.Clock
 	ids   identity.Generator
+
+	// purgeDeleteHook is an unexported deterministic test seam. It is called
+	// after each successful purge DELETE, while the containing transaction is
+	// still open, so rollback/error boundaries can be proved without altering
+	// production behavior.
+	purgeDeleteHook func() error
 }
 
 type Task struct {

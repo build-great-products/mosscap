@@ -635,6 +635,25 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		checks = append(checks, s.phase1Doctor(ctx)...)
 		checks = append(checks, s.fileTransferDoctor(ctx)...)
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
+	case "metadata.purge":
+		var p protocol.MetadataPurgeParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "metadata_purge"
+		var cutoff time.Time
+		cutoff, err = protocol.ParsePurgeCutoff(p.Cutoff)
+		if err == nil {
+			var purge store.PurgeResult
+			if p.Mode == "dry_run" {
+				purge, err = s.store.PreviewMetadataPurge(ctx, cutoff)
+			} else if p.Mode == "confirm" {
+				purge, err = s.store.ConfirmMetadataPurge(ctx, r.RequestID, cutoff)
+			} else {
+				err = errors.New("invalid metadata purge mode")
+			}
+			if err == nil {
+				result = metadataPurgeDTO(purge, p.Mode)
+			}
+		}
 	case "trust.list":
 		resultType = "trusted_user_list"
 		var users []string
@@ -1082,6 +1101,10 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "ambiguous", "ambiguous"
 	case errors.Is(err, store.ErrRequestConflict):
 		code, category = "request_id_conflict", "conflict"
+	case func() bool { var purge *store.PurgeError; return errors.As(err, &purge) }():
+		var purge *store.PurgeError
+		_ = errors.As(err, &purge)
+		return protocol.Response{ProtocolVersion: protocol.Version, RequestID: id, ServerVersion: version, Error: &protocol.Error{Code: "purge_interrupted", Category: "unavailable", Message: "metadata purge interrupted; retry safely", Retriable: true, Progress: &protocol.PurgeProgressDTO{Removed: purgeCountsDTO(purge.Progress.Removed)}}}
 	case errors.Is(err, store.ErrDeliveryNotFound):
 		code, category = "delivery_not_found", "not_found"
 	case errors.Is(err, store.ErrDeliveryOwnership), errors.Is(err, store.ErrDeliveryTransition), errors.Is(err, store.ErrDeliveryRequeueDenied), errors.Is(err, pidelivery.ErrNotOpen), errors.Is(err, pidelivery.ErrSessionBound):
@@ -1141,6 +1164,16 @@ func dto(v any) any {
 	default:
 		return v
 	}
+}
+func metadataPurgeDTO(result store.PurgeResult, mode string) protocol.MetadataPurgeDTO {
+	return protocol.MetadataPurgeDTO{
+		Cutoff: stamp(result.Cutoff), Mode: mode,
+		Eligible: purgeCountsDTO(result.Eligible), SkippedLive: purgeCountsDTO(result.SkippedLive),
+		SkippedReferenced: purgeCountsDTO(result.SkippedReferenced), Removed: purgeCountsDTO(result.Removed),
+	}
+}
+func purgeCountsDTO(c store.PurgeCounts) protocol.PurgeCountsDTO {
+	return protocol.PurgeCountsDTO{Tasks: c.Tasks, TaskStateEvents: c.TaskStateEvents, SlackSourceEvents: c.SlackSourceEvents, SlackTaskSources: c.SlackTaskSources, PiDeliveries: c.PiDeliveries, SlackEffects: c.SlackEffects, Files: c.Files, FileTemporaryTransfers: c.FileTemporaryTransfers, MutationRequests: c.MutationRequests}
 }
 func deliveryCountsDTO(c store.DeliveryCounts) protocol.DeliveryCountsDTO {
 	return protocol.DeliveryCountsDTO{EligibleBacklogCount: c.Eligible, UncertainCount: c.Uncertain, RejectedCount: c.Rejected}

@@ -31,6 +31,7 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"gateway", "status", "--help"},
 		{"doctor", "--help"},
 		{"trust", "--help"},
+		{"purge", "--help"},
 		{"trust", "list", "--help"},
 		{"trust", "add", "--help"},
 		{"trust", "remove", "--help"},
@@ -242,6 +243,27 @@ func TestFileOutputAndPathExitMappings(t *testing.T) {
 	transfer.TemporaryPath = "/tmp/other/mosscap-xfr-" + strings.Repeat("a", 32)
 	if validFileTransferResult(config.Config{Paths: config.Paths{TmpDir: "/tmp/mosscap"}}, transfer) {
 		t.Fatal("transfer outside configured tmp accepted")
+	}
+}
+
+func TestPurgeRejectsAmbiguousModesAndInvalidCutoffsBeforeDialing(t *testing.T) {
+	for _, args := range [][]string{
+		{"purge", "--before", "2026-01-01T00:00:00Z"},
+		{"purge", "--before", "2026-01-01T00:00:00Z", "--dry-run", "--confirm"},
+		{"purge", "--before", "2026-01-01T00:00:00", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00Z", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.1Z", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.12345+01:00", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00,000000Z", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00Z", "--dry-run", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run=false"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run", "--confirm=false"},
+	} {
+		var out, errOut bytes.Buffer
+		if got := (App{Out: &out, Err: &errOut}).Run(context.Background(), args); got != ExitUsage {
+			t.Fatalf("Run(%q) = %d, stderr=%q", args, got, errOut.String())
+		}
 	}
 }
 

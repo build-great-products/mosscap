@@ -50,6 +50,45 @@ func newTestServer(t *testing.T, c config.Config) *Server {
 	return New(c, config.Location{Home: home, Path: path, Paths: paths}, "test", nil)
 }
 
+func TestMetadataPurgeGenericAfterDeleteFailureMapsToRetriableZeroProgress(t *testing.T) {
+	r := errorResponse("req_server_purge_error", "test", &store.PurgeError{
+		Cause:    errors.New("after-delete generic failure"),
+		Progress: store.PurgeResult{},
+	})
+	if r.Error == nil || r.Error.Code != "purge_interrupted" || !r.Error.Retriable || r.Error.Progress == nil || r.Error.Progress.Removed != (protocol.PurgeCountsDTO{}) {
+		t.Fatalf("response = %#v", r)
+	}
+}
+
+func TestMetadataPurgeRouteDryRunDoesNotWriteRequest(t *testing.T) {
+	db, err := store.Initialize(context.Background(), filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Server{Version: "test", store: db}
+	old := int64(1_700_000_000_000_000)
+	if _, err := s.store.DB().Exec(`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES('tsk_server_preview',1,'done','done','local',?,?,?)`, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+	params := []byte(`{"cutoff":"2023-11-14T22:13:20.000001Z","mode":"dry_run"}`)
+	r := s.dispatch(context.Background(), protocol.Request{RequestID: "req_server_purge_preview", Command: "metadata.purge", Params: params})
+	if r.Error != nil || r.ResultType != "metadata_purge" {
+		t.Fatalf("response = %#v", r)
+	}
+	var got protocol.MetadataPurgeDTO
+	if err := json.Unmarshal(r.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != "dry_run" || got.Eligible.Tasks != 1 || got.Removed.Tasks != 0 {
+		t.Fatalf("result = %#v", got)
+	}
+	var requests int
+	if err := s.store.DB().QueryRow("SELECT count(*) FROM mutation_requests").Scan(&requests); err != nil || requests != 0 {
+		t.Fatalf("dry-run request records = %d, %v", requests, err)
+	}
+}
+
 func TestReloadIsFailureAtomicAndUsesImmutableSnapshots(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
