@@ -74,6 +74,28 @@ func TestSafeErrorRendersMissingScopesRemediation(t *testing.T) {
 	}
 }
 
+func TestSafeErrorRendersTypedVerificationAdviceWithoutSecrets(t *testing.T) {
+	const secret = "xoxb-secret-canary"
+	tests := []struct {
+		code slackapi.DiagnosticCode
+		want string
+	}{
+		{slackapi.DiagnosticInvalidAuth, "Replace the bot token"},
+		{slackapi.DiagnosticTeamMismatch, "intended workspace"},
+		{slackapi.DiagnosticChannelNotFound, "invite the bot"},
+		{slackapi.DiagnosticChannelArchived, "writable public or private channel"},
+		{slackapi.DiagnosticUserNotFound, "active human"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.code), func(t *testing.T) {
+			err := safeError(slackapi.NewVerificationError(test.code))
+			if err == nil || !contains(err.Error(), string(test.code)) || !contains(err.Error(), test.want) || contains(err.Error(), secret) {
+				t.Fatalf("safeError = %q", err)
+			}
+		})
+	}
+}
+
 func TestStartGatesEnvelopeHandlingUntilActivation(t *testing.T) {
 	c := validConfig(t)
 	ack, ackRecorder := fake.NewAckRecorder(nil)

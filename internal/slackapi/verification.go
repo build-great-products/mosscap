@@ -8,21 +8,21 @@ import "context"
 // active humans in that workspace. Returned errors contain no supplied IDs.
 func Verify(ctx context.Context, web Web, request VerificationRequest) (VerificationResult, error) {
 	if web == nil || ValidateChannelID(request.ChannelID) != nil {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
 	}
 	if (request.TeamID != "" && ValidateTeamID(request.TeamID) != nil) || (request.BotUserID != "" && ValidateUserID(request.BotUserID) != nil) {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
 	}
 	if len(request.TrustedUserIDs) > MaxFiles {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
 	}
 	seenUsers := make(map[string]struct{}, len(request.TrustedUserIDs))
 	for _, userID := range request.TrustedUserIDs {
 		if ValidateUserID(userID) != nil {
-			return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
+			return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
 		}
 		if _, exists := seenUsers[userID]; exists {
-			return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticInvalidRequest, "", nil)
+			return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
 		}
 		seenUsers[userID] = struct{}{}
 	}
@@ -34,10 +34,10 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 	teamID := identity.TeamID
 	botUserID := identity.BotUserID
 	if request.TeamID != "" && identity.TeamID != request.TeamID {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticTeamMismatch, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticTeamMismatch)
 	}
 	if request.BotUserID != "" && identity.BotUserID != request.BotUserID {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticBotMismatch, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticBotMismatch)
 	}
 	if ValidateTeamID(teamID) != nil || ValidateUserID(botUserID) != nil {
 		return VerificationResult{}, NewExternalError(ReasonInvalidResponse, DiagnosticMalformedResponse, "", nil)
@@ -48,7 +48,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 		return VerificationResult{}, err
 	}
 	if team.ID != teamID {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticTeamMismatch, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticTeamMismatch)
 	}
 
 	channel, err := web.Channel(ctx, request.ChannelID)
@@ -56,7 +56,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 		return VerificationResult{}, err
 	}
 	if channel.ID != request.ChannelID || channel.TeamID != teamID {
-		return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticTeamMismatch, "", nil)
+		return VerificationResult{}, NewVerificationError(DiagnosticTeamMismatch)
 	}
 	if err := VerifyChannel(channel); err != nil {
 		return VerificationResult{}, err
@@ -87,7 +87,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 			return VerificationResult{}, err
 		}
 		if user.ID != userID || user.TeamID != teamID || user.Bot || user.Deactivated {
-			return VerificationResult{}, NewExternalError(ReasonRejected, DiagnosticUserNotFound, "", nil)
+			return VerificationResult{}, NewVerificationError(DiagnosticUserNotFound)
 		}
 		result.Users = append(result.Users, user)
 	}
@@ -98,19 +98,19 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 // its required history and mutation operations.
 func VerifyChannel(channel Channel) error {
 	if !channel.Accessible {
-		return NewExternalError(ReasonRejected, DiagnosticChannelNotFound, "", nil)
+		return NewVerificationError(DiagnosticChannelNotFound)
 	}
 	if channel.IM || channel.MPIM {
-		return NewExternalError(ReasonRejected, DiagnosticUnsupportedChannel, "", nil)
+		return NewVerificationError(DiagnosticUnsupportedChannel)
 	}
 	if channel.Archived {
-		return NewExternalError(ReasonRejected, DiagnosticChannelArchived, "", nil)
+		return NewVerificationError(DiagnosticChannelArchived)
 	}
 	if channel.ReadOnly {
-		return NewExternalError(ReasonRejected, DiagnosticChannelReadOnly, "", nil)
+		return NewVerificationError(DiagnosticChannelReadOnly)
 	}
 	if !channel.Member {
-		return NewExternalError(ReasonRejected, DiagnosticNotInChannel, "", nil)
+		return NewVerificationError(DiagnosticNotInChannel)
 	}
 	return nil
 }

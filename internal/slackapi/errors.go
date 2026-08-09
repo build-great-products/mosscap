@@ -98,16 +98,48 @@ type ExternalError struct {
 	requestID  string
 }
 
-// MissingScopesError is a secret-safe, typed verification rejection. Its
-// scopes are restricted to Mosscap's required bot OAuth scope allowlist.
-type MissingScopesError struct {
-	missing []Scope
+// VerificationDiagnostic is the bounded, actionable result of a failed
+// startup authority check. It deliberately contains no configured IDs, token,
+// response body, or display name. MissingScopes is populated only for
+// DiagnosticMissingScope and only with Mosscap's allowlisted bot scopes.
+type VerificationDiagnostic struct {
+	Code          DiagnosticCode
+	MissingScopes []Scope
+}
+
+// VerificationError is a typed, secret-safe conclusive verification failure.
+// Use VerificationDiagnosticFromError rather than inspecting its rendering.
+type VerificationError struct {
+	diagnostic VerificationDiagnostic
+}
+
+// NewVerificationError creates a typed verification rejection. Only
+// conclusive authority/configuration diagnostics are retained; callers cannot
+// attach arbitrary text, identifiers, or transient transport outcomes.
+func NewVerificationError(code DiagnosticCode) *VerificationError {
+	if !verificationRejectionCode(code) {
+		code = DiagnosticRejected
+	}
+	return &VerificationError{diagnostic: VerificationDiagnostic{Code: code}}
+}
+
+func verificationRejectionCode(code DiagnosticCode) bool {
+	switch code {
+	case DiagnosticInvalidAuth, DiagnosticTokenRevoked, DiagnosticMissingScope,
+		DiagnosticTeamMismatch, DiagnosticBotMismatch, DiagnosticChannelNotFound,
+		DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel,
+		DiagnosticNotInChannel, DiagnosticUserNotFound, DiagnosticInvalidRequest,
+		DiagnosticRejected:
+		return true
+	default:
+		return false
+	}
 }
 
 // NewMissingScopesError retains a sorted, deduplicated copy of required bot
 // scopes only. Invalid or unrelated values are discarded so error rendering
 // cannot expose arbitrary external response content.
-func NewMissingScopesError(missing []Scope) *MissingScopesError {
+func NewMissingScopesError(missing []Scope) *VerificationError {
 	seen := make(map[Scope]struct{}, len(missing))
 	safe := make([]Scope, 0, len(missing))
 	for _, scope := range missing {
@@ -121,32 +153,76 @@ func NewMissingScopesError(missing []Scope) *MissingScopesError {
 		safe = append(safe, scope)
 	}
 	sort.Slice(safe, func(i, j int) bool { return safe[i] < safe[j] })
-	return &MissingScopesError{missing: safe}
+	return &VerificationError{diagnostic: VerificationDiagnostic{Code: DiagnosticMissingScope, MissingScopes: safe}}
 }
 
-func (e *MissingScopesError) Error() string { return "Slack external failure (missing_scope)" }
+func (e *VerificationError) Error() string {
+	if e == nil || !e.diagnostic.Code.Valid() {
+		return "Slack verification failed"
+	}
+	return fmt.Sprintf("Slack verification failed (%s)", e.diagnostic.Code)
+}
 
 // Format prevents debug renderers from observing the private scope slice.
-func (e *MissingScopesError) Format(state fmt.State, _ rune) {
-	_, _ = state.Write([]byte(e.Error()))
-}
+func (e *VerificationError) Format(state fmt.State, _ rune) { _, _ = state.Write([]byte(e.Error())) }
 
 // MissingScopes returns a copy of the exact sorted bot OAuth scope names.
-func (e *MissingScopesError) MissingScopes() []Scope {
-	if e == nil {
+// It is empty for every verification failure other than missing_scope.
+func (e *VerificationError) MissingScopes() []Scope {
+	if e == nil || e.diagnostic.Code != DiagnosticMissingScope {
 		return nil
 	}
-	return append([]Scope(nil), e.missing...)
+	return append([]Scope(nil), e.diagnostic.MissingScopes...)
+}
+
+// VerificationDiagnosticFromError returns a copied typed diagnostic.
+func VerificationDiagnosticFromError(err error) (VerificationDiagnostic, bool) {
+	var verification *VerificationError
+	if !errors.As(err, &verification) || verification == nil {
+		return VerificationDiagnostic{}, false
+	}
+	diagnostic := verification.diagnostic
+	diagnostic.MissingScopes = append([]Scope(nil), diagnostic.MissingScopes...)
+	return diagnostic, true
 }
 
 // MissingScopesFromError extracts safe missing scope names from a verification
 // error without exposing arbitrary wrapped causes.
 func MissingScopesFromError(err error) ([]Scope, bool) {
-	var missing *MissingScopesError
-	if !errors.As(err, &missing) {
+	diagnostic, ok := VerificationDiagnosticFromError(err)
+	if !ok || diagnostic.Code != DiagnosticMissingScope {
 		return nil, false
 	}
-	return missing.MissingScopes(), true
+	return diagnostic.MissingScopes, true
+}
+
+// Advice gives a stable operator action for a verification diagnostic. Its
+// strings are allowlisted and never interpolate Slack-supplied values.
+func (d VerificationDiagnostic) Advice() string { return VerificationAdvice(d.Code) }
+
+func VerificationAdvice(code DiagnosticCode) string {
+	switch code {
+	case DiagnosticInvalidAuth, DiagnosticTokenRevoked:
+		return "Replace the bot token with the installed app token, then restart or gateway reload."
+	case DiagnosticMissingScope:
+		return "Add them in Slack app OAuth & Permissions, reinstall/re-authorize the app, then restart or gateway reload."
+	case DiagnosticTeamMismatch, DiagnosticBotMismatch:
+		return "Check that the installed Slack app belongs to the intended workspace, then restart or gateway reload."
+	case DiagnosticChannelNotFound, DiagnosticNotInChannel:
+		return "Check configured channel access and invite the bot to that channel, then restart or gateway reload."
+	case DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel:
+		return "Configure a writable public or private channel where the bot is a member, then restart or gateway reload."
+	case DiagnosticUserNotFound:
+		return "Review trusted users: each must be an active human in the configured workspace, then restart or gateway reload."
+	case DiagnosticInvalidRequest:
+		return "Check the configured Slack IDs and runtime configuration, then restart or gateway reload."
+	case DiagnosticTimeout, DiagnosticCanceled, DiagnosticDisconnected, DiagnosticUnavailable, DiagnosticRateLimited:
+		return "Check Slack network availability and retry startup or gateway reload."
+	case DiagnosticMalformedResponse:
+		return "Retry startup or gateway reload; if it persists, check Slack service health and app configuration."
+	default:
+		return "Check Slack app credentials, workspace, bot, and channel access, then restart or gateway reload."
+	}
 }
 
 func requiredBotScope(scope Scope) bool {
@@ -213,10 +289,9 @@ func Classify(err error, point FailurePoint) Failure {
 		diagnostic = external.diagnostic
 		requestID = external.requestID
 	}
-	var missingScopes *MissingScopesError
-	if errors.As(err, &missingScopes) {
+	if verification, ok := VerificationDiagnosticFromError(err); ok {
 		reason = ReasonRejected
-		diagnostic = DiagnosticMissingScope
+		diagnostic = verification.Code
 	}
 	if reason == ReasonRejected {
 		return Failure{Class: FailureConclusive, Diagnostic: diagnostic, RequestID: requestID}

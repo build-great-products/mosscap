@@ -284,14 +284,17 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 	return &Snapshot{Config: c, TeamID: verified.Identity.TeamID, BotUserID: verified.Identity.BotUserID, ChannelID: c.SlackChannelID, Web: web, stream: stream, done: make(chan struct{})}, nil
 }
 func safeError(err error) error {
-	if missing, ok := slackapi.MissingScopesFromError(err); ok && len(missing) != 0 {
-		return errors.New("Slack app is missing required bot OAuth scopes: " + strings.Join(scopesToStrings(missing), ", ") + ". Add them in Slack app OAuth & Permissions, reinstall/re-authorize the app, then restart or gateway reload.")
+	if diagnostic, ok := slackapi.VerificationDiagnosticFromError(err); ok {
+		if diagnostic.Code == slackapi.DiagnosticMissingScope && len(diagnostic.MissingScopes) != 0 {
+			return errors.New("Slack app is missing required bot OAuth scopes: " + strings.Join(scopesToStrings(diagnostic.MissingScopes), ", ") + ". " + diagnostic.Advice())
+		}
+		return errors.New("Slack runtime verification failed (" + string(diagnostic.Code) + "). " + diagnostic.Advice())
 	}
 	failure := slackapi.Classify(err, slackapi.FailureSocket)
 	if failure.Diagnostic.Valid() {
-		return errors.New("Slack runtime verification failed (" + string(failure.Diagnostic) + ")")
+		return errors.New("Slack runtime verification failed (" + string(failure.Diagnostic) + "). " + slackapi.VerificationAdvice(failure.Diagnostic))
 	}
-	return errors.New("Slack runtime verification failed")
+	return errors.New("Slack runtime verification failed. " + slackapi.VerificationAdvice(""))
 }
 
 func scopesToStrings(scopes []slackapi.Scope) []string {
