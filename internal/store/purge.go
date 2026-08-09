@@ -65,7 +65,7 @@ func (s *Store) PreviewMetadataPurge(ctx context.Context, cutoff time.Time) (Pur
 	out := PurgeResult{Cutoff: cutoff}
 	budget := purgeBudget{rows: PurgeBatchSize, roots: PurgeRootLimit}
 	if err := selectMetadataPurge(ctx, s.db, cutoffUS, "", &budget, &out, false); err != nil {
-		return PurgeResult{}, classifyPurgeError(err, out)
+		return PurgeResult{}, classifyPurgeError(err, out, false)
 	}
 	return out, nil
 }
@@ -92,11 +92,11 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 	defer s.mu.Unlock()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return PurgeResult{}, classifyPurgeError(err, PurgeResult{Cutoff: cutoff})
+		return PurgeResult{}, classifyPurgeError(err, PurgeResult{Cutoff: cutoff}, false)
 	}
 	defer conn.Close()
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return PurgeResult{}, classifyPurgeError(err, PurgeResult{Cutoff: cutoff})
+		return PurgeResult{}, classifyPurgeError(err, PurgeResult{Cutoff: cutoff}, false)
 	}
 	committed := false
 	defer func() {
@@ -130,23 +130,24 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 
 	out := PurgeResult{Cutoff: cutoff}
 	budget := purgeBudget{rows: PurgeBatchSize, roots: PurgeRootLimit}
-	var purgeQ purgeConn = conn
+	deleted := false
+	var purgeQ purgeConn = purgeTrackingConn{purgeConn: conn, deleted: &deleted}
 	if s.purgeDeleteHook != nil {
-		purgeQ = purgeFaultConn{purgeConn: conn, afterDelete: s.purgeDeleteHook}
+		purgeQ = purgeFaultConn{purgeConn: purgeQ, afterDelete: s.purgeDeleteHook}
 	}
 	if err := selectMetadataPurge(ctx, purgeQ, cutoffUS, requestID, &budget, &out, true); err != nil {
-		return PurgeResult{}, classifyPurgeError(err, out)
+		return PurgeResult{}, classifyPurgeError(err, out, deleted)
 	}
 	raw, err := json.Marshal(out)
 	if err != nil {
-		return PurgeResult{}, err
+		return PurgeResult{}, classifyPurgeError(err, out, deleted)
 	}
 	now := s.now()
 	if _, err := conn.ExecContext(ctx, "INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,result_type,result_json,created_at,completed_at,expiry_eligible_at) VALUES(?,?,?,'success','metadata_purge',?,?,?,?)", requestID, req.operation, req.hash, string(raw), now, now, now+RequestRetention.Microseconds()); err != nil {
-		return PurgeResult{}, classifyPurgeError(err, out)
+		return PurgeResult{}, classifyPurgeError(err, out, deleted)
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return PurgeResult{}, classifyPurgeError(err, out)
+		return PurgeResult{}, classifyPurgeError(err, out, deleted)
 	}
 	committed = true
 	return out, nil
@@ -158,11 +159,23 @@ type purgeConn interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type purgeTrackingConn struct {
+	purgeConn
+	deleted *bool
+}
+
+func (q purgeTrackingConn) afterSuccessfulPurgeDelete() { *q.deleted = true }
+
 type purgeFaultConn struct {
 	purgeConn
 	afterDelete func() error
 }
 
+func (q purgeFaultConn) afterSuccessfulPurgeDelete() {
+	if tracker, ok := q.purgeConn.(interface{ afterSuccessfulPurgeDelete() }); ok {
+		tracker.afterSuccessfulPurgeDelete()
+	}
+}
 func (q purgeFaultConn) afterPurgeDelete() error { return q.afterDelete() }
 
 // PurgeError records that no in-flight transaction was committed. Result is
@@ -176,11 +189,13 @@ type PurgeError struct {
 func (e *PurgeError) Error() string { return "metadata purge interrupted; retry safely" }
 func (e *PurgeError) Unwrap() error { return e.Cause }
 
-func classifyPurgeError(err error, progress PurgeResult) error {
+func classifyPurgeError(err error, progress PurgeResult, deleted bool) error {
 	// A confirm invocation is a single transaction. Until COMMIT succeeds,
 	// every observed deletion is speculative and must not escape as progress.
 	progress.Removed = PurgeCounts{}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// Once any DELETE succeeds, all later failures are retryable: rollback
+	// restores the batch, including errors injected after the DELETE itself.
+	if deleted || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &PurgeError{Cause: err, Progress: progress}
 	}
 	message := strings.ToLower(err.Error())
@@ -509,6 +524,9 @@ func deleteCount(ctx context.Context, q purgeConn, query string, args ...any) (i
 	r, err := q.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
+	}
+	if tracker, ok := q.(interface{ afterSuccessfulPurgeDelete() }); ok {
+		tracker.afterSuccessfulPurgeDelete()
 	}
 	if hook, ok := q.(interface{ afterPurgeDelete() error }); ok {
 		if err := hook.afterPurgeDelete(); err != nil {

@@ -434,6 +434,7 @@ func insertPurgeUpload(t *testing.T, s *Store, effectID, fileID, taskID string, 
 func TestConfirmMetadataPurgeRetriableFailureRollsBackAndReportsOnlyCommittedProgress(t *testing.T) {
 	for _, cause := range []error{
 		context.Canceled,
+		errors.New("after-delete generic failure"),
 		errors.New("database is busy"),
 		errors.New("database or disk is full"),
 		errors.New("interrupted"),

@@ -50,12 +50,12 @@ func newTestServer(t *testing.T, c config.Config) *Server {
 	return New(c, config.Location{Home: home, Path: path, Paths: paths}, "test", nil)
 }
 
-func TestMetadataPurgeRetriableErrorIncludesOnlyCommittedProgress(t *testing.T) {
+func TestMetadataPurgeGenericAfterDeleteFailureMapsToRetriableZeroProgress(t *testing.T) {
 	r := errorResponse("req_server_purge_error", "test", &store.PurgeError{
-		Cause:    context.Canceled,
-		Progress: store.PurgeResult{Removed: store.PurgeCounts{Tasks: 7}},
+		Cause:    errors.New("after-delete generic failure"),
+		Progress: store.PurgeResult{},
 	})
-	if r.Error == nil || r.Error.Code != "purge_interrupted" || !r.Error.Retriable || r.Error.Progress == nil || r.Error.Progress.Removed.Tasks != 7 {
+	if r.Error == nil || r.Error.Code != "purge_interrupted" || !r.Error.Retriable || r.Error.Progress == nil || r.Error.Progress.Removed != (protocol.PurgeCountsDTO{}) {
 		t.Fatalf("response = %#v", r)
 	}
 }
