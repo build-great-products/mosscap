@@ -1,10 +1,10 @@
-# Phase 3B: durable metadata purge contract
+# Phase 3B: metadata purge contract
 
 **Status:** authoritative implementation contract; implementation intentionally deferred.
 
-This plan owns the metadata-purge half of Phase 3. [`docs/SPEC.md`](../SPEC.md) is authoritative except where this plan makes a more restrictive implementation decision. It follows the completed file-transfer schema in migration `0005_file_transfer.sql`; it must not create a byte archive or redefine file transfer.
+This plan owns the metadata-purge half of Phase 3. [`docs/SPEC.md`](../SPEC.md) remains authoritative. This contract is deliberately limited to the durable schema through `0005_file_transfer.sql`; it does not create a byte archive or redefine file transfer.
 
-## 1. Command, cutoff, and operator intent
+## 1. Command and request semantics
 
 Expose only:
 
@@ -13,93 +13,86 @@ mosscap purge --before RFC3339 --dry-run
 mosscap purge --before RFC3339 --confirm
 ```
 
-Exactly one mode is required. `--before` is required, parsed strictly as RFC 3339 with an explicit UTC-capable offset (`Z` or `±HH:MM`), rejects date-only/local/ambiguous input, and is normalized to an integer UTC microsecond cutoff. Fractional precision beyond microseconds is rejected rather than rounded. Eligibility is **strictly older**: a timestamp equal to the cutoff is retained. The rendered cutoff is canonical UTC RFC 3339 with microseconds.
+Exactly one mode and `--before` are required. Parse the cutoff as RFC 3339 with `Z` or an explicit `±HH:MM` offset, reject date-only/local/ambiguous inputs and precision beyond microseconds, then normalize it to an integer UTC-microsecond cutoff. Eligibility is strictly older (`<`); a value equal to the cutoff is retained. Render the cutoff as canonical UTC RFC 3339 with microseconds.
 
-`--dry-run` is read-only: it performs the same eligibility traversal and reports no mutation, maintenance, temporary cleanup, or request-dedup record write. `--confirm` is irreversible and must use the gateway mutation request ID/deduplication contract. Replay of a completed confirmed request returns its original typed report without deleting another batch; reuse with a different normalized cutoff or mode conflicts. The request record itself remains live during its retention period and is not selected by that same request.
+`--dry-run` is read-only: no durable writes, temporary-byte unlink, checkpoint, or vacuum. `--confirm` uses the existing `mutation_requests` request-ID/deduplication mechanism. Its record has actual columns `request_id`, `operation`, `input_hash`, `outcome`, `created_at`, `completed_at`, and `expiry_eligible_at`; exact replay returns the stored typed result, while a changed normalized cutoff or mode conflicts. A live request record is excluded from selection by its own request.
 
-Both modes report grouped counts by record type and disposition:
+Both modes report bounded grouped `eligible`, `skipped_live`, `skipped_referenced`, and `removed` counts for actual tables: `tasks`, `task_state_events`, `slack_source_events`, `slack_task_sources`, `pi_deliveries`, `slack_effects`, `files`, `file_temporary_transfers`, and `mutation_requests`. A zero report is success. There is no consumer count: migrations `0001`–`0005` contain no durable consumer or leader table, so the SPEC's consumer-record purge requirement is not applicable at this schema version.
 
-```text
-eligible, skipped_live, skipped_referenced, removed
-```
+## 2. Schema inventory and cutoff rules
 
-The report includes task/state-event/source-event/delivery/effect/file/temporary-transfer/request/consumer counts, batch count, cutoff, and whether SQLite maintenance ran. A zero report is success.
+Implementation starts by freezing SQL against this inventory; no named column below is inferred from the SPEC.
 
-## 2. Retention graph and eligibility
+| Record | Existing eligibility timestamp / rule |
+| --- | --- |
+| `tasks` | `state = 'done'` and `done_at < cutoff` (`done_at` is the only completion timestamp). |
+| `task_state_events` | Owned by a selected task; its actual timestamp is `committed_at`. It is not an independent root. |
+| `slack_task_sources` | Owned by a selected task; its actual timestamps include `latest_event_at_us`, `source_deleted_at_us`, `created_at_us`, and `updated_at_us`. It is not an independent root. |
+| `slack_source_events` | An event linked to a selected task is removed only with that task. An unlinked row with `task_id IS NULL` is independently eligible only when `admission_result IN ('duplicate', 'ignored_workspace', 'ignored_channel', 'ignored_untrusted', 'ignored_unmentioned', 'ignored_bot', 'ignored_stale', 'ignored_untracked', 'malformed')` and `committed_at_us < cutoff`. |
+| `pi_deliveries` | Only `state = 'persisted'` can be considered as task-owned finalized history. The implementation schema-inventory decision must define whether `completed_at_us` is required for its cutoff (it is nullable in `0004`) or whether `updated_at_us` is the conservative fallback; no nonexistent lease or consumer fields may be used. |
+| `slack_effects` | Only `state = 'confirmed'` and non-null `completed_at_us < cutoff`. A task-related effect is removable only with its selected task; an unrelated confirmed effect may be a root if its predecessor graph and files are also removable. |
+| `files` | `0005` requires `related_task_id IS NOT NULL OR related_effect_id IS NOT NULL`; therefore no ownerless file row exists. Delete it only with selected related owner(s), after all `file_temporary_transfers` for it are gone. Its actual timestamps are `created_at_us`, `updated_at_us`, and, for detached incoming metadata, `source_detached_at_us`; the latter is not an automatic purge timestamp. |
+| `file_temporary_transfers` | Expiry is `expires_at_us < cutoff`. It is temporary-byte lifecycle work, not proof that parent `files` metadata is removable. |
+| `mutation_requests` | `expiry_eligible_at < cutoff`. This column exists in `0001`; retain requests not yet eligible and the request executing this purge. |
 
-Purge is graph-based, not independent table-age deletion. It may remove only finalized, cutoff-old roots and dependencies that become exclusively owned by removed roots.
+The migrations have no `consumers`, leader, generation, fenced-consumer, purge-lease, or purge-lock table. They also have no `leased` delivery state: `0004` permits only `pending`, `inserting`, `persisted`, `uncertain`, and `rejected`. Any later schema change needed for different retention semantics must be separately designed and migrated; this plan does not assume it.
 
-### Eligible roots
+## 3. Retention graph and skips
 
-- `tasks` only when `state='done'`, `done_at < cutoff`, and every dependent delivery/effect is itself removable.
-- `slack_effects` only when `state='confirmed'` and its terminal/completion timestamp is before cutoff. A task-related effect is removable only with its removable task; an old standalone confirmed effect may be a root.
-- `slack_source_events` only when old ignored/duplicate records are unreferenced by retained source/task state, or when exclusively owned by a removable task.
-- `mutation_requests` only when `expiry_eligible_at < cutoff` and no replay/liveness rule retains it.
-- disconnected or fenced consumer records only when old and not current leadership.
-- incoming/outgoing `files` only when unreferenced after removable task/effect deletion. Detached incoming metadata is still durable metadata and follows this rule.
-- `file_temporary_transfers` only as expired temporary-byte lifecycle work; its parent file metadata is not automatically deleted merely because temporary bytes expire.
+Purge is graph-based, not independent table-age deletion. A task root is eligible only when it satisfies the `tasks` rule and every referencing `pi_deliveries`, `slack_effects`, `files`, `slack_task_sources`, `slack_source_events`, and `task_state_events` row is selected in the same batch or otherwise does not reference it. In particular, any delivery other than the finalized rule above, any effect other than the confirmed rule above, or any retained file makes the task `skipped_live` or `skipped_referenced` as applicable.
 
-### Non-negotiable skips
+Always retain `open` and `working` tasks; `pending`, `inserting`, `uncertain`, and `rejected` deliveries; `prepared`, `submitted`, `failed`, and `ambiguous` effects; requests whose `expiry_eligible_at` is not older than cutoff; `trusted_users`; `schema_migrations`; and every row referenced by retained state. Do not null, rewrite, or weaken evidence to make a candidate eligible.
 
-Always retain `open`/`working` tasks; current leader and connected consumers; pending, leased, or inserting deliveries; uncertain or rejected deliveries; prepared, submitted, failed, or ambiguous effects; live request records; trust/config/schema data; and every ancestor/dependent row needed by retained state.
+For effects, account for the actual self-reference `predecessor_effect_id`: a confirmed candidate is removable only if no retained effect references it. For source linkage, account for `slack_task_sources`' composite foreign key to `(source_event_id, task_id)` in `slack_source_events`. Existing `ON DELETE RESTRICT` foreign keys remain the final safety net, not the selection algorithm.
 
-A done task with **any** unresolved delivery or effect is skipped as a whole, together with its state events, Slack source linkage/events, and files. An effect predecessor/successor relationship is retained unless every linked effect selected for removal is removable in the same batch. Any foreign-key edge to a retained row turns the candidate into `skipped_referenced`; do not null, rewrite, or weaken evidence to make it eligible.
+## 4. Batches, concurrency, and deletion order
 
-The implementation must express this graph explicitly in store queries and tests rather than relying on `ON DELETE` behavior. Existing `ON DELETE RESTRICT` foreign keys remain a final safety net.
+Each confirmed batch uses `BEGIN IMMEDIATE`, `foreign_keys=ON`, and the configured bounded SQLite busy timeout. SQLite's writer transaction serializes confirmed purge batches with ordinary writers; this plan introduces no persistent purge lease or lock. Select a stable, bounded root set ordered by the selected actual eligibility timestamp and primary key, recheck the entire graph in that transaction, and commit before the next batch. Batch size and maximum batches per invocation are fixed documented constants; no unbounded delete or candidate materialization is allowed.
 
-## 3. Transaction ordering and bounded batches
+The exact queries and indexes are a pre-implementation schema-inventory deliverable. Delete selected rows only in an FK-safe child-before-parent order, including:
 
-Before implementation, inventory the current schema at the target migration and freeze the exact delete queries/indexes. Each confirmed batch uses `BEGIN IMMEDIATE` (with the configured bounded busy timeout), enables `foreign_keys=ON`, selects a stable bounded root set ordered by `(eligible_timestamp, primary_key)`, rechecks all eligibility inside that transaction, then deletes in child-before-parent order:
+1. verified expired `file_temporary_transfers` rows after byte handling;
+2. selected `files` rows;
+3. selected `slack_task_sources`, then selected `task_state_events` and `slack_source_events` as their retained references permit;
+4. selected `pi_deliveries` and `slack_effects`, deleting effect dependents before their predecessors; and
+5. selected `tasks`, standalone confirmed effects, and expired `mutation_requests`.
 
-1. live temporary-transfer rows only after verified byte unlink (see §4);
-2. outgoing/incoming `files` and task-owned attachment rows only when their owners are selected;
-3. task state events and removable Slack source records/source links;
-4. removable deliveries and effects, including fully removable predecessor chains;
-5. removable tasks, standalone confirmed effects, requests, and stale consumers.
+The ordering may be refined only for child tables discovered in the target schema. On busy, full, interruption, or cancellation, roll back the current transaction, preserve earlier committed batches, report the last committed cursor/counts, and return a typed retriable result. Re-running is safe because each batch rechecks strict-cutoff eligibility and references. Dry-run reserves nothing and is advisory.
 
-The exact ordering may add currently discovered child tables, but may never delete a parent before all selected children or leave a retained child dangling. Commit each bounded atomic batch before selecting the next one. Batch size and a maximum per invocation are fixed, documented configuration-independent constants chosen to keep writer locks short; no unbounded `DELETE` or candidate materialization is allowed.
+## 5. Temporary-byte boundary
 
-Only one purge runs at a time. Acquire a transactionally fenced singleton purge lease/lock before confirmation work; concurrent purge returns conflict. Ordinary gateway writers continue between batches. Every batch re-evaluates graph eligibility, so a newly created reference causes a skip, never a stale deletion. Dry-run does not reserve candidates and is explicitly advisory.
+Purge must not become a filesystem cleaner. Only a `file_temporary_transfers` row whose actual `expires_at_us` is older than cutoff is eligible for temporary-byte handling. Resolve only its `generated_name` beneath the verified private `tmp/` directory; reject unknown names, paths outside that directory, and unsafe filesystem objects. Verify direct-child/no-follow and expected regular-file, effective-owner, and mode properties before unlinking. The schema stores no expected inode, owner, or mode values, so no inode-comparison claim is made.
 
-On busy/lock/full/interrupt/cancellation, roll back the current transaction, preserve already committed earlier batches, report the last committed batch cursor/counts, and return a typed retriable result. Re-running the same or a new confirmed request is safe: selection is idempotent, strict-cutoff, and referentially checked again. No claim of one global transaction is made.
+Unlink the verified byte before deleting its transfer row, with recoverable reconciliation if either side fails. On verification or unlink failure, retain the row and report action required. A `files` row remains until no `file_temporary_transfers` row references it and its related task/effect is selected. Dry-run never touches bytes. Existing startup and ordinary file-transfer expiry sweeps remain independently available.
 
-## 4. Temporary-file boundary
+## 6. SQLite maintenance
 
-Purge must not become a broad filesystem cleaner. Automatic removal remains limited to expired `file_temporary_transfers` under the verified private `tmp/` directory. For each expired transfer, verify the generated-name pattern and direct-child, owner, mode, type, and inode expectations using directory-descriptor/no-follow helpers; unlink the verified byte first, then delete its transfer row transactionally/with recoverable reconciliation. If verification or unlink fails, retain the row and report it as skipped/action-required.
+After successful metadata batches, maintenance is best-effort and separate from logical eligibility. Safely checkpoint WAL in a bounded mode, then run incremental vacuum only when `auto_vacuum=INCREMENTAL` and reclaimable freelist pages exceed a documented threshold. Do not run `VACUUM` in a transaction, copy/rewrite the database, or treat maintenance failure as a rollback of already committed removals. Report it as a separate typed diagnostic. Dry-run does none of this.
 
-Unknown names, symlinks, wrong-owner/mode entries, and paths outside the private root are never followed or removed. Purging a file metadata row requires that no live transfer row remains. Dry-run never touches bytes. Temporary expiry/reconciliation remains available at startup and normal file-transfer sweeps independently of purge.
+## 7. Protocol and output contract
 
-## 5. SQLite maintenance
+Add an additive protocol-v1 `purge` capability/route only after both modes are wired. The request carries only cutoff, mode, and request ID; it accepts no arbitrary SQL, table selector, path, or byte payload. Result DTOs contain bounded typed counters, canonical timestamps, batch progress, and separate maintenance diagnostics. CLI human output warns that confirmed removal is irreversible; JSON is stable and contains no decorative text. Credentials, raw file bytes, and private transfer URLs remain absent.
 
-After one or more successful metadata batches, maintenance is best-effort and never changes logical eligibility. First checkpoint WAL safely (bounded mode; do not block readers indefinitely). Run incremental vacuum only if the database uses `auto_vacuum=INCREMENTAL`, has reclaimable freelist pages above a documented threshold, and no purge transaction/lease is active. Do not run `VACUUM` inside a transaction, do not rewrite/copy the database, and do not treat maintenance failure as rollback-worthy after committed deletion. Report maintenance separately with a typed diagnostic and preserve successful removal counts.
+## 8. Implementation increments
 
-## 6. Protocol and output contract
-
-Add an additive protocol-v1 `purge` capability/route only once both modes are wired. The request carries cutoff, mode, and request ID; no arbitrary SQL, table selection, paths, or byte payloads are accepted. Result DTOs are bounded typed counters and canonical timestamps. CLI human output warns that confirmed removal is irreversible; JSON is stable and contains no decorative text. Credentials, raw file bytes, and private transfer URLs remain absent.
-
-## 7. Implementation increments
-
-1. **Store contract (Terra):** freeze schema inventory, candidate graph queries, bounded cursor selection, FK-order deletion, request replay, and transactional lock. Add migration only if a durable purge-lock/required index cannot be represented safely otherwise.
+1. **Store contract (Terra):** freeze the `0001`–`0005` inventory, decide the nullable `pi_deliveries.completed_at_us` cutoff policy, add only schema-supported candidate queries/indexes, bounded selection, request replay, and FK-order deletion. A migration is a separate justified design only if this contract cannot be met with the existing schema.
 2. **Gateway/protocol/CLI (Terra):** strict timestamp parsing, exclusive flags, capability, typed reports/errors, and request-ID wiring.
-3. **Temporary/maintenance integration (Terra):** verified expiry handoff, interruption reporting, checkpoint/incremental-vacuum policy, status observability.
-4. **Adversarial tests and docs (Terra):** complete gates below and operational documentation. No background retention scheduler is introduced.
+3. **Temporary/maintenance integration (Terra):** generated-name-safe expiry handling, interruption reporting, checkpoint/incremental-vacuum policy, and status observability.
+4. **Adversarial tests and docs (Terra):** implement the gates below and operator documentation. No background metadata-retention scheduler is introduced.
 
-Each increment is separately reviewable; the integration owner owns central routing and final full-suite validation.
-
-## 8. Required automated gates
+## 9. Required automated gates
 
 - Reject missing/duplicate modes, local/date-only/no-offset timestamps, invalid RFC3339, and precision beyond microseconds; prove UTC normalization and strict equality retention.
-- Dry-run performs zero writes (including no request record, temp unlink, checkpoint, or vacuum) and groups eligible/skipped results deterministically.
-- Confirm requires a request ID, deduplicates exact replay, conflicts on changed cutoff/mode, and never purges its own live request record.
-- Done-old task graphs delete only when every delivery/effect is resolved/removable; open/working and done tasks with pending/inserting/uncertain/rejected deliveries or non-confirmed effects survive unchanged.
-- Confirmed standalone effects, ignored/duplicate events, expired requests, stale consumers, and unreferenced files are removed only at strict cutoff and only without retained references.
-- FK checks (`PRAGMA foreign_key_check`) and integrity checks pass after every successful batch and after injected failures at every delete boundary.
-- Deterministic concurrent writer/reference creation and concurrent purge tests prove recheck/skip behavior and singleton conflict behavior.
-- Cancellation, SQLite busy/full, process-style interruption, and restart prove no partial batch, valid prior batches, accurate report, and safe rerun.
-- Expired temporary bytes are removed only after strict no-follow verification; unknown/unsafe entries and unlink failure are retained/reported; metadata survives.
-- Maintenance is bounded, optional, separately reported, and does not run for dry-run or corrupt logical state.
-- Full `go test ./...`, race coverage for purge/store concurrency, and existing Phase 0–3 file-transfer regression suites pass.
+- Prove dry-run writes neither request records nor SQLite/temporary-file maintenance state, and reports actual-table counts deterministically.
+- Prove confirm request-ID replay and changed-input conflict; prove the live purge request is retained.
+- Prove a done task deletes only when all referencing deliveries meet the frozen finalized rule and all referencing effects/files/source/state rows are selected; prove all other delivery/effect states retain the graph unchanged.
+- Prove `slack_source_events` independent eligibility only for the listed unlinked ignored/duplicate-style results and `committed_at_us`, `mutation_requests.expiry_eligible_at` eligibility, and confirmed standalone-effect predecessor protection.
+- Prove no ownerless `files` candidate is assumed; files and temporary transfers respect their actual foreign keys and `expires_at_us` rule.
+- Run `PRAGMA foreign_key_check` and integrity checks after every successful batch and injected failure at every delete boundary.
+- Prove concurrent writers cause recheck/skip rather than stale deletion, and busy/full/cancellation/restart leaves no partial batch and supports safe rerun.
+- Prove temporary-byte removal uses generated-name/direct-child/no-follow validation; unsafe entries and unlink failures retain/report their rows.
+- Prove maintenance is bounded, optional, separately reported, and absent from dry-run; run full `go test ./...` plus applicable store concurrency and Phase 0–3 file-transfer regressions.
 
-## 9. Completion gate
+## 10. Completion gate
 
-Phase 3B is complete only when confirmed purge removes eligible finalized metadata in bounded atomic batches, dry-run is non-mutating and predictive, all retained/live/unresolved evidence survives with referential integrity, interruption can be safely rerun, and SQLite/temporary-file maintenance never broadens deletion authority.
+Phase 3B is complete only when confirmed purge removes schema-supported, finalized metadata in bounded atomic batches; dry-run is non-mutating and predictive; all live or unresolved evidence survives with referential integrity; interruption safely reruns; and temporary-file and SQLite maintenance never broaden deletion authority.
