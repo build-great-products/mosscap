@@ -22,6 +22,10 @@ check: test vet
 build:
     go build -o bin/mosscap ./cmd/mosscap
 
+# Install the CLI binary to Go's configured binary directory.
+install:
+    go install ./cmd/mosscap
+
 # Run Mosscap, forwarding any arguments (for example: just run -- --help).
 run *args:
     go run ./cmd/mosscap {{args}}
