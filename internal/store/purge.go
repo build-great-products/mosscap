@@ -139,12 +139,23 @@ type purgeConn interface {
 
 type purgeBudget struct{ rows, roots int64 }
 
+// takeCandidate reserves the global root-candidate budget. It is charged
+// before graph preflight, so skipped roots cannot let later root families scan
+// past PurgeRootLimit.
+func (b *purgeBudget) takeCandidate() bool {
+	if b.roots < 1 {
+		return false
+	}
+	b.roots--
+	return true
+}
+
+// take reserves deletion rows only after a candidate graph is eligible.
 func (b *purgeBudget) take(rows int64) bool {
-	if rows < 1 || rows > b.rows || b.roots < 1 {
+	if rows < 1 || rows > b.rows {
 		return false
 	}
 	b.rows -= rows
-	b.roots--
 	return true
 }
 func (b purgeBudget) candidates() int64 {
@@ -167,6 +178,9 @@ func purgeTasks(ctx context.Context, q purgeConn, cutoff int64, budget *purgeBud
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return err
+		}
+		if !budget.takeCandidate() {
+			break
 		}
 		if err := purgeTask(ctx, q, id, cutoff, budget, out); err != nil {
 			return err
@@ -296,6 +310,9 @@ func purgeStandaloneEffects(ctx context.Context, q purgeConn, cutoff int64, budg
 		if err := rows.Scan(&id); err != nil {
 			return err
 		}
+		if !budget.takeCandidate() {
+			break
+		}
 		var blocked int64
 		err := q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM slack_effects r WHERE r.predecessor_effect_id=?) + (SELECT count(*) FROM files f WHERE f.related_effect_id=? AND (f.related_task_id IS NOT NULL OR EXISTS (SELECT 1 FROM file_temporary_transfers x WHERE x.file_id=f.file_id)))`, id, id).Scan(&blocked)
 		if err != nil {
@@ -342,6 +359,9 @@ func purgeUnlinkedSources(ctx context.Context, q purgeConn, cutoff int64, budget
 		if err := rows.Scan(&id); err != nil {
 			return err
 		}
+		if !budget.takeCandidate() {
+			break
+		}
 		if !budget.take(1) {
 			break
 		}
@@ -366,6 +386,9 @@ func purgeRequests(ctx context.Context, q purgeConn, cutoff int64, requestID str
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return err
+		}
+		if !budget.takeCandidate() {
+			break
 		}
 		if !budget.take(1) {
 			break

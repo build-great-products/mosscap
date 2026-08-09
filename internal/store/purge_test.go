@@ -75,6 +75,34 @@ func TestConfirmMetadataPurgeRetainsNonFinalizedOrUnknownCompletionDelivery(t *t
 	}
 }
 
+func TestConfirmMetadataPurgeSkippedRootsConsumeCandidateBudget(t *testing.T) {
+	s := testStore(t)
+	old := int64(1_700_000_000_000_000)
+	for i := 0; i < PurgeRootLimit; i++ {
+		taskID := fmt.Sprintf("tsk_root_budget_skip_%03d", i)
+		insertPurgeTask(t, s, taskID, old)
+		if _, err := s.DB().Exec(`INSERT INTO pi_deliveries(delivery_id,task_id,task_version,pi_session_id,delivery_key,state,created_at_us,updated_at_us) VALUES(?,?,1,'session',?,'pending',?,?)`, fmt.Sprintf("dlv_%022d", i), taskID, fmt.Sprintf("sha256:%064x", i), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB().Exec(`INSERT INTO slack_source_events(source_event_id,event_kind,received_at_us,committed_at_us,admission_result,task_version,changed,last_seen_at_us) VALUES('source-after-skipped-roots','message',?,?, 'duplicate',0,0,?)`, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ConfirmMetadataPurge(context.Background(), "purge-skipped-root-budget", time.UnixMicro(old+1).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Skipped.Tasks != PurgeRootLimit || got.Removed.SlackSourceEvents != 0 {
+		t.Fatalf("result = %#v", got)
+	}
+	var sources int
+	if err := s.DB().QueryRow("SELECT count(*) FROM slack_source_events WHERE source_event_id='source-after-skipped-roots'").Scan(&sources); err != nil || sources != 1 {
+		t.Fatalf("later source roots = %d, %v", sources, err)
+	}
+	assertPurgeIntegrity(t, s)
+}
+
 func TestConfirmMetadataPurgeCapsAllRootsInOneInvocation(t *testing.T) {
 	s := testStore(t)
 	old := int64(1_700_000_000_000_000)
