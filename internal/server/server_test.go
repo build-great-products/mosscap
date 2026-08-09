@@ -216,6 +216,13 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if err := s.startSlack(context.Background(), initial); err != nil {
 		t.Fatal(err)
 	}
+	status, err := s.phase1Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.TeamID != "T012ABC" || status.BotUserID != "U012BOT" || status.ChannelID != "C012ABC" || status.IdentitySource != "auth_test" {
+		t.Fatalf("runtime identity status = %#v", status)
+	}
 	t.Cleanup(func() { s.closeSlack(); _ = ledger.Close() })
 	oldRuntime := s.runtime
 	if _, err := config.Set(loc, "maximum_file_size", "200MiB"); err != nil {

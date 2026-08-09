@@ -193,9 +193,14 @@ func (s *Server) phase1Status(ctx context.Context) (*protocol.SlackRuntimeStatus
 	if s.runtime != nil {
 		o := s.runtime.Observations()
 		out.State = string(o.State)
-		out.TeamID = s.snapshot().SlackTeamID
-		out.BotUserID = s.snapshot().SlackBotUserID
-		out.ChannelID = s.snapshot().SlackChannelID
+		snapshot, err := s.runtime.Acquire()
+		if err == nil {
+			out.TeamID = snapshot.TeamID
+			out.BotUserID = snapshot.BotUserID
+			out.ChannelID = snapshot.ChannelID
+			out.IdentitySource = "auth_test"
+			snapshot.Release()
+		}
 		out.ReconnectAttempt = o.ReconnectAttempt
 		out.BackoffMilliseconds = o.Backoff.Milliseconds()
 		out.LastDiagnosticCode = string(o.LastDiagnostic)

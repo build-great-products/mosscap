@@ -39,8 +39,6 @@ func validConfig(t *testing.T) config.Config {
 	}
 	c.SlackAppToken = "xapp-test"
 	c.SlackBotToken = "xoxb-test"
-	c.SlackTeamID = "T012ABC"
-	c.SlackBotUserID = "U012BOT"
 	c.SlackChannelID = "C012ABC"
 	c.SlackReconnectJitter = false
 	c.SlackReconnectInitialBackoff = "1ms"

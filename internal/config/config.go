@@ -35,8 +35,6 @@ type Config struct {
 	Version                       int      `toml:"version" json:"version"`
 	SlackAppToken                 string   `toml:"slack_app_token" json:"-"`
 	SlackBotToken                 string   `toml:"slack_bot_token" json:"-"`
-	SlackTeamID                   string   `toml:"slack_team_id" json:"slack_team_id"`
-	SlackBotUserID                string   `toml:"slack_bot_user_id" json:"slack_bot_user_id"`
 	SlackChannelID                string   `toml:"slack_channel_id" json:"slack_channel_id"`
 	DeliveryLease                 string   `toml:"delivery_lease" json:"delivery_lease"`
 	LeaderHeartbeat               string   `toml:"leader_heartbeat" json:"leader_heartbeat"`
@@ -304,6 +302,9 @@ func decode(loc Location, b []byte) (Config, error) {
 }
 
 func unknownKeyError(key string) error {
+	if key == "slack_team_id" || key == "slack_bot_user_id" {
+		return fmt.Errorf("decode config: obsolete %q: Slack identity is derived from authenticated Slack tokens; remove it", key)
+	}
 	if key == "paths" || strings.HasPrefix(key, "paths.") {
 		return fmt.Errorf("decode config: obsolete %q: paths are fixed by XDG_CONFIG_HOME and XDG_STATE_HOME; remove it", key)
 	}
@@ -342,12 +343,6 @@ func Validate(c Config) error {
 		return err
 	}
 	if err := optionalToken("slack_bot_token", c.SlackBotToken); err != nil {
-		return err
-	}
-	if err := optionalID("slack_team_id", c.SlackTeamID, 'T'); err != nil {
-		return err
-	}
-	if err := optionalID("slack_bot_user_id", c.SlackBotUserID, 'U'); err != nil {
 		return err
 	}
 	if c.SlackChannelID != "" && (!slackID.MatchString(c.SlackChannelID) || (c.SlackChannelID[0] != 'C' && c.SlackChannelID[0] != 'G')) {
@@ -520,7 +515,7 @@ local_protocol_maximum_frame = %d
 var setMu sync.Mutex
 
 var settable = map[string]bool{
-	"slack_app_token": true, "slack_bot_token": true, "slack_team_id": true, "slack_bot_user_id": true,
+	"slack_app_token": true, "slack_bot_token": true,
 	"slack_channel_id": true, "delivery_lease": true, "leader_heartbeat": true, "leader_expiry": true,
 	"slack_reconnect_initial_backoff": true, "slack_reconnect_max_backoff": true, "slack_reconnect_jitter": true,
 	"sqlite_busy_timeout": true, "maximum_file_size": true, "maximum_files_per_slack_operation": true,
@@ -602,10 +597,6 @@ func setValue(c *Config, key, input string) ([]byte, error) {
 		return stringValue(&c.SlackAppToken)
 	case "slack_bot_token":
 		return stringValue(&c.SlackBotToken)
-	case "slack_team_id":
-		return stringValue(&c.SlackTeamID)
-	case "slack_bot_user_id":
-		return stringValue(&c.SlackBotUserID)
 	case "slack_channel_id":
 		return stringValue(&c.SlackChannelID)
 	case "delivery_lease":
@@ -816,9 +807,8 @@ type View struct {
 	Paths                         Paths  `json:"paths"`
 	SlackAppTokenPresent          bool   `json:"slack_app_token_present"`
 	SlackBotTokenPresent          bool   `json:"slack_bot_token_present"`
-	SlackTeamID                   string `json:"slack_team_id"`
-	SlackBotUserID                string `json:"slack_bot_user_id"`
 	SlackChannelID                string `json:"slack_channel_id"`
+	SlackIdentitySource           string `json:"slack_identity_source"`
 	DeliveryLease                 string `json:"delivery_lease"`
 	LeaderHeartbeat               string `json:"leader_heartbeat"`
 	LeaderExpiry                  string `json:"leader_expiry"`
@@ -834,8 +824,8 @@ type View struct {
 
 // Redact returns a structurally token-free configuration view.
 func Redact(c Config) View {
-	return View{c.Version, c.Paths, c.SlackAppToken != "", c.SlackBotToken != "", c.SlackTeamID, c.SlackBotUserID,
-		c.SlackChannelID, c.DeliveryLease, c.LeaderHeartbeat, c.LeaderExpiry, c.SlackReconnectInitialBackoff,
+	return View{c.Version, c.Paths, c.SlackAppToken != "", c.SlackBotToken != "", c.SlackChannelID, "verified_at_runtime",
+		c.DeliveryLease, c.LeaderHeartbeat, c.LeaderExpiry, c.SlackReconnectInitialBackoff,
 		c.SlackReconnectMaxBackoff, c.SlackReconnectJitter, c.SQLiteBusyTimeout, int64(c.MaximumFileSize),
 		c.MaximumFilesPerSlackOperation, c.TemporaryDownloadLifetime, c.LocalProtocolMaximumFrame}
 }

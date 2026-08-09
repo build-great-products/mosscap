@@ -75,6 +75,8 @@ func TestLoadStrictLegacyDiagnosticsAndNoEnvironmentSecrets(t *testing.T) {
 		{"paths", "version = 1\n[paths]\nstate_dir = \"/x\"\n", "obsolete \"paths\""},
 		{"trust", "version = 1\ntrusted_user_ids = []\n", "trust lives in SQLite"},
 		{"secrets", "version = 1\nsecrets_file = \"/x\"\n", "put Slack tokens in config.toml"},
+		{"obsolete team identity", "version = 1\nslack_team_id = \"T012ABC\"\n", "identity is derived from authenticated Slack tokens"},
+		{"obsolete bot identity", "version = 1\nslack_bot_user_id = \"U012BOT\"\n", "identity is derived from authenticated Slack tokens"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(loc.Path, []byte(tc.contents), 0600); err != nil {
@@ -126,8 +128,6 @@ func TestValidateConstraints(t *testing.T) {
 	}{
 		{"app-token", func(c *Config) { c.SlackAppToken = "bad" }},
 		{"bot-token", func(c *Config) { c.SlackBotToken = "xapp-nope" }},
-		{"team", func(c *Config) { c.SlackTeamID = "C123" }},
-		{"bot-user", func(c *Config) { c.SlackBotUserID = "B123" }},
 		{"channel", func(c *Config) { c.SlackChannelID = "D123" }},
 		{"lease", func(c *Config) { c.DeliveryLease = "0s" }},
 		{"leader-order", func(c *Config) { c.LeaderHeartbeat = "30s" }},
@@ -147,7 +147,7 @@ func TestValidateConstraints(t *testing.T) {
 		})
 	}
 	base.SlackAppToken, base.SlackBotToken = "xapp-token", "xoxb-token"
-	base.SlackTeamID, base.SlackBotUserID, base.SlackChannelID = "T123", "U123", "C123"
+	base.SlackChannelID = "C123"
 	if err := Validate(base); err != nil {
 		t.Fatalf("valid complete Slack config: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestValidateConstraints(t *testing.T) {
 
 func TestSetPreservesFormattingAndOnlyChangesValue(t *testing.T) {
 	loc, c := setupConfig(t)
-	original := "# leading comment\r\nversion = 1\r\nslack_app_token = \"\" # token stays private\r\nslack_bot_token = \"\"\r\nslack_team_id = \"\"\r\nslack_bot_user_id = \"\"\r\nslack_channel_id = \"\"\r\ndelivery_lease = \"60s\"\r\nleader_heartbeat = \"10s\"\r\nleader_expiry = \"30s\"\r\nslack_reconnect_initial_backoff = \"1s\"\r\nslack_reconnect_max_backoff = \"60s\"\r\nslack_reconnect_jitter = true\r\nsqlite_busy_timeout = \"5s\"\r\nmaximum_file_size = 104857600\r\nmaximum_files_per_slack_operation = 20\r\ntemporary_download_lifetime = \"24h\"\r\nlocal_protocol_maximum_frame = 1048576 # frame\r\n# trailing comment\r\n"
+	original := "# leading comment\r\nversion = 1\r\nslack_app_token = \"\" # token stays private\r\nslack_bot_token = \"\"\r\nslack_channel_id = \"\"\r\ndelivery_lease = \"60s\"\r\nleader_heartbeat = \"10s\"\r\nleader_expiry = \"30s\"\r\nslack_reconnect_initial_backoff = \"1s\"\r\nslack_reconnect_max_backoff = \"60s\"\r\nslack_reconnect_jitter = true\r\nsqlite_busy_timeout = \"5s\"\r\nmaximum_file_size = 104857600\r\nmaximum_files_per_slack_operation = 20\r\ntemporary_download_lifetime = \"24h\"\r\nlocal_protocol_maximum_frame = 1048576 # frame\r\n# trailing comment\r\n"
 	if err := os.WriteFile(loc.Path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
