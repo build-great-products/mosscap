@@ -212,7 +212,7 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	replayEnvelope, replayAck := phase1Envelope("replay")
 	replaySocket := fake.NewSocket(fake.SocketSession{Receives: []fake.ReceiveStep{{Envelope: replayEnvelope}}})
 	factory := &fakeRuntimeFactory{
-		webs:    []slackapi.Web{phase1VerifiedWeb(), fake.NewWeb(fake.Step{Operation: fake.Auth, Err: errors.New("xoxb-TOKEN_CANARY")}), phase1VerifiedWeb(), phase1VerifiedWeb()},
+		webs:    []slackapi.Web{phase1VerifiedWeb(), fake.NewWeb(fake.Step{Operation: fake.Auth, Err: slackapi.NewVerificationError(slackapi.DiagnosticChannelNotFound)}), phase1VerifiedWeb(), phase1VerifiedWeb()},
 		sockets: []slackapi.Socket{oldSocket, failedSocket, newSocket, replaySocket},
 	}
 	s := NewWithOptions(initial, loc, "test", nil, Options{Factory: factory})
@@ -232,8 +232,8 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if _, err := config.Set(loc, "maximum_file_size", "200MiB"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.reload(context.Background(), "phase1-failed"); err == nil || strings.Contains(err.Error(), "TOKEN_CANARY") {
-		t.Fatalf("unsafe candidate failure: %v", err)
+	if _, err := s.reload(context.Background(), "phase1-failed"); err == nil || !strings.Contains(err.Error(), "channel_not_found") || !strings.Contains(err.Error(), "invite the bot") {
+		t.Fatalf("unhelpful candidate failure: %v", err)
 	}
 	if s.runtime != oldRuntime || s.snapshot().MaximumFileSize != initial.MaximumFileSize {
 		t.Fatal("failed candidate changed published runtime or config")
@@ -241,12 +241,24 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if failedAck.Calls() != 0 || len(failedSocket.OpenedStreams()) != 0 {
 		t.Fatal("failed candidate handled an envelope")
 	}
+	failedStatus, err := s.phase1Status(context.Background())
+	if err != nil || failedStatus.LastVerificationDiagnosticCode != string(slackapi.DiagnosticChannelNotFound) || !failedStatus.PriorRuntimeRetained {
+		t.Fatalf("failed reload status=%#v err=%v", failedStatus, err)
+	}
+	checks := s.phase1Doctor(context.Background())
+	if len(checks) != 1 || checks[0].Status != "warn" || !strings.Contains(checks[0].Message, "prior runtime remains active") || !strings.Contains(checks[0].Action, "invite the bot") {
+		t.Fatalf("failed reload doctor=%#v", checks)
+	}
 	result, err := s.reload(context.Background(), "phase1-success")
 	if err != nil || !result.Activated || result.SlackNetworkVerificationDeferred {
 		t.Fatalf("reload result=%+v err=%v", result, err)
 	}
 	if s.runtime == oldRuntime || s.snapshot().MaximumFileSize != 200<<20 {
 		t.Fatal("successful candidate was not atomically published")
+	}
+	successStatus, err := s.phase1Status(context.Background())
+	if err != nil || successStatus.LastVerificationDiagnosticCode != "" || successStatus.PriorRuntimeRetained {
+		t.Fatalf("successful reload status=%#v err=%v", successStatus, err)
 	}
 	waitForAck(t, successAck)
 	if _, err := s.reload(context.Background(), "phase1-success"); err != nil {

@@ -76,6 +76,29 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 	}
 }
 
+func TestRenderStatusPreservesBoundedVerificationRetentionFields(t *testing.T) {
+	const secret = "xoxb-secret-canary"
+	var out bytes.Buffer
+	a := App{Out: &out}
+	result := protocol.StatusDTO{Slack: &protocol.SlackRuntimeStatusDTO{
+		State:                          "connected",
+		LastVerificationDiagnosticCode: "channel_not_found",
+		PriorRuntimeRetained:           true,
+	}}
+	if err := a.render(result, true); err != nil {
+		t.Fatal(err)
+	}
+	rendered := out.String()
+	for _, want := range []string{"channel_not_found", "prior_runtime_retained", "true"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered status missing %q: %q", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, secret) {
+		t.Fatalf("rendered status leaked secret: %q", rendered)
+	}
+}
+
 func TestSecretCredentialEntryRejectsArgvAndWritesOnlyViaStdin(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

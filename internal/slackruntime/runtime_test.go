@@ -72,6 +72,10 @@ func TestSafeErrorRendersMissingScopesRemediation(t *testing.T) {
 	if err == nil || err.Error() != want {
 		t.Fatalf("safeError = %q, want %q", err, want)
 	}
+	diagnostic, ok := VerificationDiagnosticFromError(err)
+	if !ok || diagnostic.Code != slackapi.DiagnosticMissingScope || len(diagnostic.MissingScopes) != 3 {
+		t.Fatalf("VerificationDiagnosticFromError = %#v, %t", diagnostic, ok)
+	}
 }
 
 func TestSafeErrorRendersTypedVerificationAdviceWithoutSecrets(t *testing.T) {

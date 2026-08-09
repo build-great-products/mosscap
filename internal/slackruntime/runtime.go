@@ -15,6 +15,34 @@ import (
 
 var ErrClosed = errors.New("Slack runtime is closed")
 
+// VerificationError is the runtime-facing, secret-safe form of a failed
+// Slack authority check. It retains only an allowlisted diagnostic.
+type VerificationError struct {
+	diagnostic slackapi.VerificationDiagnostic
+}
+
+func (e *VerificationError) Error() string {
+	if e == nil || !e.diagnostic.Code.Valid() {
+		return "Slack runtime verification failed"
+	}
+	if e.diagnostic.Code == slackapi.DiagnosticMissingScope && len(e.diagnostic.MissingScopes) != 0 {
+		return "Slack app is missing required bot OAuth scopes: " + strings.Join(scopesToStrings(e.diagnostic.MissingScopes), ", ") + ". " + e.diagnostic.Advice()
+	}
+	return "Slack runtime verification failed (" + string(e.diagnostic.Code) + "). " + e.diagnostic.Advice()
+}
+
+// VerificationDiagnosticFromError exposes a copied bounded diagnostic for
+// status/doctor composition without exposing adapter error text.
+func VerificationDiagnosticFromError(err error) (slackapi.VerificationDiagnostic, bool) {
+	var verification *VerificationError
+	if !errors.As(err, &verification) || verification == nil {
+		return slackapi.VerificationDiagnostic{}, false
+	}
+	diagnostic := verification.diagnostic
+	diagnostic.MissingScopes = append([]slackapi.Scope(nil), diagnostic.MissingScopes...)
+	return diagnostic, true
+}
+
 // Factory constructs fresh, independently closable Slack clients for a
 // candidate. Factories must not retain or expose token values.
 type Factory interface {
@@ -285,16 +313,13 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 }
 func safeError(err error) error {
 	if diagnostic, ok := slackapi.VerificationDiagnosticFromError(err); ok {
-		if diagnostic.Code == slackapi.DiagnosticMissingScope && len(diagnostic.MissingScopes) != 0 {
-			return errors.New("Slack app is missing required bot OAuth scopes: " + strings.Join(scopesToStrings(diagnostic.MissingScopes), ", ") + ". " + diagnostic.Advice())
-		}
-		return errors.New("Slack runtime verification failed (" + string(diagnostic.Code) + "). " + diagnostic.Advice())
+		return &VerificationError{diagnostic: diagnostic}
 	}
 	failure := slackapi.Classify(err, slackapi.FailureSocket)
 	if failure.Diagnostic.Valid() {
-		return errors.New("Slack runtime verification failed (" + string(failure.Diagnostic) + "). " + slackapi.VerificationAdvice(failure.Diagnostic))
+		return &VerificationError{diagnostic: slackapi.VerificationDiagnostic{Code: failure.Diagnostic}}
 	}
-	return errors.New("Slack runtime verification failed. " + slackapi.VerificationAdvice(""))
+	return &VerificationError{diagnostic: slackapi.VerificationDiagnostic{Code: slackapi.DiagnosticRejected}}
 }
 
 func scopesToStrings(scopes []slackapi.Scope) []string {

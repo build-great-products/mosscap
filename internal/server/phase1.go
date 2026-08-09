@@ -43,9 +43,11 @@ func NewWithOptions(c config.Config, loc config.Location, version string, log *s
 func (s *Server) startSlack(ctx context.Context, c config.Config) error {
 	rt, ingest, state, err := s.prepareSlack(ctx, c, s.store)
 	if err != nil {
-		return err
+		s.recordSlackVerificationFailure(err, false)
+		return s.reloadSlackVerificationError(err)
 	}
 	s.runtime, s.ingest, s.slackState = rt, ingest, state
+	s.clearSlackVerificationFailure()
 	return nil
 }
 
@@ -205,6 +207,10 @@ func (s *Server) phase1Status(ctx context.Context) (*protocol.SlackRuntimeStatus
 		out.BackoffMilliseconds = o.Backoff.Milliseconds()
 		out.LastDiagnosticCode = string(o.LastDiagnostic)
 	}
+	s.slackDiagnosticMu.RLock()
+	out.LastVerificationDiagnosticCode = string(s.slackVerificationCode)
+	out.PriorRuntimeRetained = s.slackVerificationHeld
+	s.slackDiagnosticMu.RUnlock()
 	if s.ingest != nil {
 		o := s.ingest.Observations()
 		if !o.LastReceivedAt.IsZero() {
@@ -246,6 +252,20 @@ func settingsValid(settings filetransfer.Settings) bool {
 }
 
 func (s *Server) phase1Doctor(ctx context.Context) []doctor.Check {
+	s.slackDiagnosticMu.RLock()
+	verificationCode, priorRuntimeRetained := s.slackVerificationCode, s.slackVerificationHeld
+	s.slackDiagnosticMu.RUnlock()
+	if verificationCode != "" {
+		message := "Slack candidate verification failed (" + string(verificationCode) + ")"
+		if priorRuntimeRetained {
+			message += "; the prior runtime remains active"
+		}
+		status := doctor.Fail
+		if priorRuntimeRetained {
+			status = doctor.Warn
+		}
+		return []doctor.Check{{Name: "slack_runtime", Status: status, Message: message, Action: slackapi.VerificationAdvice(verificationCode)}}
+	}
 	if s.slackDisabled {
 		return []doctor.Check{{Name: "slack_runtime", Status: doctor.Skipped, Message: "Slack runtime is disabled for injected test mode"}}
 	}
@@ -258,6 +278,52 @@ func (s *Server) phase1Doctor(ctx context.Context) []doctor.Check {
 	}
 	return []doctor.Check{{Name: "slack_runtime", Status: doctor.Warn, Message: "Slack runtime is reconnecting", Action: "inspect gateway status and Slack connectivity"}}
 }
+func (s *Server) recordSlackVerificationFailure(err error, priorRuntimeRetained bool) {
+	diagnostic, ok := slackruntime.VerificationDiagnosticFromError(err)
+	if !ok {
+		failure := slackapi.Classify(err, slackapi.FailureRead)
+		diagnostic.Code = failure.Diagnostic
+	}
+	if !diagnostic.Code.Valid() {
+		diagnostic.Code = slackapi.DiagnosticRejected
+	}
+	s.slackDiagnosticMu.Lock()
+	s.slackVerificationCode = diagnostic.Code
+	s.slackVerificationHeld = priorRuntimeRetained
+	s.slackDiagnosticMu.Unlock()
+}
+
+func (s *Server) clearSlackVerificationFailure() {
+	s.slackDiagnosticMu.Lock()
+	s.slackVerificationCode = ""
+	s.slackVerificationHeld = false
+	s.slackDiagnosticMu.Unlock()
+}
+
+func (s *Server) reloadSlackVerificationMessage(err error) string {
+	diagnostic, ok := slackruntime.VerificationDiagnosticFromError(err)
+	if !ok {
+		failure := slackapi.Classify(err, slackapi.FailureRead)
+		diagnostic.Code = failure.Diagnostic
+	}
+	if !diagnostic.Code.Valid() {
+		diagnostic.Code = slackapi.DiagnosticRejected
+	}
+	return "reload candidate Slack verification failed (" + string(diagnostic.Code) + "). " + slackapi.VerificationAdvice(diagnostic.Code)
+}
+
+func (s *Server) reloadSlackVerificationError(err error) error {
+	diagnostic, ok := slackruntime.VerificationDiagnosticFromError(err)
+	if !ok {
+		failure := slackapi.Classify(err, slackapi.FailureRead)
+		diagnostic.Code = failure.Diagnostic
+	}
+	if !diagnostic.Code.Valid() {
+		diagnostic.Code = slackapi.DiagnosticRejected
+	}
+	return errors.New("Slack runtime verification failed (" + string(diagnostic.Code) + "). " + slackapi.VerificationAdvice(diagnostic.Code))
+}
+
 func hasUploadFiles(raw []byte) bool {
 	var p protocol.SlackSendParams
 	return json.Unmarshal(raw, &p) == nil && len(p.FilePaths) != 0
