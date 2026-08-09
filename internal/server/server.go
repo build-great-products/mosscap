@@ -14,9 +14,12 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/doctor"
+	"github.com/stayradiated/mosscap/internal/fileio"
+	"github.com/stayradiated/mosscap/internal/filetransfer"
 	"github.com/stayradiated/mosscap/internal/pidelivery"
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/securepath"
@@ -83,6 +86,8 @@ type Server struct {
 	ingest         *slackingest.Coordinator
 	slackDisabled  bool
 	slackState     slackruntime.State
+	temporaryDir   *fileio.TempDir
+	fileTransfer   *filetransfer.Service
 }
 
 func New(c config.Config, loc config.Location, version string, log *slog.Logger) *Server {
@@ -201,6 +206,9 @@ func (s *Server) open(ctx context.Context) error {
 		return err
 	}
 	if s.runtime != nil {
+		if err := s.startFileTransfer(ctx, s.runtime, c); err != nil {
+			return err
+		}
 		op, release, err := s.ops()
 		if err != nil {
 			return err
@@ -329,6 +337,9 @@ func (s *Server) shutdown() {
 				}
 			}
 		}
+		// The transfer sweeper owns SQLite and its directory descriptor, so it
+		// must stop before the Slack runtime and ledger are retired.
+		s.closeFileTransfer()
 		// Socket intake is stopped and snapshots drained before SQLite closes.
 		s.closeSlack()
 		if s.store != nil {
@@ -448,6 +459,16 @@ func (s *Server) dispatch(ctx context.Context, r protocol.Request) protocol.Resp
 	return s.dispatchConnection(ctx, r, nil)
 }
 
+func withoutCapability(capabilities []string, value string) []string {
+	out := capabilities[:0]
+	for _, capability := range capabilities {
+		if capability != value {
+			out = append(out, capability)
+		}
+	}
+	return out
+}
+
 func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, connection *connectionState) protocol.Response {
 	// Reload needs exclusive ownership while it replaces the live SQLite pool.
 	// Every other dispatch holds a read lock so it cannot observe a half-swapped
@@ -488,6 +509,9 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 	case "hello":
 		resultType = "hello"
 		capabilities := append([]string(nil), protocol.ServerCapabilities...)
+		if s.fileTransfer == nil {
+			capabilities = withoutCapability(capabilities, protocol.CapabilityFileTransfer)
+		}
 		capabilities = append(capabilities, protocol.CapabilityPiDeliveryMVP)
 		result = protocol.HelloResult{SelectedVersion: protocol.Version, Capabilities: capabilities}
 	case "status.get":
@@ -520,7 +544,13 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		} else {
 			work, counts, err = s.piDelivery.Poll(ctx, connection.connectionID)
 			if err == nil {
-				result = protocol.DeliveryPollDTO{Work: deliveryWorkDTO(work), DeliveryCountsDTO: deliveryCountsDTO(counts)}
+				var attached []store.SlackFile
+				if work != nil && work.Task.SourceKind == "slack" {
+					attached, err = s.store.ListSlackFiles(ctx, work.Task.ID)
+				}
+				if err == nil {
+					result = protocol.DeliveryPollDTO{Work: deliveryWorkDTO(work, attached), DeliveryCountsDTO: deliveryCountsDTO(counts)}
+				}
 			}
 		}
 	case "delivery.inserting", "delivery.persisted", "delivery.rejected":
@@ -597,6 +627,7 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		checks := s.store.Doctor(ctx)
 		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
 		checks = append(checks, s.phase1Doctor(ctx)...)
+		checks = append(checks, s.fileTransferDoctor(ctx)...)
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
 	case "trust.list":
 		resultType = "trusted_user_list"
@@ -629,6 +660,25 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "slack_file"
 		result, err = s.store.GetSlackFile(ctx, p.File)
+	case "file.get":
+		var p protocol.FileGetParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "file_transfer"
+		if s.fileTransfer == nil {
+			err = slackops.ErrUnavailable
+		} else {
+			result, err = s.fileTransfer.Get(ctx, r.RequestID, p.File)
+		}
+	case "file.release":
+		var p protocol.FileReleaseParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "file_release"
+		if s.fileTransfer == nil {
+			err = slackops.ErrUnavailable
+		} else {
+			err = s.fileTransfer.Release(ctx, p.TransferID)
+			result = protocol.EmptyParams{}
+		}
 	case "slack.history", "slack.thread":
 		var op interface {
 			History(context.Context, int) (slackapi.MessagePage, error)
@@ -650,16 +700,24 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 			_ = json.Unmarshal(r.Params, &p)
 			result, err = op.Thread(ctx, p.ThreadTS)
 		}
-	case "slack.send", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
+	case "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
 		var op *slackops.Service
 		var release func()
 		op, release, err = s.ops()
 		if err == nil {
 			defer release()
-			var intent store.SlackEffectIntent
-			intent, err = effectIntent(r.Command, r)
-			if err == nil {
-				result, err = op.Execute(ctx, r.RequestID, intent)
+			if r.Command == "slack.file" || r.Command == "slack.send" && hasUploadFiles(r.Params) {
+				var intent store.SlackFileUploadIntent
+				intent, err = fileUploadIntent(r.Command, r)
+				if err == nil {
+					result, err = op.ExecuteFileUpload(ctx, r.RequestID, intent)
+				}
+			} else {
+				var intent store.SlackEffectIntent
+				intent, err = effectIntent(r.Command, r)
+				if err == nil {
+					result, err = op.Execute(ctx, r.RequestID, intent)
+				}
 			}
 		}
 		resultType = "slack_effect"
@@ -680,7 +738,15 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		var effect store.SlackEffect
 		effect, err = s.store.GetSlackEffect(ctx, p.Effect)
 		if err == nil {
-			result = protocol.EffectInspectDTO{Effect: slackEffectDTO(effect), Intent: protocol.SlackEffectIntentDTO{Text: effect.Text, Emoji: effect.Emoji, OperatorReason: effect.OperatorReason}}
+			inspection := protocol.EffectInspectDTO{Effect: slackEffectDTO(effect), Intent: protocol.SlackEffectIntentDTO{Text: effect.Text, Emoji: effect.Emoji, OperatorReason: effect.OperatorReason}}
+			if effect.Kind == store.SlackEffectFileUpload {
+				var files []store.SlackEffectOutgoingSource
+				files, err = s.store.InspectSlackFileUploadSources(ctx, effect.ID)
+				if err == nil {
+					inspection.OutgoingFiles = fileUploadSourceDTOs(files)
+				}
+			}
+			result = inspection
 		}
 	case "effect.retry":
 		var p protocol.EffectRetryParams
@@ -750,6 +816,8 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 	var replacement *store.Store
 	var candidateRuntime *slackruntime.Runtime
 	var candidateIngest *slackingest.Coordinator
+	var candidateTemporaryDir *fileio.TempDir
+	var candidateFileTransfer *filetransfer.Service
 	candidateState := slackruntime.StateDisabled
 	var prepareErr error
 	if loadErr != nil {
@@ -777,6 +845,9 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 				ledger = replacement
 			}
 			candidateRuntime, candidateIngest, candidateState, err = s.prepareSlack(ctx, candidate, ledger)
+			if err == nil && candidateRuntime != nil {
+				candidateTemporaryDir, candidateFileTransfer, err = s.prepareFileTransfer(ctx, candidateRuntime, ledger, candidate)
+			}
 			if err != nil {
 				// Runtime errors are already token-safe, but do not expose adapters'
 				// implementation details through the durable reload record.
@@ -785,6 +856,12 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 		}
 	}
 	cleanupCandidate := func() {
+		if candidateFileTransfer != nil {
+			candidateFileTransfer.Close()
+		}
+		if candidateTemporaryDir != nil {
+			_ = candidateTemporaryDir.Close()
+		}
 		if candidateRuntime != nil {
 			_ = candidateRuntime.Close()
 		}
@@ -819,7 +896,9 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 	// activation decision. operationMu has drained all server operations using
 	// the old frame; closing it afterwards drains retained Slack snapshots.
 	oldStore, oldRuntime := s.store, s.runtime
+	oldFileTransfer, oldTemporaryDir := s.fileTransfer, s.temporaryDir
 	s.store, s.runtime, s.ingest, s.slackState = replacement, candidateRuntime, candidateIngest, candidateState
+	s.fileTransfer, s.temporaryDir = candidateFileTransfer, candidateTemporaryDir
 	if replacement == nil {
 		s.store = oldStore
 	}
@@ -835,6 +914,12 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 		if err := candidateRuntime.Activate(); err != nil {
 			return protocol.ConfigReloadDTO{}, err
 		}
+	}
+	if oldFileTransfer != nil {
+		oldFileTransfer.Close()
+	}
+	if oldTemporaryDir != nil {
+		_ = oldTemporaryDir.Close()
 	}
 	if oldRuntime != nil {
 		_ = oldRuntime.Close()
@@ -867,6 +952,10 @@ func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
 	if err != nil {
 		return status.Snapshot{}, err
 	}
+	transfer, err := s.fileTransferStatus(ctx)
+	if err != nil {
+		return status.Snapshot{}, err
+	}
 	piCapability := "not_implemented"
 	pi := status.PiDeliveryStatus{}
 	if s.piDelivery != nil {
@@ -877,7 +966,64 @@ func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
 		}
 		pi = status.PiDeliveryStatus{ActivePiSessionID: current.ActivePiSessionID, Pending: current.Pending, Inserting: current.Inserting, Persisted: current.Persisted, Uncertain: current.Uncertain, Rejected: current.Rejected}
 	}
-	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "available", SlackCapability: string(s.slackState), PiCapability: piCapability, PiDelivery: pi, Slack: slack}, nil
+	return status.Snapshot{UptimeSeconds: int64(time.Since(s.started).Seconds()), ServerVersion: s.Version, ProtocolVersion: protocol.Version, SchemaVersion: store.SchemaVersion, ActiveConfigGeneration: s.generation.Load(), ActiveConfigDigest: s.activeDigest, PID: os.Getpid(), Database: c.Paths.Database, Endpoint: s.endpoint, TaskCounts: counts, DatabaseBytes: dbSize, WALBytes: walSize, Connections: int(s.connections.Load()), Health: "healthy", EffectsCapability: "available", SlackCapability: string(s.slackState), PiCapability: piCapability, PiDelivery: pi, FileTransfer: transfer, Slack: slack}, nil
+}
+func (s *Server) fileTransferStatus(ctx context.Context) (status.FileTransferStatus, error) {
+	out := status.FileTransferStatus{Capability: "unavailable", IncomingByState: map[string]int64{}, OutgoingByState: map[string]int64{}}
+	if s.fileTransfer == nil || s.temporaryDir == nil {
+		return out, nil
+	}
+	counts, err := s.store.SlackFileTransferCounts(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.Capability, out.TemporaryCount, out.TemporaryBytes = "available", counts.TemporaryCount, counts.TemporaryBytes
+	out.IncomingByState, out.OutgoingByState = counts.Incoming, counts.Outgoing
+	entries, err := os.ReadDir(s.temporaryDir.Root())
+	if err != nil {
+		return out, err
+	}
+	live, err := s.store.ListFileTemporaryTransfers(ctx, 1000)
+	if err != nil {
+		return out, err
+	}
+	known := make(map[string]struct{}, len(live))
+	var nearest time.Time
+	for _, transfer := range live {
+		known[transfer.GeneratedName] = struct{}{}
+		if nearest.IsZero() || transfer.ExpiresAt.Before(nearest) {
+			nearest = transfer.ExpiresAt
+		}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !fileio.IsGeneratedName(name) {
+			out.UnsafeTemporaryEntries++
+			continue
+		}
+
+		// Open through the retained directory descriptor rather than trusting a
+		// pathname inspection. TempDir.Open refuses links and verifies regular
+		// type, effective owner, exact 0600 mode, and a single link before status
+		// or doctor reports this temporary entry as safe.
+		file, err := s.temporaryDir.Open(name)
+		if err != nil {
+			out.UnsafeTemporaryEntries++
+			continue
+		}
+		if err := file.Close(); err != nil {
+			out.UnsafeTemporaryEntries++
+			continue
+		}
+		if _, ok := known[name]; !ok {
+			out.UnsafeTemporaryEntries++
+		}
+	}
+	if !nearest.IsZero() {
+		v := stamp(nearest)
+		out.NearestExpiry = &v
+	}
+	return out, nil
 }
 func fileSize(path string) (int64, error) {
 	info, err := os.Stat(path)
@@ -891,10 +1037,38 @@ func fileSize(path string) (int64, error) {
 }
 
 func errorResponse(id, version string, err error) protocol.Response {
+	// Adapter diagnostics are bounded and secret-safe. Preserve the file
+	// transfer diagnostics that have distinct CLI safety semantics instead of
+	// flattening them into a generic external failure.
+	if failure := slackapi.Classify(err, slackapi.FailureRead); failure.Diagnostic == slackapi.DiagnosticUnsafeFileRedirect {
+		return protocol.NewErrorResponse(id, version, "unsafe_file_redirect", "unsafe", err.Error(), false)
+	} else if failure.Diagnostic == slackapi.DiagnosticSlackFileUnavailable {
+		return protocol.NewErrorResponse(id, version, "slack_file_unavailable", "external_failed", err.Error(), false)
+	} else if failure.Diagnostic == slackapi.DiagnosticFileTooLarge {
+		return protocol.NewErrorResponse(id, version, "file_too_large", "usage", err.Error(), false)
+	}
 	code, category := "invalid_input", "usage"
 	switch {
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrFileTransferNotFound):
 		code, category = "not_found", "not_found"
+	case errors.Is(err, store.ErrFileTransferExpired), errors.Is(err, filetransfer.ErrExpired):
+		code, category = "file_transfer_expired", "not_found"
+	case errors.Is(err, filetransfer.ErrCapacity):
+		code, category = "temporary_capacity", "unavailable"
+	case errors.Is(err, filetransfer.ErrTooLarge), errors.Is(err, fileio.ErrTooLarge):
+		code, category = "file_too_large", "usage"
+	case errors.Is(err, filetransfer.ErrContentChanged), errors.Is(err, fileio.ErrChanged):
+		code, category = "file_content_changed", "conflict"
+	case errors.Is(err, filetransfer.ErrNotIncoming):
+		code, category = "invalid_input", "usage"
+	case errors.Is(err, fileio.ErrUnsafeFileType):
+		code, category = "unsafe_file_type", "unsafe"
+	case errors.Is(err, filetransfer.ErrUnsafeTemporary), errors.Is(err, fileio.ErrUnsafePath), errors.Is(err, fileio.ErrInvalidTemporary):
+		code, category = "unsafe_file_path", "unsafe"
+	case errors.Is(err, fileio.ErrDestinationExists):
+		code, category = "destination_exists", "conflict"
+	case errors.Is(err, fileio.ErrUnsupported):
+		code, category = "unsupported", "unsupported"
 	case errors.Is(err, store.ErrAmbiguous):
 		code, category = "ambiguous", "ambiguous"
 	case errors.Is(err, store.ErrRequestConflict):
@@ -951,6 +1125,8 @@ func dto(v any) any {
 		return protocol.EffectListDTO{Effects: out}
 	case slackapi.MessagePage:
 		return messagePageDTO(x)
+	case filetransfer.Result:
+		return fileTransferDTO(x)
 	case []store.Task:
 		return protocol.TaskListDTO{Tasks: taskDTOs(x)}
 	default:
@@ -983,7 +1159,7 @@ func deliveryDTOs(deliveries []store.Delivery) []protocol.DeliveryDTO {
 	}
 	return out
 }
-func deliveryWorkDTO(work *store.DeliveryWork) *protocol.DeliveryWorkDTO {
+func deliveryWorkDTO(work *store.DeliveryWork, files []store.SlackFile) *protocol.DeliveryWorkDTO {
 	if work == nil {
 		return nil
 	}
@@ -991,8 +1167,36 @@ func deliveryWorkDTO(work *store.DeliveryWork) *protocol.DeliveryWorkDTO {
 	if work.Slack != nil {
 		out.SlackSource = &protocol.DeliverySlackSourceDTO{AuthorUserID: work.Slack.AuthorUserID, MessageTS: work.Slack.MessageTS, ThreadTS: work.Slack.ThreadTS}
 	}
+	for _, file := range files {
+		// ListSlackFiles already returns attached incoming rows. Keep this guard at
+		// the delivery boundary so a future repository query cannot leak detached
+		// or outgoing intent metadata into a persisted Pi message.
+		if len(out.AttachedFiles) == 20 || !validDeliveryAttachedFile(file) {
+			continue
+		}
+		var mime *string
+		if file.DeclaredMIME != "" {
+			value := file.DeclaredMIME
+			mime = &value
+		}
+		out.AttachedFiles = append(out.AttachedFiles, protocol.DeliveryAttachedFileDTO{FileID: file.FileID, OriginalName: file.OriginalName, DeclaredMIME: mime, DeclaredSizeBytes: file.DeclaredSizeBytes, TransferState: file.TransferState})
+	}
 	return out
 }
+
+func validDeliveryAttachedFile(file store.SlackFile) bool {
+	return file.Direction == "from_slack" && file.SourceAttached && len(file.OriginalName) <= 1024 && utf8.ValidString(file.OriginalName) && len(file.DeclaredMIME) <= 255 && utf8.ValidString(file.DeclaredMIME) && (file.DeclaredSizeBytes == nil || *file.DeclaredSizeBytes >= 0) && deliveryIncomingTransferState(file.TransferState)
+}
+
+func deliveryIncomingTransferState(value string) bool {
+	switch value {
+	case "metadata_only", "validated", "unavailable", "oversized", "content_changed":
+		return true
+	default:
+		return false
+	}
+}
+
 func taskDTOs(tasks []store.Task) []protocol.TaskDTO {
 	a := make([]protocol.TaskDTO, len(tasks))
 	for i := range tasks {
@@ -1021,12 +1225,33 @@ func slackSourceDTO(s store.SlackSource) *protocol.SlackSourceDTO {
 	return out
 }
 func slackFileDTO(f store.SlackFile) protocol.SlackFileDTO {
-	return protocol.SlackFileDTO{FileID: f.FileID, SlackFileID: f.SlackFileID, Permalink: f.Permalink, OriginalName: f.OriginalName, DeclaredMIME: f.DeclaredMIME, SizeBytes: f.SizeBytes, RelatedTaskID: f.RelatedTaskID, TransferState: f.TransferState, CreatedAt: stamp(f.CreatedAt), UpdatedAt: stamp(f.UpdatedAt)}
+	out := protocol.SlackFileDTO{FileID: f.FileID, Direction: f.Direction, SlackFileID: f.SlackFileID, Permalink: f.Permalink, OriginalName: f.OriginalName, DeclaredMIME: f.DeclaredMIME, DeclaredSizeBytes: f.DeclaredSizeBytes, ValidatedSizeBytes: f.ValidatedSizeBytes, SHA256: f.SHA256, RelatedTaskID: f.RelatedTaskID, RelatedEffectID: f.RelatedEffectID, EffectOrdinal: f.EffectOrdinal, SourceAttached: f.SourceAttached, TransferState: f.TransferState, DiagnosticCode: f.DiagnosticCode, CreatedAt: stamp(f.CreatedAt), UpdatedAt: stamp(f.UpdatedAt)}
+	if f.SourceDetachedAt != nil {
+		v := stamp(*f.SourceDetachedAt)
+		out.SourceDetachedAt = &v
+	}
+	return out
 }
+func fileTransferDTO(result filetransfer.Result) protocol.FileGetDTO {
+	return protocol.FileGetDTO{TransferID: result.TransferID, FileID: result.FileID, TemporaryPath: result.Path, ValidatedSizeBytes: result.SizeBytes, SHA256: result.SHA256, ExpiresAt: stamp(result.ExpiresAt)}
+}
+func fileUploadSourceDTOs(files []store.SlackEffectOutgoingSource) []protocol.FileUploadSourceDTO {
+	out := make([]protocol.FileUploadSourceDTO, len(files))
+	for i, file := range files {
+		out[i] = protocol.FileUploadSourceDTO{FileID: file.FileID, SourcePath: file.SourcePath, OriginalName: file.OriginalName, SizeBytes: file.SizeBytes, SHA256: file.SHA256}
+	}
+	return out
+}
+
+// slackFileDTOs is the metadata-list projection for task/read results. Hashes,
+// output paths, and outgoing intent details remain available only through the
+// explicit file/effect inspection routes.
 func slackFileDTOs(files []store.SlackFile) []protocol.SlackFileDTO {
 	out := make([]protocol.SlackFileDTO, len(files))
 	for i := range files {
 		out[i] = slackFileDTO(files[i])
+		out[i].SHA256, out[i].RelatedEffectID, out[i].EffectOrdinal = "", "", nil
+		out[i].ValidatedSizeBytes = nil
 	}
 	return out
 }

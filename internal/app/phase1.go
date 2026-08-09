@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/identity"
@@ -14,11 +16,11 @@ import (
 
 func (a App) slack(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		a.printBranchHelp("slack", []string{"history", "thread", "send", "edit", "delete", "react", "unreact"})
+		a.printBranchHelp("slack", []string{"history", "thread", "send", "file", "edit", "delete", "react", "unreact"})
 		return nil
 	}
 	cmd := args[0]
-	if !contains([]string{"history", "thread", "send", "edit", "delete", "react", "unreact"}, cmd) {
+	if !contains([]string{"history", "thread", "send", "file", "edit", "delete", "react", "unreact"}, cmd) {
 		return usage(fmt.Sprintf("unknown slack command %q", cmd))
 	}
 	return a.slackCommand(cmd, args[1:])
@@ -29,10 +31,13 @@ func (a App) slackCommand(cmd string, args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	text := fs.String("text", "", "")
 	textFile := fs.String("text-file", "", "")
+	comment := fs.String("comment", "", "")
 	thread := fs.String("thread", "", "")
 	task := fs.String("task", "", "")
 	reason := fs.String("reason", "", "")
 	requestID := fs.String("request-id", "", "")
+	var files stringList
+	fs.Var(&files, "file", "")
 	limit := fs.Int("limit", 50, "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
@@ -45,7 +50,8 @@ func (a App) slackCommand(cmd string, args []string) error {
 	}
 	allowed := map[string][]string{
 		"history": {"json", "limit"}, "thread": {"json"},
-		"send":   {"json", "text", "text-file", "thread", "task", "request-id"},
+		"send":   {"json", "text", "text-file", "thread", "task", "request-id", "file"},
+		"file":   {"json", "file", "thread", "comment", "task", "request-id"},
 		"edit":   {"json", "text", "text-file", "task", "request-id"},
 		"delete": {"json", "reason", "task", "request-id"},
 		"react":  {"json", "task", "request-id"}, "unreact": {"json", "task", "request-id"},
@@ -75,7 +81,23 @@ func (a App) slackCommand(cmd string, args []string) error {
 		if fs.NArg() != 0 {
 			return usage("slack send accepts no positional arguments")
 		}
-		params = protocol.SlackSendParams{ThreadTS: *thread, Text: t, Task: *task}
+		paths, err := absolutePaths(files)
+		if err != nil {
+			return err
+		}
+		params = protocol.SlackSendParams{ThreadTS: *thread, Text: t, Task: *task, FilePaths: paths}
+	case "file":
+		if fs.NArg() != 0 || *text != "" || *textFile != "" || *reason != "" {
+			return usage("slack file accepts exactly one --file and no positional arguments")
+		}
+		if len(files) != 1 {
+			return usage("slack file requires exactly one --file")
+		}
+		paths, err := absolutePaths(files)
+		if err != nil {
+			return err
+		}
+		params = protocol.SlackFileParams{ThreadTS: *thread, FilePath: paths[0], Comment: *comment, Task: *task}
 	case "edit":
 		if fs.NArg() != 1 {
 			return usage("slack edit requires MESSAGE_TS")
@@ -116,6 +138,9 @@ func (a App) slackCommand(cmd string, args []string) error {
 	capability := protocol.CapabilitySlackReads
 	if mutation {
 		capability = protocol.CapabilitySlackEffects
+	}
+	if cmd == "file" || cmd == "send" && len(files) > 0 {
+		capability = protocol.CapabilityFileTransfer
 	}
 	out, err := a.gatewayCall(c, "slack."+cmd, *requestID, params, capability)
 	if err != nil {
@@ -207,8 +232,11 @@ func (a App) effect(args []string) error {
 
 func (a App) file(args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		a.printBranchHelp("file", []string{"show"})
+		a.printBranchHelp("file", []string{"show", "get"})
 		return nil
+	}
+	if args[0] == "get" {
+		return a.fileGet(args[1:])
 	}
 	if args[0] != "show" {
 		return usage(fmt.Sprintf("unknown file command %q", args[0]))
@@ -266,12 +294,11 @@ func phase1Config() (config.Config, error) {
 	return config.Load(loc)
 }
 func checkPhase1TextFrame(c config.Config, path string, params any, cmd, requestID, version string) error {
-	if path == "" {
-		return nil
-	}
-	// Text-file input is resolved locally, then must still fit the framed protocol.
+	_ = path
+	// Local text and file paths are resolved before the request is framed; check
+	// the complete request rather than each individual input.
 	if b, err := protocol.EncodeRequest(protocol.Request{ProtocolVersion: protocol.Version, RequestID: requestID, ClientKind: "cli", ClientVersion: version, Command: "slack." + cmd, Params: mustJSON(params)}); err != nil || len(b) > c.LocalProtocolMaximumFrame {
-		return usage("--text-file exceeds the protocol frame limit")
+		return usage("request exceeds the protocol frame limit")
 	}
 	return nil
 }
@@ -322,13 +349,37 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+type stringList []string
+
+func (s *stringList) String() string { return "" }
+func (s *stringList) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+func absolutePaths(paths []string) ([]string, error) {
+	out := make([]string, len(paths))
+	for i, value := range paths {
+		path, err := filepath.Abs(value)
+		if err != nil {
+			return nil, usage("invalid file path")
+		}
+		if len(path) == 0 || len(path) > 4096 || strings.IndexByte(path, 0) >= 0 {
+			return nil, usage("invalid file path")
+		}
+		out[i] = path
+	}
+	return out, nil
+}
+
 func newPhase1FlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
 }
 func (a App) printSlackHelp(cmd string) {
-	usages := map[string]string{"history": "[--limit N] [--json]", "thread": "THREAD_TS [--json]", "send": "[--thread THREAD_TS] (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", "edit": "MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", "delete": "MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", "react": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", "unreact": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]"}
+	usages := map[string]string{"history": "[--limit N] [--json]", "thread": "THREAD_TS [--json]", "send": "[--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", "file": "[--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK] [--request-id ID] [--json]", "edit": "MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", "delete": "MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", "react": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", "unreact": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]"}
 	fmt.Fprintf(a.Out, "Usage: mosscap slack %s %s\n", cmd, usages[cmd])
 }
 func (a App) printEffectHelp(cmd string) {

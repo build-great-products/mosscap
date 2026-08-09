@@ -60,7 +60,7 @@ func TestOpenMigrationFailureRollsBackV2Upgrade(t *testing.T) {
 	assertFailedUpgradeRolledBack(t, path, 2, true)
 }
 
-func TestOpenUpgradesExactSchemaV2ToV4AndPreservesLedger(t *testing.T) {
+func TestOpenUpgradesExactSchemaV2ToV5AndPreservesLedger(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
 	db := schemaV2Database(t, path)
@@ -90,7 +90,7 @@ func TestOpenUpgradesExactSchemaV2ToV4AndPreservesLedger(t *testing.T) {
 	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 || migrations != 4 {
+	if version != 5 || migrations != 5 {
 		t.Fatalf("migration state version=%d rows=%d", version, migrations)
 	}
 	got, err := s.Get(ctx, "tsk_v2")
@@ -107,6 +107,49 @@ func TestOpenUpgradesExactSchemaV2ToV4AndPreservesLedger(t *testing.T) {
 	}
 }
 
+func TestOpenUpgradesV4FileMetadataWithoutChangingStableIdentity(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range [][]byte{migration0001, migration0002, migration0003, migration0004} {
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("PRAGMA application_id=1296257072; PRAGMA user_version=4"); err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 4; version++ {
+		if _, err := db.Exec("INSERT INTO schema_migrations(version,checksum,applied_at) VALUES(?,?,?)", version, MigrationChecksum(version), version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('tsk_v4_file',1,'open','preserved','slack',1,1)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO files(file_id,direction,slack_file_id,original_name,declared_mime,size_bytes,related_task_id,transfer_state,created_at_us,updated_at_us) VALUES('fil_abcdefghijklmnopqrstuv','from_slack','F12345678','preserved.txt','text/plain',7,'tsk_v4_file','metadata_only',1,1)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	file, err := s.GetSlackFile(ctx, "fil_abcdefghijklmnopqrstuv")
+	if err != nil || file.FileID != "fil_abcdefghijklmnopqrstuv" || file.SlackFileID != "F12345678" || file.DeclaredSizeBytes == nil || *file.DeclaredSizeBytes != 7 || !file.SourceAttached || file.TransferState != "metadata_only" {
+		t.Fatalf("preserved file=%+v err=%v", file, err)
+	}
+	if _, err := s.DB().Exec("SELECT temporary_path FROM files"); err == nil {
+		t.Fatal("legacy temporary path column survived v5 rebuild")
+	}
+}
+
 func TestSlackMigrationChecksumsAndColumns(t *testing.T) {
 	if MigrationChecksum(4) == "" || len(MigrationChecksum(4)) != 64 {
 		t.Fatalf("v4 checksum=%q", MigrationChecksum(4))
@@ -114,16 +157,20 @@ func TestSlackMigrationChecksumsAndColumns(t *testing.T) {
 	if MigrationChecksum(4) == MigrationChecksum(1) || MigrationChecksum(4) == MigrationChecksum(2) || MigrationChecksum(4) == MigrationChecksum(3) {
 		t.Fatal("v4 checksum is not migration-specific")
 	}
-	if MigrationChecksum(5) != "" {
-		t.Fatalf("unknown checksum=%q", MigrationChecksum(5))
+	if MigrationChecksum(5) == "" || len(MigrationChecksum(5)) != 64 || MigrationChecksum(5) == MigrationChecksum(4) {
+		t.Fatalf("v5 checksum=%q", MigrationChecksum(5))
+	}
+	if MigrationChecksum(6) != "" {
+		t.Fatalf("unknown checksum=%q", MigrationChecksum(6))
 	}
 
 	s := testStore(t)
 	for table, want := range map[string][]string{
-		"slack_task_sources":  {"task_id", "initial_source_event_id", "team_id", "channel_id", "author_user_id", "message_ts", "thread_ts", "permalink", "latest_event_at_us", "source_deleted_at_us", "created_at_us", "updated_at_us"},
-		"slack_source_events": {"source_event_id", "envelope_id", "event_kind", "team_id", "channel_id", "message_ts", "thread_ts", "user_id", "slack_event_at_us", "received_at_us", "committed_at_us", "admission_result", "task_id", "diagnostic_code", "task_version", "changed", "redelivery_count", "last_seen_at_us"},
-		"files":               {"file_id", "direction", "slack_file_id", "permalink", "original_name", "declared_mime", "size_bytes", "sha256", "related_task_id", "related_effect_id", "transfer_state", "diagnostic_code", "temporary_path", "created_at_us", "updated_at_us"},
-		"slack_effects":       {"effect_id", "idempotency_key", "predecessor_effect_id", "related_task_id", "kind", "team_id", "channel_id", "target_message_ts", "thread_ts", "text", "emoji", "operator_reason", "payload_hash", "state", "attempt_count", "prepared_at_us", "submitted_at_us", "completed_at_us", "response_message_ts", "response_file_id", "diagnostic_code", "created_at_us", "updated_at_us"},
+		"slack_task_sources":       {"task_id", "initial_source_event_id", "team_id", "channel_id", "author_user_id", "message_ts", "thread_ts", "permalink", "latest_event_at_us", "source_deleted_at_us", "created_at_us", "updated_at_us"},
+		"slack_source_events":      {"source_event_id", "envelope_id", "event_kind", "team_id", "channel_id", "message_ts", "thread_ts", "user_id", "slack_event_at_us", "received_at_us", "committed_at_us", "admission_result", "task_id", "diagnostic_code", "task_version", "changed", "redelivery_count", "last_seen_at_us"},
+		"files":                    {"file_id", "direction", "slack_file_id", "permalink", "original_name", "declared_mime", "declared_size_bytes", "validated_size_bytes", "sha256", "related_task_id", "related_effect_id", "effect_ordinal", "source_attached", "source_detached_at_us", "source_path", "source_device", "source_inode", "source_mtime_ns", "transfer_state", "diagnostic_code", "created_at_us", "updated_at_us"},
+		"file_temporary_transfers": {"transfer_id", "file_id", "generated_name", "size_bytes", "sha256", "expires_at_us", "created_at_us"},
+		"slack_effects":            {"effect_id", "idempotency_key", "predecessor_effect_id", "related_task_id", "kind", "team_id", "channel_id", "target_message_ts", "thread_ts", "text", "emoji", "operator_reason", "payload_hash", "state", "attempt_count", "prepared_at_us", "submitted_at_us", "completed_at_us", "response_message_ts", "response_file_id", "diagnostic_code", "created_at_us", "updated_at_us"},
 	} {
 		rows, err := s.DB().Query("PRAGMA table_info(" + table + ")")
 		if err != nil {
@@ -167,7 +214,7 @@ func TestSlackSchemaAcceptsCompleteRecordsAndEnforcesIdentity(t *testing.T) {
 	mustExec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('tsk_slack',1,'open','current only','slack',1,1)")
 	mustExec("INSERT INTO slack_source_events(source_event_id,envelope_id,event_kind,team_id,channel_id,message_ts,thread_ts,user_id,slack_event_at_us,received_at_us,committed_at_us,admission_result,task_id,task_version,changed,last_seen_at_us) VALUES('Ev-source','env-1','app_mention','T12345678','C12345678','1700000000.000001','1700000000.000001','U12345678',1,1,1,'admitted','tsk_slack',1,1,1)")
 	mustExec("INSERT INTO slack_task_sources(task_id,initial_source_event_id,team_id,channel_id,author_user_id,message_ts,thread_ts,permalink,latest_event_at_us,created_at_us,updated_at_us) VALUES('tsk_slack','Ev-source','T12345678','C12345678','U12345678','1700000000.000001','1700000000.000001','https://example.invalid/archive',1,1,1)")
-	mustExec("INSERT INTO files(file_id,direction,slack_file_id,permalink,original_name,declared_mime,size_bytes,related_task_id,transfer_state,created_at_us,updated_at_us) VALUES('fil_abcdefghijklmnopqrstuv','from_slack','F12345678','https://example.invalid/file','untrusted.txt','text/plain',0,'tsk_slack','metadata_only',1,1)")
+	mustExec("INSERT INTO files(file_id,direction,slack_file_id,permalink,original_name,declared_mime,declared_size_bytes,related_task_id,transfer_state,created_at_us,updated_at_us) VALUES('fil_abcdefghijklmnopqrstuv','from_slack','F12345678','https://example.invalid/file','untrusted.txt','text/plain',0,'tsk_slack','metadata_only',1,1)")
 	mustExec("INSERT INTO slack_effects(effect_id,idempotency_key,related_task_id,kind,team_id,channel_id,text,payload_hash,state,attempt_count,prepared_at_us,created_at_us,updated_at_us) VALUES('eff_abcdefghijklmnopqrstuv','effect-key','tsk_slack','send','T12345678','C12345678','exact intent',?,'prepared',0,1,1,1)", strings.Repeat("a", 64))
 
 	wantConstraint("source identity uniqueness", "INSERT INTO slack_task_sources(task_id,initial_source_event_id,team_id,channel_id,author_user_id,message_ts,thread_ts,latest_event_at_us,created_at_us,updated_at_us) VALUES('tsk_other','Ev-other','T12345678','C12345678','U12345678','1700000000.000001','1700000000.000001',1,1,1)")

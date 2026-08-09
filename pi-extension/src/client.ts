@@ -1,7 +1,7 @@
 import { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { isUtf8 } from "node:buffer";
-import { deliveryCapability, maxFrameBytes, protocolVersion, type OpenResult, type PollResult, type Request, type Response, type Observation } from "./types.ts";
+import { deliveryCapability, isAttachedFile, maxAttachedFiles, maxFrameBytes, protocolVersion, type AttachedFile, type OpenResult, type PollResult, type Request, type Response, type Observation } from "./types.ts";
 
 export class ClientError extends Error { readonly code: string; constructor(message: string, code = "protocol_error") { super(message); this.code = code; } }
 export type ClientOptions = { endpoint: string; timeoutMs?: number; maxFrameBytes?: number; connect?: (endpoint: string) => Socket };
@@ -41,7 +41,7 @@ export class GatewayClient {
     });
   }
   async deliveryOpen(sessionId: string, observed: Observation[]): Promise<OpenResult> { return this.#result<OpenResult>(await this.request("delivery.open", { pi_session_id: sessionId, observed })); }
-  async poll(): Promise<PollResult> { const value = this.#result<Record<string, unknown>>(await this.request("delivery.poll", {})); const work = value.work; const base = { eligible_backlog_count: numberField(value, "eligible_backlog_count"), uncertain_count: numberField(value, "uncertain_count"), rejected_count: numberField(value, "rejected_count") }; if (work === undefined || work === null) return { ...base, work: null }; const w = strictObject(work, "delivery work"); const sourceKind = w.source_kind; const slack = w.slack_source === undefined ? undefined : strictObject(w.slack_source, "Slack source"); return { ...base, work: { delivery_id: stringField(w, "delivery_id"), delivery_key: stringField(w, "delivery_key"), task_id: stringField(w, "task_id"), task_version: numberField(w, "task_version"), task_state: taskState(w.task_state), task_text: stringField(w, "task_text"), source: sourceKind === "local" ? { kind: "local" } : { kind: sourceKind === "slack" ? "slack" : invalidSource(), slack_author_id: slack && stringField(slack, "author_user_id"), slack_message_ts: slack && stringField(slack, "message_ts"), slack_thread_ts: slack && stringField(slack, "thread_ts") } } }; }
+  async poll(): Promise<PollResult> { const value = this.#result<Record<string, unknown>>(await this.request("delivery.poll", {})); const work = value.work; const base = { eligible_backlog_count: numberField(value, "eligible_backlog_count"), uncertain_count: numberField(value, "uncertain_count"), rejected_count: numberField(value, "rejected_count") }; if (work === undefined || work === null) return { ...base, work: null }; const w = strictObject(work, "delivery work"); const sourceKind = w.source_kind; const slack = w.slack_source === undefined ? undefined : strictObject(w.slack_source, "Slack source"); return { ...base, work: { delivery_id: stringField(w, "delivery_id"), delivery_key: stringField(w, "delivery_key"), task_id: stringField(w, "task_id"), task_version: numberField(w, "task_version"), task_state: taskState(w.task_state), task_text: stringField(w, "task_text"), source: sourceKind === "local" ? { kind: "local" } : { kind: sourceKind === "slack" ? "slack" : invalidSource(), slack_author_id: slack && stringField(slack, "author_user_id"), slack_message_ts: slack && stringField(slack, "message_ts"), slack_thread_ts: slack && stringField(slack, "thread_ts") }, attached_files: attachedFiles(w.attached_files) } }; }
   async inserting(deliveryId: string, deliveryKey: string): Promise<void> { await this.#ok(await this.request("delivery.inserting", { delivery_id: deliveryId, delivery_key: deliveryKey })); }
   async persisted(deliveryId: string, deliveryKey: string): Promise<void> { await this.#ok(await this.request("delivery.persisted", { delivery_id: deliveryId, delivery_key: deliveryKey })); }
   async rejected(deliveryId: string, deliveryKey: string, diagnosticCode: string): Promise<void> { await this.#ok(await this.request("delivery.rejected", { delivery_id: deliveryId, delivery_key: deliveryKey, diagnostic_code: diagnosticCode })); }
@@ -56,4 +56,9 @@ function stringField(value: Record<string, unknown>, name: string): string { if 
 function numberField(value: Record<string, unknown>, name: string): number { if (!Number.isInteger(value[name]) || (value[name] as number) < 0) throw new ClientError(`invalid ${name}`); return value[name] as number; }
 function taskState(value: unknown): "open" | "working" { if (value !== "open" && value !== "working") throw new ClientError("invalid task state"); return value; }
 function invalidSource(): never { throw new ClientError("invalid source kind"); }
+function attachedFiles(value: unknown): AttachedFile[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maxAttachedFiles || !value.every(isAttachedFile)) throw new ClientError("invalid attached files");
+  return value as AttachedFile[];
+}
 function parseResponse(value: unknown): Response { const o = strictObject(value, "response"); const allowed = new Set(["protocol_version", "request_id", "server_version", "result_type", "result", "error"]); if (Object.keys(o).some(k => !allowed.has(k)) || o.protocol_version !== 1 || typeof o.request_id !== "string" || typeof o.server_version !== "string" || (("result" in o) === ("error" in o))) throw new ClientError("invalid response envelope"); if ("error" in o && (o.error === null || typeof o.error !== "object")) throw new ClientError("invalid error response"); return o as Response; }

@@ -118,18 +118,79 @@ type SlackSource struct {
 	TaskText             string     `json:"task_text"`
 }
 
-// SlackFile is one metadata-only incoming file attached to an admitted source.
+// SlackFile is durable, byte-free file metadata. SizeBytes is retained as a
+// compatibility projection of DeclaredSizeBytes for Phase 1 callers.
 type SlackFile struct {
+	FileID             string     `json:"file_id"`
+	Direction          string     `json:"direction"`
+	SlackFileID        string     `json:"slack_file_id,omitempty"`
+	Permalink          string     `json:"permalink,omitempty"`
+	OriginalName       string     `json:"original_name"`
+	DeclaredMIME       string     `json:"declared_mime,omitempty"`
+	DeclaredSizeBytes  *int64     `json:"declared_size_bytes,omitempty"`
+	ValidatedSizeBytes *int64     `json:"validated_size_bytes,omitempty"`
+	SizeBytes          *int64     `json:"size_bytes,omitempty"`
+	SHA256             string     `json:"sha256,omitempty"`
+	RelatedTaskID      string     `json:"related_task_id,omitempty"`
+	RelatedEffectID    string     `json:"related_effect_id,omitempty"`
+	EffectOrdinal      *int64     `json:"effect_ordinal,omitempty"`
+	SourceAttached     bool       `json:"source_attached"`
+	SourceDetachedAt   *time.Time `json:"source_detached_at,omitempty"`
+	SourcePath         string     `json:"source_path,omitempty"`
+	SourceDevice       *int64     `json:"source_device,omitempty"`
+	SourceInode        *int64     `json:"source_inode,omitempty"`
+	SourceMTimeNS      *int64     `json:"source_mtime_ns,omitempty"`
+	TransferState      string     `json:"transfer_state"`
+	DiagnosticCode     string     `json:"diagnostic_code,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// FileTemporaryTransfer is the ephemeral database authority for one retained
+// private download. It deliberately stores a basename, never a path.
+type FileTemporaryTransfer struct {
+	TransferID    string    `json:"transfer_id"`
 	FileID        string    `json:"file_id"`
-	SlackFileID   string    `json:"slack_file_id"`
-	Permalink     string    `json:"permalink,omitempty"`
-	OriginalName  string    `json:"original_name"`
-	DeclaredMIME  string    `json:"declared_mime,omitempty"`
-	SizeBytes     *int64    `json:"size_bytes,omitempty"`
-	RelatedTaskID string    `json:"related_task_id"`
-	TransferState string    `json:"transfer_state"`
+	GeneratedName string    `json:"generated_name"`
+	SizeBytes     int64     `json:"size_bytes"`
+	SHA256        string    `json:"sha256"`
+	ExpiresAt     time.Time `json:"expires_at"`
 	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// SlackFileTransferCounts is payload-free inventory for status composition.
+type SlackFileTransferCounts struct {
+	Incoming       map[string]int64 `json:"incoming"`
+	Outgoing       map[string]int64 `json:"outgoing"`
+	TemporaryCount int64            `json:"temporary_count"`
+	TemporaryBytes int64            `json:"temporary_bytes"`
+}
+
+// SlackEffectOutgoingSource is the ordered, exact-effect source metadata needed
+// to recover or explicitly retry a durable file upload. It deliberately exposes
+// a path only through this narrow inspection API; it contains no file bytes,
+// transfer status, or Slack response data.
+type SlackEffectOutgoingSource struct {
+	FileID        string
+	SourcePath    string
+	OriginalName  string
+	SizeBytes     int64
+	SHA256        string
+	SourceDevice  *int64
+	SourceInode   *int64
+	SourceMTimeNS *int64
+}
+
+// SlackUploadFile is exact byte identity prepared before any Slack exchange.
+type SlackUploadFile struct {
+	FileID        string
+	SourcePath    string
+	OriginalName  string
+	SizeBytes     int64
+	SHA256        string
+	SourceDevice  *int64
+	SourceInode   *int64
+	SourceMTimeNS *int64
 }
 
 // SlackSourceEventCounts is bounded inventory suitable for status output.

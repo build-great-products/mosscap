@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stayradiated/mosscap/internal/client"
+	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/fileio"
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
@@ -40,6 +42,7 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"slack", "history", "--help"},
 		{"slack", "thread", "--help"},
 		{"slack", "send", "--help"},
+		{"slack", "file", "--help"},
 		{"slack", "edit", "--help"},
 		{"slack", "delete", "--help"},
 		{"slack", "react", "--help"},
@@ -50,6 +53,7 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"effect", "retry", "--help"},
 		{"file", "--help"},
 		{"file", "show", "--help"},
+		{"file", "get", "--help"},
 	}
 	for _, args := range tests {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -119,11 +123,40 @@ func TestPhase1ExitMappingsAndForbiddenFlags(t *testing.T) {
 			}
 		})
 	}
-	for _, args := range [][]string{{"slack", "history", "--channel", "C123"}, {"slack", "send", "--file", "x"}, {"file", "get", "fil_x"}} {
+	for _, args := range [][]string{{"slack", "history", "--channel", "C123"}, {"file", "get", "fil_x", "--force"}, {"slack", "file", "--file", "one", "--file", "two"}} {
 		var out, stderr bytes.Buffer
 		if got := (App{Out: &out, Err: &stderr}).Run(context.Background(), args); got != ExitUsage {
 			t.Fatalf("Run(%q) = %d, stderr=%q", args, got, stderr.String())
 		}
+	}
+}
+
+func TestFileOutputAndPathExitMappings(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{fileio.ErrDestinationExists, ExitConflict},
+		{fileio.ErrChanged, ExitConflict},
+		{fileio.ErrUnsafeFileType, ExitUnsafe},
+		{fileio.ErrUnsupported, ExitUnsupported},
+	} {
+		var command *commandError
+		if err := outputError(tc.err); !errors.As(err, &command) || command.code != tc.want {
+			t.Fatalf("outputError(%v) = %#v, want exit %d", tc.err, err, tc.want)
+		}
+	}
+	paths, err := absolutePaths([]string{"relative-file"})
+	if err != nil || len(paths) != 1 || !strings.HasPrefix(paths[0], "/") {
+		t.Fatalf("absolutePaths = %q, %v", paths, err)
+	}
+	transfer := protocol.FileGetDTO{TransferID: "xfr_AbCdEfGhIjKlMnOpQrStUv", FileID: "fil_AbCdEfGhIjKlMnOpQrStUv", TemporaryPath: "/tmp/mosscap/mosscap-xfr-" + strings.Repeat("a", 32), ValidatedSizeBytes: 1, SHA256: strings.Repeat("a", 64), ExpiresAt: "2026-01-01T00:00:00Z"}
+	if !validFileTransferResult(config.Config{Paths: config.Paths{TmpDir: "/tmp/mosscap"}}, transfer) {
+		t.Fatal("valid transfer result rejected")
+	}
+	transfer.TemporaryPath = "/tmp/other/mosscap-xfr-" + strings.Repeat("a", 32)
+	if validFileTransferResult(config.Config{Paths: config.Paths{TmpDir: "/tmp/mosscap"}}, transfer) {
+		t.Fatal("transfer outside configured tmp accepted")
 	}
 }
 

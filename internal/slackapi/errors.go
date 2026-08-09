@@ -46,26 +46,30 @@ const (
 type DiagnosticCode string
 
 const (
-	DiagnosticInvalidAuth        DiagnosticCode = "invalid_auth"
-	DiagnosticTokenRevoked       DiagnosticCode = "token_revoked"
-	DiagnosticMissingScope       DiagnosticCode = "missing_scope"
-	DiagnosticTeamMismatch       DiagnosticCode = "team_mismatch"
-	DiagnosticBotMismatch        DiagnosticCode = "bot_mismatch"
-	DiagnosticChannelNotFound    DiagnosticCode = "channel_not_found"
-	DiagnosticChannelArchived    DiagnosticCode = "channel_archived"
-	DiagnosticChannelReadOnly    DiagnosticCode = "channel_read_only"
-	DiagnosticUnsupportedChannel DiagnosticCode = "unsupported_channel"
-	DiagnosticNotInChannel       DiagnosticCode = "not_in_channel"
-	DiagnosticUserNotFound       DiagnosticCode = "user_not_found"
-	DiagnosticMessageNotFound    DiagnosticCode = "message_not_found"
-	DiagnosticRejected           DiagnosticCode = "external_rejected"
-	DiagnosticRateLimited        DiagnosticCode = "rate_limited"
-	DiagnosticTimeout            DiagnosticCode = "timeout"
-	DiagnosticCanceled           DiagnosticCode = "canceled"
-	DiagnosticDisconnected       DiagnosticCode = "disconnected"
-	DiagnosticMalformedResponse  DiagnosticCode = "malformed_response"
-	DiagnosticUnavailable        DiagnosticCode = "unavailable"
-	DiagnosticInvalidRequest     DiagnosticCode = "invalid_request"
+	DiagnosticInvalidAuth          DiagnosticCode = "invalid_auth"
+	DiagnosticTokenRevoked         DiagnosticCode = "token_revoked"
+	DiagnosticMissingScope         DiagnosticCode = "missing_scope"
+	DiagnosticTeamMismatch         DiagnosticCode = "team_mismatch"
+	DiagnosticBotMismatch          DiagnosticCode = "bot_mismatch"
+	DiagnosticChannelNotFound      DiagnosticCode = "channel_not_found"
+	DiagnosticChannelArchived      DiagnosticCode = "channel_archived"
+	DiagnosticChannelReadOnly      DiagnosticCode = "channel_read_only"
+	DiagnosticUnsupportedChannel   DiagnosticCode = "unsupported_channel"
+	DiagnosticNotInChannel         DiagnosticCode = "not_in_channel"
+	DiagnosticUserNotFound         DiagnosticCode = "user_not_found"
+	DiagnosticMessageNotFound      DiagnosticCode = "message_not_found"
+	DiagnosticRejected             DiagnosticCode = "external_rejected"
+	DiagnosticRateLimited          DiagnosticCode = "rate_limited"
+	DiagnosticTimeout              DiagnosticCode = "timeout"
+	DiagnosticCanceled             DiagnosticCode = "canceled"
+	DiagnosticDisconnected         DiagnosticCode = "disconnected"
+	DiagnosticMalformedResponse    DiagnosticCode = "malformed_response"
+	DiagnosticUnavailable          DiagnosticCode = "unavailable"
+	DiagnosticInvalidRequest       DiagnosticCode = "invalid_request"
+	DiagnosticUnsafeFileRedirect   DiagnosticCode = "unsafe_file_redirect"
+	DiagnosticFileTooLarge         DiagnosticCode = "file_too_large"
+	DiagnosticSlackFileUnavailable DiagnosticCode = "slack_file_unavailable"
+	DiagnosticPermalinkUnavailable DiagnosticCode = "permalink_unavailable"
 )
 
 // Valid reports whether d is in the durable diagnostic allowlist.
@@ -77,7 +81,8 @@ func (d DiagnosticCode) Valid() bool {
 		DiagnosticNotInChannel, DiagnosticUserNotFound, DiagnosticMessageNotFound,
 		DiagnosticRejected, DiagnosticRateLimited, DiagnosticTimeout,
 		DiagnosticCanceled, DiagnosticDisconnected, DiagnosticMalformedResponse,
-		DiagnosticUnavailable, DiagnosticInvalidRequest:
+		DiagnosticUnavailable, DiagnosticInvalidRequest, DiagnosticUnsafeFileRedirect,
+		DiagnosticFileTooLarge, DiagnosticSlackFileUnavailable, DiagnosticPermalinkUnavailable:
 		return true
 	default:
 		return false
@@ -147,7 +152,7 @@ func MissingScopesFromError(err error) ([]Scope, bool) {
 func requiredBotScope(scope Scope) bool {
 	switch scope {
 	case ScopeAppMentionsRead, ScopeChatWrite, ScopeReactionsRead, ScopeReactionsWrite,
-		ScopeUsersRead, ScopeTeamRead, ScopeFilesRead, ScopeChannelsRead, ScopeChannelsHistory,
+		ScopeUsersRead, ScopeTeamRead, ScopeFilesRead, ScopeFilesWrite, ScopeChannelsRead, ScopeChannelsHistory,
 		ScopeGroupsRead, ScopeGroupsHistory:
 		return true
 	default:

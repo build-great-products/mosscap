@@ -14,6 +14,8 @@ import (
 
 	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/fileio"
+	"github.com/stayradiated/mosscap/internal/filetransfer"
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/slackapi"
 	"github.com/stayradiated/mosscap/internal/slackapi/fake"
@@ -362,6 +364,99 @@ func TestStatusAndDoctorAreSecretSafeAndNonDestructive(t *testing.T) {
 	}
 	if before != after {
 		t.Fatalf("doctor/status changed durable counts: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestFileTransferStatusUsesDescriptorChecksForTemporarySafety(t *testing.T) {
+	tests := []struct {
+		name       string
+		makeUnsafe func(t *testing.T, tmp *fileio.TempFile)
+		wantUnsafe int64
+	}{
+		{name: "private regular file", wantUnsafe: 0},
+		{name: "hard link", wantUnsafe: 1, makeUnsafe: func(t *testing.T, tmp *fileio.TempFile) {
+			t.Helper()
+			link := filepath.Join("/home/admin", "mosscap-temporary-status-link-"+filepath.Base(tmp.Path))
+			t.Cleanup(func() { _ = os.Remove(link) })
+			if err := os.Link(tmp.Path, link); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "symlink", wantUnsafe: 1, makeUnsafe: func(t *testing.T, tmp *fileio.TempFile) {
+			t.Helper()
+			target := filepath.Join(filepath.Dir(filepath.Dir(tmp.Path)), "replacement")
+			if err := os.WriteFile(target, []byte("replacement"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(tmp.Path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, tmp.Path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			root, err := os.MkdirTemp("/home/admin", "mosscap-temporary-status-")
+			if err != nil {
+				t.Skipf("cannot create private test tree: %v", err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			if err := os.Chmod(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			temporaryRoot := filepath.Join(root, "tmp")
+			if err := os.Mkdir(temporaryRoot, 0700); err != nil {
+				t.Fatal(err)
+			}
+			temporary, err := fileio.OpenTempDir(temporaryRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = temporary.Close() })
+			tmp, err := temporary.Create()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tmp.File.Write([]byte("private")); err != nil {
+				t.Fatal(err)
+			}
+			if err := tmp.File.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if tt.makeUnsafe != nil {
+				tt.makeUnsafe(t, tmp)
+			}
+
+			db, err := store.Initialize(ctx, filepath.Join(root, "ledger.sqlite"), store.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			task, err := db.Create(ctx, "temporary-status-task", "temporary status fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			const fileID = "fil_abcdefghijklmnopqrstuv"
+			now := time.Now().UnixMicro()
+			if _, err := db.DB().ExecContext(ctx, `INSERT INTO files(file_id,direction,slack_file_id,original_name,related_task_id,source_attached,transfer_state,created_at_us,updated_at_us) VALUES(?,'from_slack','F12345678','fixture',?,1,'metadata_only',?,?)`, fileID, task.TaskID, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.InsertFileTemporaryTransfer(ctx, store.FileTemporaryTransfer{TransferID: "xfr_abcdefghijklmnopqrstuv", FileID: fileID, GeneratedName: tmp.Name, SizeBytes: 7, SHA256: strings.Repeat("a", 64), CreatedAt: time.UnixMicro(now), ExpiresAt: time.UnixMicro(now + 1_000_000)}); err != nil {
+				t.Fatal(err)
+			}
+
+			s := &Server{store: db, temporaryDir: temporary, fileTransfer: &filetransfer.Service{}}
+			inventory, err := s.fileTransferStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if inventory.UnsafeTemporaryEntries != tt.wantUnsafe {
+				t.Fatalf("unsafe temporary entries = %d, want %d", inventory.UnsafeTemporaryEntries, tt.wantUnsafe)
+			}
+		})
 	}
 }
 

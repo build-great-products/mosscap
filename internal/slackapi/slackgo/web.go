@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -62,6 +63,11 @@ func WebMaxFiles(maximum int) WebOption {
 // Web implements slackapi.Web with the pinned slack-go client.
 type Web struct {
 	client    *slack.Client
+	token     string
+	apiURL    string
+	apiOrigin *url.URL
+	apiHTTP   HTTPDoer
+	fileHTTP  HTTPDoer
 	maxFiles  int
 	optionErr error
 
@@ -81,8 +87,17 @@ func NewWeb(botToken string, options ...WebOption) *Web {
 	if configuration.httpClient == nil {
 		configuration.httpClient = http.DefaultClient
 	}
-	httpClient := refuseRedirects(configuration.httpClient)
-	httpClient = validateProofResponses(httpClient, maxWebResponseBytes)
+	apiURL := configuration.apiURL
+	if apiURL == "" {
+		apiURL = defaultWebAPIURL
+	}
+	apiOrigin, parseErr := url.Parse(apiURL)
+	if parseErr != nil || apiOrigin.Scheme == "" || apiOrigin.Host == "" {
+		configuration.optionErr = errors.New("invalid Slack Web API URL")
+		apiOrigin, _ = url.Parse(defaultWebAPIURL)
+	}
+	apiHTTP := refuseRedirects(configuration.httpClient)
+	httpClient := validateProofResponses(apiHTTP, maxWebResponseBytes)
 	sdkOptions := []slack.Option{
 		slack.OptionHTTPClient(limitHTTPResponses(httpClient, maxWebResponseBytes)),
 		slack.OptionRetry(0),
@@ -90,7 +105,11 @@ func NewWeb(botToken string, options ...WebOption) *Web {
 	if configuration.apiURL != "" {
 		sdkOptions = append(sdkOptions, slack.OptionAPIURL(withTrailingSlash(configuration.apiURL)))
 	}
-	return &Web{client: slack.New(botToken, sdkOptions...), maxFiles: configuration.maxFiles, optionErr: configuration.optionErr}
+	return &Web{
+		client: slack.New(botToken, sdkOptions...), token: botToken, apiURL: apiURL,
+		apiOrigin: apiOrigin, apiHTTP: apiHTTP, fileHTTP: noAutoRedirect(configuration.httpClient),
+		maxFiles: configuration.maxFiles, optionErr: configuration.optionErr,
+	}
 }
 
 func (web *Web) Auth(ctx context.Context) (slackapi.AuthIdentity, error) {

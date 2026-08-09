@@ -44,9 +44,15 @@ mosscap slack send --thread 1712345678.123456 --text "I found the problem."
 mosscap task done tsk_123
 ```
 
-All Slack commands operate on the single configured channel; they cannot select another destination.
+All Slack commands operate on the single configured channel; they cannot select another destination. File transfer remains explicit:
 
-Slack files are represented by durable metadata but downloaded only on request. Downloads and uploads use temporary bytes rather than a permanent Mosscap file archive.
+```text
+mosscap file show fil_EXAMPLE --json
+mosscap file get fil_EXAMPLE --output ./safe-output --json
+mosscap slack file --file ./operator-selected-file --request-id upload-1 --json
+```
+
+Slack files are represented by durable metadata but downloaded only on request. Downloads and uploads use temporary bytes rather than a permanent Mosscap file archive. Routine Pi task delivery carries attachment metadata and retrieval hints rather than raw bytes or transient private Slack transfer URLs. Mosscap does not redact local paths or ordinary operational diagnostics on operator/Pi surfaces; because those values enter Pi/model context, operators should treat the configured model provider as part of that observability boundary.
 
 ## Configuration and trust
 

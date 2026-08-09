@@ -3,10 +3,13 @@ package slackops
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/stayradiated/mosscap/internal/fileio"
 	"github.com/stayradiated/mosscap/internal/slackapi"
 	"github.com/stayradiated/mosscap/internal/slackapi/fake"
 	"github.com/stayradiated/mosscap/internal/store"
@@ -117,6 +120,173 @@ func TestExecuteMappingsAndSubmittedBeforeWrite(t *testing.T) {
 	}
 	if err := web.AssertDone(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFileUploadPreparesOrderedIntentBeforeSlackAndConfirms(t *testing.T) {
+	ledger, err := store.Initialize(context.Background(), filepath.Join(t.TempDir(), "ledger.sqlite"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	dir := t.TempDir()
+	one, two := filepath.Join(dir, "one.txt"), filepath.Join(dir, "two.bin")
+	if err := os.WriteFile(one, []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(two, []byte{0, 1, 2}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	barrier := fake.NewBarrier()
+	transfer := fake.NewFileTransfer(
+		fake.TransferStep{Operation: fake.ReserveUpload, Result: slackapi.UploadedFile{ID: "F12345678"}, PostCall: fake.CallScript{Barrier: barrier}},
+		fake.TransferStep{Operation: fake.ReserveUpload, Result: slackapi.UploadedFile{ID: "F23456789"}},
+		fake.TransferStep{Operation: fake.StageUpload, Bytes: []byte("one")},
+		fake.TransferStep{Operation: fake.StageUpload, Bytes: []byte{0, 1, 2}},
+		fake.TransferStep{Operation: fake.ValidateUpload}, fake.TransferStep{Operation: fake.ValidateUpload},
+		fake.TransferStep{Operation: fake.CompleteUpload, Result: slackapi.UploadResult{Files: []slackapi.UploadedFile{{ID: "F12345678"}, {ID: "F23456789"}}}},
+	)
+	svc := NewWithFileTransfer(ledger, nil, transfer, testTarget, 1024, 2)
+	result := make(chan struct {
+		effect store.SlackEffect
+		err    error
+	}, 1)
+	go func() {
+		effect, err := svc.ExecuteFileUpload(context.Background(), "file-upload", store.SlackFileUploadIntent{Text: "comment", Files: []store.SlackUploadFile{{SourcePath: one}, {SourcePath: two}}})
+		result <- struct {
+			effect store.SlackEffect
+			err    error
+		}{effect, err}
+	}()
+	select {
+	case <-barrier.Reached():
+	case <-time.After(time.Second):
+		t.Fatal("upload reservation was not reached")
+	}
+	effects, err := ledger.ListSlackEffects(context.Background(), nil, 10)
+	if err != nil || len(effects) != 1 || effects[0].Kind != store.SlackEffectFileUpload || effects[0].State != store.SlackEffectSubmitted {
+		t.Fatalf("effect before first exchange = %#v, %v", effects, err)
+	}
+	sources, err := ledger.InspectSlackFileUploadSources(context.Background(), effects[0].ID)
+	if err != nil || len(sources) != 2 || sources[0].OriginalName != "one.txt" || sources[1].OriginalName != "two.bin" {
+		t.Fatalf("ordered file intent = %#v, %v", sources, err)
+	}
+	barrier.Release()
+	got := <-result
+	if got.err != nil || got.effect.State != store.SlackEffectConfirmed {
+		t.Fatalf("upload = %#v, %v", got.effect, got.err)
+	}
+	if err := transfer.AssertDone(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFileUploadSameInodeSameSizeRewriteAfterStagingFailsWithoutCompletion(t *testing.T) {
+	ledger, err := store.Initialize(context.Background(), filepath.Join(t.TempDir(), "ledger.sqlite"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	path := filepath.Join(t.TempDir(), "source.txt")
+	if err := os.WriteFile(path, []byte("before"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	barrier := fake.NewBarrier()
+	transfer := fake.NewFileTransfer(
+		fake.TransferStep{Operation: fake.ReserveUpload, Result: slackapi.UploadedFile{ID: "F12345678"}},
+		fake.TransferStep{Operation: fake.StageUpload, Bytes: []byte("before"), PostCall: fake.CallScript{Barrier: barrier}},
+		fake.TransferStep{Operation: fake.ValidateUpload},
+		fake.TransferStep{Operation: fake.CompleteUpload, Result: slackapi.UploadResult{Files: []slackapi.UploadedFile{{ID: "F12345678"}}}},
+	)
+	svc := NewWithFileTransfer(ledger, nil, transfer, testTarget, 1024, 1)
+	result := make(chan struct {
+		effect store.SlackEffect
+		err    error
+	}, 1)
+	go func() {
+		effect, err := svc.ExecuteFileUpload(context.Background(), "changed-upload", store.SlackFileUploadIntent{Files: []store.SlackUploadFile{{SourcePath: path}}})
+		result <- struct {
+			effect store.SlackEffect
+			err    error
+		}{effect, err}
+	}()
+	select {
+	case <-barrier.Reached():
+	case <-time.After(time.Second):
+		t.Fatal("upload staging was not reached")
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrite, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rewrite.WriteAt([]byte("after!"), 0); err != nil {
+		rewrite.Close()
+		t.Fatal(err)
+	}
+	if err := rewrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || before.Size() != after.Size() {
+		t.Fatalf("rewrite did not preserve source identity and size: before=%#v after=%#v", before, after)
+	}
+	barrier.Release()
+	got := <-result
+	if got.err == nil || got.effect.State != store.SlackEffectFailed || got.effect.DiagnosticCode != store.SlackEffectDiagnosticFileChanged {
+		t.Fatalf("changed upload = %#v, %v", got.effect, got.err)
+	}
+	if calls := transfer.Calls(); len(calls) != 3 || calls[len(calls)-1].Operation != fake.ValidateUpload {
+		t.Fatalf("changed upload completed Slack call sequence: %#v", calls)
+	}
+	if err := transfer.AssertDone(); err == nil || !strings.Contains(err.Error(), "scripted calls remain") {
+		t.Fatalf("completion should remain uncalled: %v", err)
+	}
+}
+
+func TestRecoverPreparedUploadMismatchFailsWithoutSlackCall(t *testing.T) {
+	ledger, err := store.Initialize(context.Background(), filepath.Join(t.TempDir(), "ledger.sqlite"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	path := filepath.Join(t.TempDir(), "source.txt")
+	if err := os.WriteFile(path, []byte("prepared"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	source, err := fileio.OpenSource(path, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, inode, mtime := int64(source.Device()), int64(source.Inode()), source.MtimeNS()
+	intent := store.SlackFileUploadIntent{Files: []store.SlackUploadFile{{SourcePath: path, OriginalName: "source.txt", SizeBytes: source.Size, SHA256: source.SHA256, SourceDevice: &device, SourceInode: &inode, SourceMTimeNS: &mtime}}}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := ledger.PrepareSlackFileUpload(context.Background(), "recovery-mismatch", testTarget, intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("changed!"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	transfer := fake.NewFileTransfer()
+	svc := NewWithFileTransfer(ledger, fake.NewWeb(), transfer, testTarget, 1024, 1)
+	if _, err := svc.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	effect, err := ledger.GetSlackEffect(context.Background(), prepared.EffectID)
+	if err != nil || effect.State != store.SlackEffectFailed || effect.AttemptCount != 0 || effect.DiagnosticCode != store.SlackEffectDiagnosticFileChanged {
+		t.Fatalf("recovered mismatch = %#v, %v", effect, err)
+	}
+	if calls := transfer.Calls(); len(calls) != 0 {
+		t.Fatalf("recovered mismatch called Slack: %#v", calls)
 	}
 }
 
