@@ -201,9 +201,12 @@ func TestSetPreservesFormattingAndOnlyChangesValue(t *testing.T) {
 	if _, err := Set(loc, "leader_expiry", "5s"); err == nil {
 		t.Fatal("Set accepted invalid full candidate")
 	}
-	got, err = Set(loc, "slack_app_token", "xapp-new-token")
+	if _, err := Set(loc, "slack_app_token", "xapp-new-token"); err == nil || !strings.Contains(err.Error(), "config secret set") {
+		t.Fatalf("Set accepted positional token: %v", err)
+	}
+	got, err = SetSecret(loc, "slack_app_token", "xapp-new-token")
 	if err != nil || got.SlackAppToken != "xapp-new-token" {
-		t.Fatalf("Set token: config=%#v err=%v", got, err)
+		t.Fatalf("SetSecret token mismatch: err=%v", err)
 	}
 	view := Redact(got)
 	if !view.SlackAppTokenPresent || strings.Contains(fmt.Sprint(view), "xapp-new-token") {

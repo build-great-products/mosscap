@@ -515,7 +515,6 @@ local_protocol_maximum_frame = %d
 var setMu sync.Mutex
 
 var settable = map[string]bool{
-	"slack_app_token": true, "slack_bot_token": true,
 	"slack_channel_id": true, "delivery_lease": true, "leader_heartbeat": true, "leader_expiry": true,
 	"slack_reconnect_initial_backoff": true, "slack_reconnect_max_backoff": true, "slack_reconnect_jitter": true,
 	"sqlite_busy_timeout": true, "maximum_file_size": true, "maximum_files_per_slack_operation": true,
@@ -523,9 +522,28 @@ var settable = map[string]bool{
 }
 
 // Set validates a complete candidate then replaces only the selected TOML
-// value bytes. It may run while the gateway is live.
+// value bytes. It may run while the gateway is live. Slack credentials must
+// use SetSecret so callers cannot accidentally pass them through argv.
 func Set(loc Location, key, value string) (Config, error) {
-	if !settable[key] {
+	if isSecretKey(key) {
+		return Config{}, fmt.Errorf("config key %q is secret; use `mosscap config secret set %s`", key, key)
+	}
+	return set(loc, key, value)
+}
+
+// SetSecret atomically writes one validated Slack credential while preserving
+// the existing config's comments, formatting, and private mode.
+func SetSecret(loc Location, key, value string) (Config, error) {
+	if !isSecretKey(key) {
+		return Config{}, fmt.Errorf("config key %q is not a supported secret", key)
+	}
+	return set(loc, key, value)
+}
+
+func isSecretKey(key string) bool { return key == "slack_app_token" || key == "slack_bot_token" }
+
+func set(loc Location, key, value string) (Config, error) {
+	if !settable[key] && !isSecretKey(key) {
 		return Config{}, fmt.Errorf("config key %q is not allowed", key)
 	}
 	setMu.Lock()

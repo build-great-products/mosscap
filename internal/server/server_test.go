@@ -187,7 +187,11 @@ func TestPhase1ReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	for key, value := range map[string]string{
 		"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_id": "C012ABC",
 	} {
-		if _, err := config.Set(loc, key, value); err != nil {
+		set := config.Set
+		if key == "slack_app_token" || key == "slack_bot_token" {
+			set = config.SetSecret
+		}
+		if _, err := set(loc, key, value); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -298,7 +302,7 @@ func TestReloadAppliesSQLiteBusyTimeoutWithoutStoringTokens(t *testing.T) {
 	if _, err := config.Set(loc, "sqlite_busy_timeout", "25ms"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := config.Set(loc, "slack_app_token", "xapp-TOKEN_CANARY"); err != nil {
+	if _, err := config.SetSecret(loc, "slack_app_token", "xapp-TOKEN_CANARY"); err != nil {
 		t.Fatal(err)
 	}
 	first, err := s.reload(context.Background(), "reload-busy-timeout")
