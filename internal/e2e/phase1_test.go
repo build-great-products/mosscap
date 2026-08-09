@@ -3,6 +3,7 @@ package e2e
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/server"
 	"github.com/stayradiated/mosscap/internal/slackapi"
 	"github.com/stayradiated/mosscap/internal/slackapi/fake"
+	_ "modernc.org/sqlite"
 )
 
 // TestPhase1SlackVerticalSlice drives Socket admission, the Unix server/client
@@ -130,6 +132,28 @@ func TestPhase1SlackVerticalSlice(t *testing.T) {
 	}
 	gate.Release()
 	waitAcks(t, acks, dupAcks, editAcks, deleteAcks)
+
+	// Acknowledgement follows durable admission. The source-event audit has one
+	// canonical initial event plus the update and deletion; the duplicate is a
+	// canonical lookup, not another task/source.
+	db, err := sql.Open("sqlite", cfg.Paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sourceEvents, sources, taskCount int
+	if err := db.QueryRow("SELECT count(*) FROM slack_source_events").Scan(&sourceEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM slack_task_sources").Scan(&sources); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM tasks").Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if sourceEvents != 3 || sources != 1 || taskCount != 1 {
+		t.Fatalf("durable admission counts events=%d sources=%d tasks=%d; want 3,1,1", sourceEvents, sources, taskCount)
+	}
 	listed := call("list", "task.list", protocol.TaskListParams{IncludeDone: true, Limit: 10})
 	var tasks struct {
 		Tasks []struct {
@@ -161,20 +185,33 @@ func TestPhase1SlackVerticalSlice(t *testing.T) {
 		}
 		return out
 	}
+	runFailure := func(wantExit int, args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(binary, args...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		exit, ok := err.(*exec.ExitError)
+		if !ok || exit.ExitCode() != wantExit {
+			t.Fatalf("CLI %v exit=%v; want %d: %s", args, err, wantExit, out)
+		}
+		return out
+	}
 	if out := run("slack", "history", "--json"); !json.Valid(out) {
 		t.Fatalf("history=%s", out)
 	}
 	if out := run("slack", "send", "--text", "confirmed", "--request-id", "confirmed", "--json"); !json.Valid(out) {
 		t.Fatalf("send=%s", out)
 	}
-	// A post-submit timeout is ambiguous. Restart/recovery must not consume a
-	// further fake write step; inspection is explicit and preserves the record.
-	ambiguous := call("ambiguous", "slack.send", protocol.SlackSendParams{Text: "maybe"})
-	if ambiguous.Error == nil || ambiguous.Error.Category != "ambiguous" {
-		t.Fatalf("ambiguous=%#v", ambiguous)
+	// A post-submit timeout is ambiguous. It is surfaced as CLI exit 8 and
+	// neither it nor a later inspection may consume a further fake write step.
+	if out := runFailure(8, "slack", "send", "--text", "maybe", "--request-id", "ambiguous", "--json"); !strings.Contains(string(out), "ambiguous_external_outcome") {
+		t.Fatalf("ambiguous output=%s", out)
 	}
 	if got := len(web.Calls()); got != 7 {
 		t.Fatalf("Web calls=%d; ambiguous retry occurred", got)
+	}
+	if out := run("effect", "list", "--state", "ambiguous", "--json"); !json.Valid(out) || !strings.Contains(string(out), `"state":"ambiguous"`) {
+		t.Fatalf("ambiguous effects=%s", out)
 	}
 	if err := web.AssertDone(); err != nil {
 		t.Fatal(err)

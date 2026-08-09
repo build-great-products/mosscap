@@ -2,7 +2,7 @@
 
 **Durable Slack work for a Pi session that stays yours.**
 
-> Mosscap is currently being specified. The command examples below describe the intended interface.
+> Mosscap's Phase 1 Slack MVP is implemented; later Pi delivery and file-transfer phases remain separate.
 
 Mosscap connects one trusted Slack channel to an interactive [Pi](https://github.com/earendil-works/pi-coding-agent) session. Eligible Slack mentions and local requests become durable tasks in SQLite. A TypeScript Pi extension inserts that work as visible messages and immediately starts model processing.
 
@@ -44,15 +44,13 @@ mosscap slack send --thread 1712345678.123456 --text "I found the problem."
 mosscap task done tsk_123
 ```
 
-All Slack commands operate on the single configured channel; they cannot select another destination. File transfer remains explicit:
+All Slack commands operate on the single configured channel; they cannot select another destination. Incoming Slack files are durable metadata only in Phase 1:
 
 ```text
 mosscap file show fil_EXAMPLE --json
-mosscap file get fil_EXAMPLE --output ./safe-output --json
-mosscap slack file --file ./operator-selected-file --request-id upload-1 --json
 ```
 
-Slack files are represented by durable metadata but downloaded only on request. Downloads and uploads use temporary bytes rather than a permanent Mosscap file archive. Routine Pi task delivery carries attachment metadata and retrieval hints rather than raw bytes or transient private Slack transfer URLs. Mosscap does not redact local paths or ordinary operational diagnostics on operator/Pi surfaces; because those values enter Pi/model context, operators should treat the configured model provider as part of that observability boundary.
+Mosscap neither downloads nor uploads file bytes in this phase. See [Phase 1 Slack operations](docs/operations/phase-1-slack.md) for credential placement, trust, effects, ambiguity, reconnect, and shutdown.
 
 ## Configuration and trust
 
@@ -66,7 +64,7 @@ mosscap config set maximum_file_size 200MiB
 mosscap gateway reload
 ```
 
-`config set` updates one value atomically while preserving the file's comments and formatting. Reload validates the complete file and activates it as one immutable snapshot; if validation fails, the gateway keeps using its previous configuration. The current pre-Slack implementation exposes a verifier seam but intentionally reports Slack network verification as deferred until Phase 1 provides Slack integration—it does not pretend to authenticate credentials or check channel access.
+`config set` updates one value atomically while preserving the file's comments and formatting. Reload validates the complete file and activates it as one immutable snapshot; if validation fails, the gateway keeps using its previous verified configuration and Slack runtime.
 
 Trusted Slack user IDs are different: the current allowlist lives in SQLite and changes take effect immediately through the running gateway. An empty allowlist is valid and admits no Slack messages.
 
