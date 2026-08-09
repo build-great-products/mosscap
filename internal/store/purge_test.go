@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -427,6 +428,47 @@ func insertPurgeUpload(t *testing.T, s *Store, effectID, fileID, taskID string, 
 	insertPurgeEffect(t, s, effectID, taskID, "confirmed", "", at)
 	if _, err := s.DB().Exec(`INSERT INTO files(file_id,direction,original_name,declared_size_bytes,validated_size_bytes,sha256,related_effect_id,effect_ordinal,source_attached,source_path,transfer_state,created_at_us,updated_at_us) VALUES(?,'to_slack','upload.txt',1,1,?, ?,0,0,'/tmp/upload.txt','confirmed',?,?)`, fileID, fmt.Sprintf("%064x", len(fileID)), effectID, at, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConfirmMetadataPurgeRetriableFailureRollsBackAndReportsOnlyCommittedProgress(t *testing.T) {
+	for _, cause := range []error{
+		context.Canceled,
+		errors.New("database is busy"),
+		errors.New("database or disk is full"),
+		errors.New("interrupted"),
+	} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			s := testStore(t)
+			old := int64(1_700_000_000_000_000)
+			insertPurgeTask(t, s, "tsk_purge_rollback", old)
+			requestID := "purge-rollback-" + strings.ReplaceAll(cause.Error(), " ", "-")
+			s.purgeDeleteHook = func() error { return cause }
+
+			_, err := s.ConfirmMetadataPurge(context.Background(), requestID, time.UnixMicro(old+1).UTC())
+			var purgeErr *PurgeError
+			if !errors.As(err, &purgeErr) || !errors.Is(err, cause) {
+				t.Fatalf("error = %v, want retriable %v", err, cause)
+			}
+			if purgeErr.Progress.Removed.total() != 0 {
+				t.Fatalf("speculative progress leaked: %#v", purgeErr.Progress.Removed)
+			}
+			var tasks, requests int
+			if err := s.DB().QueryRow("SELECT count(*) FROM tasks WHERE task_id='tsk_purge_rollback'").Scan(&tasks); err != nil || tasks != 1 {
+				t.Fatalf("rollback tasks = %d, %v", tasks, err)
+			}
+			if err := s.DB().QueryRow("SELECT count(*) FROM mutation_requests WHERE request_id=?", requestID).Scan(&requests); err != nil || requests != 0 {
+				t.Fatalf("rollback request = %d, %v", requests, err)
+			}
+			assertPurgeIntegrity(t, s)
+
+			s.purgeDeleteHook = nil
+			result, err := s.ConfirmMetadataPurge(context.Background(), requestID, time.UnixMicro(old+1).UTC())
+			if err != nil || result.Removed.Tasks != 1 {
+				t.Fatalf("safe replay = %#v, %v", result, err)
+			}
+			assertPurgeIntegrity(t, s)
+		})
 	}
 }
 

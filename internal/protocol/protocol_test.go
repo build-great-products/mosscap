@@ -256,7 +256,9 @@ func TestMetadataPurgeParamsStrictAndNormalize(t *testing.T) {
 		{"2026-01-02T03:04:05.123456Z", true},
 		{"2026-01-02T04:04:05.123456+01:00", true},
 		{"2026-01-02", false}, {"2026-01-02T03:04:05", false},
-		{"2026-01-02T03:04:05.1234567Z", false}, {"not-a-time", false},
+		{"2026-01-02T03:04:05Z", false}, {"2026-01-02T03:04:05.1Z", false},
+		{"2026-01-02T03:04:05.12345Z", false}, {"2026-01-02T03:04:05,123456Z", false},
+		{"2026-01-02T03:04:05.123456", false}, {"2026-01-02T03:04:05.1234567Z", false}, {"not-a-time", false},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
 			_, err := ParsePurgeCutoff(tc.value)
@@ -264,10 +266,6 @@ func TestMetadataPurgeParamsStrictAndNormalize(t *testing.T) {
 				t.Fatalf("ParsePurgeCutoff(%q) = %v", tc.value, err)
 			}
 		})
-	}
-	got, err := ParsePurgeCutoff("2026-01-02T04:04:05.1+01:00")
-	if err != nil || got.Format("2006-01-02T15:04:05.000000Z") != "2026-01-02T03:04:05.100000Z" {
-		t.Fatalf("normalization = %s, %v", got, err)
 	}
 	if err := ValidateParams("metadata.purge", []byte(`{"cutoff":"2026-01-02T03:04:05.000000Z","mode":"dry_run"}`)); err != nil {
 		t.Fatal(err)

@@ -830,10 +830,10 @@ func validCommand(c string) bool {
 }
 
 // ParsePurgeCutoff accepts the canonical RFC3339 lexical form used by purge:
-// calendar date, T separator, explicit dot fraction (one to six digits), and
-// either Z or a numeric ±HH:MM offset.  time.Parse is intentionally preceded
-// by this grammar check because it accepts useful-but-noncanonical variants.
-var purgeCutoffSyntax = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{1,6}(Z|[+-][0-9]{2}:[0-9]{2})$`)
+// calendar date, T separator, exactly six fractional microseconds, and either
+// Z or a numeric ±HH:MM offset. time.Parse is intentionally preceded by this
+// grammar check because it accepts useful-but-noncanonical variants.
+var purgeCutoffSyntax = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}(Z|[+-][0-9]{2}:[0-9]{2})$`)
 
 func ParsePurgeCutoff(value string) (time.Time, error) {
 	if len(value) == 0 || len(value) > 64 || !purgeCutoffSyntax.MatchString(value) {

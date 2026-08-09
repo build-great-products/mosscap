@@ -130,7 +130,11 @@ func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cuto
 
 	out := PurgeResult{Cutoff: cutoff}
 	budget := purgeBudget{rows: PurgeBatchSize, roots: PurgeRootLimit}
-	if err := selectMetadataPurge(ctx, conn, cutoffUS, requestID, &budget, &out, true); err != nil {
+	var purgeQ purgeConn = conn
+	if s.purgeDeleteHook != nil {
+		purgeQ = purgeFaultConn{purgeConn: conn, afterDelete: s.purgeDeleteHook}
+	}
+	if err := selectMetadataPurge(ctx, purgeQ, cutoffUS, requestID, &budget, &out, true); err != nil {
 		return PurgeResult{}, classifyPurgeError(err, out)
 	}
 	raw, err := json.Marshal(out)
@@ -154,6 +158,13 @@ type purgeConn interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type purgeFaultConn struct {
+	purgeConn
+	afterDelete func() error
+}
+
+func (q purgeFaultConn) afterPurgeDelete() error { return q.afterDelete() }
+
 // PurgeError records that no in-flight transaction was committed. Result is
 // the last durable progress (zero for this one-batch invocation) and is safe
 // to render for an operator retry.
@@ -166,6 +177,9 @@ func (e *PurgeError) Error() string { return "metadata purge interrupted; retry 
 func (e *PurgeError) Unwrap() error { return e.Cause }
 
 func classifyPurgeError(err error, progress PurgeResult) error {
+	// A confirm invocation is a single transaction. Until COMMIT succeeds,
+	// every observed deletion is speculative and must not escape as progress.
+	progress.Removed = PurgeCounts{}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &PurgeError{Cause: err, Progress: progress}
 	}
@@ -495,6 +509,11 @@ func deleteCount(ctx context.Context, q purgeConn, query string, args ...any) (i
 	r, err := q.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
+	}
+	if hook, ok := q.(interface{ afterPurgeDelete() error }); ok {
+		if err := hook.afterPurgeDelete(); err != nil {
+			return 0, err
+		}
 	}
 	return r.RowsAffected()
 }
