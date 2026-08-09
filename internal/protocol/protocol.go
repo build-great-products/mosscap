@@ -388,17 +388,20 @@ type SlackEffectCountsDTO struct {
 	ByState        map[string]int64 `json:"by_state"`
 }
 type SlackRuntimeStatusDTO struct {
-	State                  string               `json:"state"`
-	TeamID                 string               `json:"team_id,omitempty"`
-	BotUserID              string               `json:"bot_user_id,omitempty"`
-	ChannelID              string               `json:"channel_id,omitempty"`
-	ReconnectAttempt       int                  `json:"reconnect_attempt"`
-	BackoffMilliseconds    int64                `json:"backoff_milliseconds"`
-	LastDiagnosticCode     string               `json:"last_diagnostic_code,omitempty"`
-	LastEnvelopeReceivedAt *string              `json:"last_envelope_received_at,omitempty"`
-	LastSourceCommittedAt  *string              `json:"last_source_committed_at,omitempty"`
-	SourceResults          map[string]uint64    `json:"source_results,omitempty"`
-	Effects                SlackEffectCountsDTO `json:"effects"`
+	State                          string               `json:"state"`
+	TeamID                         string               `json:"team_id,omitempty"`
+	BotUserID                      string               `json:"bot_user_id,omitempty"`
+	ChannelID                      string               `json:"channel_id,omitempty"`
+	IdentitySource                 string               `json:"identity_source,omitempty"`
+	ReconnectAttempt               int                  `json:"reconnect_attempt"`
+	BackoffMilliseconds            int64                `json:"backoff_milliseconds"`
+	LastDiagnosticCode             string               `json:"last_diagnostic_code,omitempty"`
+	LastVerificationDiagnosticCode string               `json:"last_verification_diagnostic_code,omitempty"`
+	PriorRuntimeRetained           bool                 `json:"prior_runtime_retained,omitempty"`
+	LastEnvelopeReceivedAt         *string              `json:"last_envelope_received_at,omitempty"`
+	LastSourceCommittedAt          *string              `json:"last_source_committed_at,omitempty"`
+	SourceResults                  map[string]uint64    `json:"source_results,omitempty"`
+	Effects                        SlackEffectCountsDTO `json:"effects"`
 }
 type StatusDTO struct {
 	Slack *SlackRuntimeStatusDTO `json:"slack,omitempty"`

@@ -77,6 +77,39 @@ func TestMissingScopesErrorOnlyRetainsAllowedScopeNames(t *testing.T) {
 	if failure.Class != FailureConclusive || failure.Diagnostic != DiagnosticMissingScope {
 		t.Fatalf("Classify = %#v", failure)
 	}
+	diagnostic, ok := VerificationDiagnosticFromError(err)
+	if !ok || diagnostic.Code != DiagnosticMissingScope || !reflect.DeepEqual(diagnostic.MissingScopes, []Scope{ScopeChannelsHistory, ScopeUsersRead}) {
+		t.Fatalf("VerificationDiagnosticFromError = %#v, %t", diagnostic, ok)
+	}
+	if advice := diagnostic.Advice(); strings.Contains(advice, unsafe) || !strings.Contains(advice, "OAuth") {
+		t.Fatalf("unsafe or unhelpful advice: %q", advice)
+	}
+}
+
+func TestVerificationDiagnosticsAreTypedAndActionable(t *testing.T) {
+	tests := []struct {
+		code DiagnosticCode
+		want string
+	}{
+		{DiagnosticInvalidAuth, "Replace the bot token"},
+		{DiagnosticTeamMismatch, "intended workspace"},
+		{DiagnosticChannelNotFound, "invite the bot"},
+		{DiagnosticChannelArchived, "writable public or private channel"},
+		{DiagnosticUserNotFound, "active human"},
+		{DiagnosticInvalidRequest, "configured Slack IDs"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.code), func(t *testing.T) {
+			err := NewVerificationError(test.code)
+			diagnostic, ok := VerificationDiagnosticFromError(err)
+			if !ok || diagnostic.Code != test.code || !strings.Contains(diagnostic.Advice(), test.want) {
+				t.Fatalf("diagnostic = %#v, %t; advice=%q", diagnostic, ok, diagnostic.Advice())
+			}
+			if failure := Classify(err, FailureRead); failure.Class != FailureConclusive || failure.Diagnostic != test.code {
+				t.Fatalf("Classify = %#v", failure)
+			}
+		})
+	}
 }
 
 func TestExternalErrorRejectsTokenShapedRequestIDs(t *testing.T) {

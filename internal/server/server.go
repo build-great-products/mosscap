@@ -88,6 +88,12 @@ type Server struct {
 	slackState     slackruntime.State
 	temporaryDir   *fileio.TempDir
 	fileTransfer   *filetransfer.Service
+	// slackDiagnostic records only bounded candidate-verification evidence.
+	// It is independent of runtime observations so a failed reload can report
+	// that the already-published runtime was retained.
+	slackDiagnosticMu     sync.RWMutex
+	slackVerificationCode slackapi.DiagnosticCode
+	slackVerificationHeld bool
 }
 
 func New(c config.Config, loc config.Location, version string, log *slog.Logger) *Server {
@@ -828,7 +834,8 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 		if s.Verifier != nil {
 			if err := s.Verifier.Verify(ctx, candidate); err != nil {
 				// External verifier errors may contain credentials or Slack responses.
-				prepareErr = &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+				s.recordSlackVerificationFailure(err, s.runtime != nil)
+				prepareErr = &store.ConfigReloadError{Message: s.reloadSlackVerificationMessage(err)}
 			}
 		}
 		if prepareErr == nil && candidate.SQLiteBusyTimeout != s.snapshot().SQLiteBusyTimeout {
@@ -851,7 +858,8 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 			if err != nil {
 				// Runtime errors are already token-safe, but do not expose adapters'
 				// implementation details through the durable reload record.
-				prepareErr = &store.ConfigReloadError{Message: "reload candidate Slack verification failed; check credentials, workspace, bot, and channel access"}
+				s.recordSlackVerificationFailure(err, s.runtime != nil)
+				prepareErr = &store.ConfigReloadError{Message: s.reloadSlackVerificationMessage(err)}
 			}
 		}
 	}
@@ -908,6 +916,7 @@ func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigR
 	s.activeConfig.Store(&candidate)
 	s.activeDigest = digest
 	s.generation.Store(result.ActiveConfigGeneration)
+	s.clearSlackVerificationFailure()
 	// The durable decision and complete replacement frame are now visible.
 	// Start the candidate intake only after both, before retiring the old one.
 	if candidateRuntime != nil {

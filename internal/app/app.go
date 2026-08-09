@@ -2,6 +2,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
@@ -40,6 +43,7 @@ const (
 type App struct {
 	Out     io.Writer
 	Err     io.Writer
+	In      io.Reader
 	Version string
 }
 
@@ -64,6 +68,9 @@ func (a App) Execute(_ context.Context, args []string) error {
 	}
 	if a.Err == nil {
 		a.Err = io.Discard
+	}
+	if a.In == nil {
+		a.In = os.Stdin
 	}
 	if a.Version == "" {
 		a.Version = "devel"
@@ -132,7 +139,7 @@ func (a App) setup(_ string, args []string) error {
 }
 func (a App) config(override string, args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		a.printBranchHelp("config", []string{"show", "set"})
+		a.printBranchHelp("config", []string{"show", "set", "secret set"})
 		return nil
 	}
 	switch args[0] {
@@ -140,6 +147,8 @@ func (a App) config(override string, args []string) error {
 		return a.configShow(override, args[1:])
 	case "set":
 		return a.configSet(override, args[1:])
+	case "secret":
+		return a.configSecret(override, args[1:])
 	default:
 		return usage(fmt.Sprintf("unknown config command %q", args[0]))
 	}
@@ -180,11 +189,14 @@ func (a App) configSet(_ string, args []string) error {
 		return usage(err.Error())
 	}
 	if *h {
-		fmt.Fprintln(a.Out, "Usage: mosscap config set KEY VALUE [--json]\n\nStage one validated setting without changing the gateway's active snapshot.")
+		fmt.Fprintln(a.Out, "Usage: mosscap config set KEY VALUE [--json]\n\nStage one validated non-secret setting without changing the gateway's active snapshot. Set Slack credentials with `mosscap config secret set`; credentials are resolved only from private config.toml, never environment variables.")
 		return nil
 	}
 	if fs.NArg() != 2 {
 		return usage("config set requires KEY and VALUE")
+	}
+	if fs.Arg(0) == "slack_app_token" || fs.Arg(0) == "slack_bot_token" {
+		return usage("Slack credentials must use `mosscap config secret set " + fs.Arg(0) + "`")
 	}
 	loc, err := config.DefaultLocation()
 	if err != nil {
@@ -195,6 +207,114 @@ func (a App) configSet(_ string, args []string) error {
 		return err
 	}
 	return a.render(config.Redact(c), *j)
+}
+
+func (a App) configSecret(_ string, args []string) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprintln(a.Out, "Usage: mosscap config secret set (slack_app_token|slack_bot_token) [--stdin]\n\nRead one Slack credential without accepting it in argv. Without --stdin, read and confirm from the controlling TTY with echo disabled. Credentials are stored only in private config.toml; environment variables are not used.")
+		return nil
+	}
+	if args[0] != "set" {
+		return usage(fmt.Sprintf("unknown config secret command %q", args[0]))
+	}
+	fs := flag.NewFlagSet("config secret set", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	stdin := fs.Bool("stdin", false, "")
+	help := fs.Bool("help", false, "")
+	fs.BoolVar(help, "h", false, "")
+	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+		return usage(err.Error())
+	}
+	if *help {
+		fmt.Fprintln(a.Out, "Usage: mosscap config secret set (slack_app_token|slack_bot_token) [--stdin]")
+		return nil
+	}
+	if fs.NArg() != 1 || (fs.Arg(0) != "slack_app_token" && fs.Arg(0) != "slack_bot_token") {
+		return usage("config secret set requires slack_app_token or slack_bot_token")
+	}
+	value, err := a.readSecret(*stdin)
+	if err != nil {
+		return err
+	}
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		return err
+	}
+	if _, err := config.SetSecret(loc, fs.Arg(0), value); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.Out, fs.Arg(0)+" updated")
+	return nil
+}
+
+func (a App) readSecret(stdin bool) (string, error) {
+	if stdin {
+		if isTerminal(a.In) {
+			return "", usage("config secret set --stdin requires non-TTY stdin")
+		}
+		return readSecretLine(a.In)
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", errors.New("config secret set requires a controlling TTY; use --stdin for non-interactive input")
+	}
+	defer tty.Close()
+	if !isTerminal(tty) {
+		return "", errors.New("config secret set requires a controlling TTY; use --stdin for non-interactive input")
+	}
+	fmt.Fprint(a.Err, "Slack credential: ")
+	first, err := readNoEcho(tty)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprint(a.Err, "Confirm Slack credential: ")
+	second, err := readNoEcho(tty)
+	if err != nil {
+		return "", err
+	}
+	if first != second {
+		return "", errors.New("Slack credential confirmation did not match")
+	}
+	return first, nil
+}
+
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func readSecretLine(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(io.LimitReader(r, 4097)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", errors.New("could not read Slack credential")
+	}
+	if len(line) > 4096 || (!errors.Is(err, io.EOF) && !strings.HasSuffix(line, "\n")) {
+		return "", errors.New("Slack credential input exceeds 4096 bytes")
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
+}
+
+func readNoEcho(tty *os.File) (string, error) {
+	old, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
+	if err != nil {
+		return "", errors.New("could not disable terminal echo")
+	}
+	next := *old
+	next.Lflag &^= unix.ECHO
+	if err := unix.IoctlSetTermios(int(tty.Fd()), unix.TCSETS, &next); err != nil {
+		return "", errors.New("could not disable terminal echo")
+	}
+	defer unix.IoctlSetTermios(int(tty.Fd()), unix.TCSETS, old)
+	value, readErr := readSecretLine(tty)
+	fmt.Fprintln(tty)
+	if readErr != nil {
+		return "", readErr
+	}
+	return value, nil
 }
 func (a App) gateway(override string, args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {

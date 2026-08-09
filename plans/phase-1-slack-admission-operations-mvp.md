@@ -94,7 +94,7 @@ Define an immutable runtime snapshot containing:
 
 An operation acquires one snapshot before validation/preflight and retains it through its attempt. Reload prepares and verifies a complete candidate, opens it to Socket readiness, commits the reload decision, atomically publishes the candidate, then drains/closes the old stream after already-received admission and already-started operations finish. Candidate failure closes only the candidate and leaves the old snapshot/connection active.
 
-Production `gateway run` requires non-empty, lexically valid `xapp-…`, `xoxb-…`, team `T…`, bot-user `U…`, and channel `C…|G…` values. `setup` may still generate empty credential/identity placeholders without contacting Slack. Direct server tests may inject a disabled/fake runtime; the production app must never silently choose disabled mode.
+Production `gateway run` requires non-empty, lexically valid `xapp-…`, `xoxb-…`, and channel `C…|G…` values. `auth.test` derives the team `T…` and bot-user `U…` identities during runtime verification; they are not configuration. `setup` may still generate empty credential/channel placeholders without contacting Slack. Direct server tests may inject a disabled/fake runtime; the production app must never silently choose disabled mode.
 
 No new TOML key is required. The existing reconnect 1–60 second bounds, jitter flag, maximum file count, frame bound, and other §3 scalar values remain authoritative. Slack call contexts are bounded by the server request/runtime lifecycle; no hidden retry is added.
 
@@ -235,7 +235,7 @@ Stable exits after this phase:
 Add secret-safe status fields for:
 
 - Slack state: `connecting`, `connected`, `reconnecting`, or injected-test `disabled`;
-- configured team/bot/channel IDs;
+- runtime-verified team/bot identities and configured channel ID;
 - bounded reconnect attempt/backoff and last diagnostic code;
 - last envelope received and last source result committed timestamps;
 - source-event result counts;

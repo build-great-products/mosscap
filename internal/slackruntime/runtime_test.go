@@ -39,8 +39,6 @@ func validConfig(t *testing.T) config.Config {
 	}
 	c.SlackAppToken = "xapp-test"
 	c.SlackBotToken = "xoxb-test"
-	c.SlackTeamID = "T012ABC"
-	c.SlackBotUserID = "U012BOT"
 	c.SlackChannelID = "C012ABC"
 	c.SlackReconnectJitter = false
 	c.SlackReconnectInitialBackoff = "1ms"
@@ -73,6 +71,32 @@ func TestSafeErrorRendersMissingScopesRemediation(t *testing.T) {
 	const want = "Slack app is missing required bot OAuth scopes: app_mentions:read, channels:history, users:read. Add them in Slack app OAuth & Permissions, reinstall/re-authorize the app, then restart or gateway reload."
 	if err == nil || err.Error() != want {
 		t.Fatalf("safeError = %q, want %q", err, want)
+	}
+	diagnostic, ok := VerificationDiagnosticFromError(err)
+	if !ok || diagnostic.Code != slackapi.DiagnosticMissingScope || len(diagnostic.MissingScopes) != 3 {
+		t.Fatalf("VerificationDiagnosticFromError = %#v, %t", diagnostic, ok)
+	}
+}
+
+func TestSafeErrorRendersTypedVerificationAdviceWithoutSecrets(t *testing.T) {
+	const secret = "xoxb-secret-canary"
+	tests := []struct {
+		code slackapi.DiagnosticCode
+		want string
+	}{
+		{slackapi.DiagnosticInvalidAuth, "Replace the bot token"},
+		{slackapi.DiagnosticTeamMismatch, "intended workspace"},
+		{slackapi.DiagnosticChannelNotFound, "invite the bot"},
+		{slackapi.DiagnosticChannelArchived, "writable public or private channel"},
+		{slackapi.DiagnosticUserNotFound, "active human"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.code), func(t *testing.T) {
+			err := safeError(slackapi.NewVerificationError(test.code))
+			if err == nil || !contains(err.Error(), string(test.code)) || !contains(err.Error(), test.want) || contains(err.Error(), secret) {
+				t.Fatalf("safeError = %q", err)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,6 +23,8 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"config", "--help"},
 		{"config", "show", "--help"},
 		{"config", "set", "--help"},
+		{"config", "secret", "--help"},
+		{"config", "secret", "set", "--help"},
 		{"gateway", "--help"},
 		{"gateway", "run", "--help"},
 		{"gateway", "reload", "--help"},
@@ -69,6 +73,87 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 				t.Fatalf("help stderr = %q, want empty", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRenderStatusPreservesBoundedVerificationRetentionFields(t *testing.T) {
+	const secret = "xoxb-secret-canary"
+	var out bytes.Buffer
+	a := App{Out: &out}
+	result := protocol.StatusDTO{Slack: &protocol.SlackRuntimeStatusDTO{
+		State:                          "connected",
+		LastVerificationDiagnosticCode: "channel_not_found",
+		PriorRuntimeRetained:           true,
+	}}
+	if err := a.render(result, true); err != nil {
+		t.Fatal(err)
+	}
+	rendered := out.String()
+	for _, want := range []string{"channel_not_found", "prior_runtime_retained", "true"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered status missing %q: %q", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, secret) {
+		t.Fatalf("rendered status leaked secret: %q", rendered)
+	}
+}
+
+func TestSecretCredentialEntryRejectsArgvAndWritesOnlyViaStdin(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, ".mosscap-secret-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	var setupOut, setupErr bytes.Buffer
+	if got := (App{Out: &setupOut, Err: &setupErr}).Run(context.Background(), []string{"setup"}); got != ExitSuccess {
+		t.Fatalf("setup exit=%d stderr=%q", got, setupErr.String())
+	}
+	const secret = "xapp-secret-canary"
+	var out, stderr bytes.Buffer
+	if got := (App{Out: &out, Err: &stderr}).Run(context.Background(), []string{"config", "set", "slack_app_token", secret}); got != ExitUsage {
+		t.Fatalf("positional secret exit=%d stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(out.String()+stderr.String(), secret) {
+		t.Fatal("positional secret leaked")
+	}
+	out.Reset()
+	stderr.Reset()
+	if got := (App{Out: &out, Err: &stderr, In: strings.NewReader(secret + "\n")}).Run(context.Background(), []string{"config", "secret", "set", "slack_app_token", "--stdin"}); got != ExitSuccess {
+		t.Fatalf("stdin secret exit=%d stderr=%q", got, stderr.String())
+	}
+	if out.String() != "slack_app_token updated\n" || strings.Contains(out.String()+stderr.String(), secret) {
+		t.Fatalf("unsafe secret output out=%q err=%q", out.String(), stderr.String())
+	}
+	loc, err := config.DefaultLocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(loc)
+	if err != nil || got.SlackAppToken != secret {
+		t.Fatalf("stored secret mismatch: err=%v", err)
+	}
+	if secret == "" { // prevent accidental future logging of the canary.
+		t.Fatal("empty secret")
+	}
+}
+
+func TestSecretCredentialInputBoundsAndFieldValidation(t *testing.T) {
+	if _, err := readSecretLine(strings.NewReader(strings.Repeat("x", 4097))); err == nil {
+		t.Fatal("accepted oversized secret")
+	}
+	var out, stderr bytes.Buffer
+	if got := (App{Out: &out, Err: &stderr, In: strings.NewReader("xapp-value\n")}).Run(context.Background(), []string{"config", "secret", "set", "unsupported", "--stdin"}); got != ExitUsage {
+		t.Fatalf("unsupported field exit=%d stderr=%q", got, stderr.String())
 	}
 }
 
