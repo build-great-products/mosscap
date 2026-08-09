@@ -31,7 +31,7 @@ export class GatewayClient {
     if (this.#pending) throw new ClientError("only one request may be in flight", "request_in_flight");
     await this.open();
     const id = `req_${randomUUID().replaceAll("-", "")}`;
-    const request: Request = { protocol_version: 1, request_id: id, client_kind: "extension", client_version: "0.83.0", command, params };
+    const request: Request = { protocol_version: 1, request_id: id, client_kind: "extension", client_version: "0.84.1", command, params };
     const payload = Buffer.from(JSON.stringify(request));
     if (payload.length === 0 || payload.length > this.maxFrameBytes) throw new ClientError("request frame out of bounds");
     return await new Promise<Response>((resolve, reject) => {
