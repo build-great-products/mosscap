@@ -137,6 +137,4 @@ There is no normal alternate `--config` authority. Use private `XDG_CONFIG_HOME`
 
 - [SYSTEM_MODEL.md](docs/SYSTEM_MODEL.md) explains the components, authority boundaries, and end-to-end flow.
 - [SPEC.md](docs/SPEC.md) describes the longer-term v1 design hypothesis.
-- [Phase 1](docs/plans/phase-1.md) is the authoritative Slack prototype plan.
-- [Phase 2](docs/plans/phase-2.md) is the authoritative single-Pi delivery MVP plan.
 - [Phase 1 Slack operations](docs/operations/phase-1-slack.md) covers private credential placement, single-channel operations, trust, ambiguity, reconnect, and shutdown.
