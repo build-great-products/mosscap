@@ -220,7 +220,7 @@ Stop the trial and record a failure if:
 
 ## Findings
 
-After the trial, update [`docs/plans/phase-2-findings.md`](../plans/phase-2-findings.md), especially:
+After the trial, record findings, especially:
 
 - whether explicit opt-in felt natural;
 - whether the visible message gave enough context;
