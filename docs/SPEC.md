@@ -19,6 +19,7 @@ Mosscap connects one trusted Slack channel and local CLI requests to one human-s
 - Admission of direct bot mentions from Slack user IDs in a live, SQLite-backed trust set.
 - Complete file-backed scalar configuration with validated, failure-atomic gateway reload.
 - Automatic creation of one generic task for every admitted Slack message.
+- A fixed, durable `no_entry` reaction on every configured-channel event rejected as `ignored_untrusted`, deduplicated per Slack message.
 - Local task creation and explicit task state management.
 - SQLite-first Slack acknowledgement and source-event deduplication.
 - One explicitly opted-in Pi delivery leader with generation fencing, leases, persisted delivery keys, and recovery.
@@ -38,7 +39,7 @@ Mosscap connects one trusted Slack channel and local CLI requests to one human-s
 - Task priority, assignment, tags, dependencies, or due dates.
 - Historical task text, immutable revisions, or reliably retained diffs.
 - Permanent storage, deduplication, or archival of file bytes.
-- Automatic task progress posts or reactions.
+- Automatic task progress posts or reactions beyond the fixed untrusted-sender denial reaction.
 - Automatic retry after a possibly submitted Pi delivery or Slack operation.
 - Automatic retention or background deletion of durable metadata.
 - Per-task deletion or effect cancellation.

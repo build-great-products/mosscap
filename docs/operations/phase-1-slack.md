@@ -39,7 +39,7 @@ mosscap task show tsk_EXAMPLE --json
 mosscap file show fil_EXAMPLE --json
 ```
 
-Admission requires the configured workspace and channel, a currently trusted human sender, and a literal direct mention of the verified bot user. An empty trust set admits nothing. Mosscap commits an eligible source before acknowledging its Socket envelope. Redeliveries resolve to the same task; stale events cannot roll it back. Meaningful edits and a deletion update the current source metadata/version; deletion preserves the task text and state. Incoming Slack files are bounded metadata only: Mosscap neither downloads nor uploads file bytes in Phase 1.
+Admission requires the configured workspace and channel, a currently trusted human sender, and a literal direct mention of the verified bot user. An empty trust set admits nothing. Every configured-channel event rejected because its sender is not trusted receives a `no_entry` reaction. Its effect intent becomes durable before the Socket envelope is acknowledged, is deduplicated per Slack message, and may appear as a failed or ambiguous effect requiring inspection. The foreground gateway also logs a warning with the sender, channel, and source-event IDs, but never the message text. Mosscap commits an eligible source before acknowledging its Socket envelope. Redeliveries resolve to the same task; stale events cannot roll it back. Meaningful edits and a deletion update the current source metadata/version; deletion preserves the task text and state. Incoming Slack files are bounded metadata only: Mosscap neither downloads nor uploads file bytes in Phase 1.
 
 ## Reads and explicit writes
 

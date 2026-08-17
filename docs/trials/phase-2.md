@@ -199,7 +199,7 @@ The trial passes only when:
 - one persisted delivery record and JSONL key exist;
 - reconnect does not duplicate the task version;
 - off prevents delivery until explicit re-opt-in;
-- no automatic task transition or Slack action occurs; and
+- no automatic task transition or Slack action occurs except the fixed untrusted-sender denial reaction; and
 - no credentials, raw envelopes, or private session paths appear in output or durable delivery metadata.
 
 Code may be declared complete pending manual trial when disposable credentials/model access are unavailable. Phase 2 is complete only after this runbook passes.

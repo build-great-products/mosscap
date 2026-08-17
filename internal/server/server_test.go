@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +21,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/protocol"
 	"github.com/stayradiated/mosscap/internal/slackapi"
 	"github.com/stayradiated/mosscap/internal/slackapi/fake"
+	"github.com/stayradiated/mosscap/internal/slackruntime"
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
@@ -187,6 +190,89 @@ func phase1VerifiedWeb() slackapi.Web {
 func phase1Envelope(id string) (slackapi.Envelope, *fake.AckRecorder) {
 	ack, recorder := fake.NewAckRecorder(nil)
 	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U012BOT>", Ack: ack}, recorder
+}
+
+func TestUntrustedSlackAdmissionLogsActionableSafeMetadata(t *testing.T) {
+	var output bytes.Buffer
+	s := &Server{Log: slog.New(slog.NewTextHandler(&output, nil))}
+	envelope, _ := phase1Envelope("TOKEN_AND_MESSAGE_CANARY")
+
+	s.logSlackAdmission(envelope, store.SlackEventResult{
+		AdmissionResult: store.SlackIgnoredUntrusted,
+		SourceEventID:   envelope.EventID,
+	})
+
+	log := output.String()
+	for _, want := range []string{"WARN", "sender is not trusted", "slack_user_id=U12345678", "channel_id=C012ABC", "source_event_id=Ev-TOKEN_AND_MESSAGE_CANARY"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("log %q does not contain %q", log, want)
+		}
+	}
+	if strings.Contains(log, envelope.Text) {
+		t.Fatalf("log exposed Slack message text: %q", log)
+	}
+
+	output.Reset()
+	s.logSlackAdmission(envelope, store.SlackEventResult{AdmissionResult: store.SlackAdmitted, SourceEventID: envelope.EventID})
+	if output.Len() != 0 {
+		t.Fatalf("admitted event produced warning: %q", output.String())
+	}
+}
+
+func TestAutomaticUntrustedReactionIsDurableAndMessageIdempotent(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+
+	envelope, _ := phase1Envelope("untrusted-reaction")
+	permalinkRequest := slackapi.PermalinkRequest{ChannelID: envelope.ChannelID, MessageTS: envelope.MessageTS}
+	reactionRequest := slackapi.ReactionRequest{ChannelID: envelope.ChannelID, MessageTS: envelope.MessageTS, Emoji: untrustedSenderReaction}
+	web := fake.NewWeb(
+		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: envelope.TeamID, BotUserID: "U012BOT"}},
+		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: envelope.TeamID}},
+		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: envelope.ChannelID, TeamID: envelope.TeamID, Member: true, Accessible: true}},
+		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+		fake.Step{Operation: fake.Permalink, Request: permalinkRequest, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: reactionRequest},
+		fake.Step{Operation: fake.Permalink, Request: permalinkRequest, Result: "https://example.invalid/message"},
+	)
+	factory := &fakeRuntimeFactory{webs: []slackapi.Web{web}, sockets: []slackapi.Socket{fake.NewSocket(fake.SocketSession{})}}
+	rt, err := slackruntime.New(slackruntime.Options{Factory: factory, Handler: func(context.Context, slackapi.Envelope) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := testConfig(config.Paths{})
+	c.SlackAppToken, c.SlackBotToken, c.SlackChannelID = "xapp-test", "xoxb-test", envelope.ChannelID
+	if err := rt.Start(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+
+	requestID := automaticUntrustedReactionRequestID(envelope.TeamID, envelope.ChannelID, string(envelope.MessageTS))
+	intent := store.SlackEffectIntent{Kind: store.SlackEffectReact, TargetMessageTS: string(envelope.MessageTS), Emoji: untrustedSenderReaction}
+	prepared, err := ledger.PrepareSlackEffect(ctx, requestID, store.SlackEffectTarget{TeamID: envelope.TeamID, ChannelID: envelope.ChannelID}, intent)
+	if err != nil || prepared.State != store.SlackEffectPrepared || len(web.Calls()) != 4 {
+		t.Fatalf("prepared effect=%+v calls=%+v err=%v", prepared, web.Calls(), err)
+	}
+
+	first, err := executeAutomaticUntrustedReaction(ctx, rt, ledger, envelope)
+	if err != nil || first.ID != prepared.EffectID || first.State != store.SlackEffectConfirmed || first.Kind != store.SlackEffectReact || first.Emoji != untrustedSenderReaction {
+		t.Fatalf("first effect=%+v err=%v", first, err)
+	}
+	second, err := executeAutomaticUntrustedReaction(ctx, rt, ledger, envelope)
+	if err != nil || second.ID != first.ID || second.State != store.SlackEffectConfirmed {
+		t.Fatalf("replayed effect=%+v err=%v, want confirmed %s", second, err, first.ID)
+	}
+	if calls := web.Calls(); len(calls) != 7 || calls[5].Operation != fake.AddReaction {
+		t.Fatalf("Web calls=%+v", calls)
+	}
+	effects, err := ledger.ListSlackEffects(ctx, nil, 10)
+	if err != nil || len(effects) != 1 || effects[0].ID != first.ID {
+		t.Fatalf("effects=%+v err=%v", effects, err)
+	}
 }
 
 func waitForAck(t *testing.T, recorder *fake.AckRecorder) {

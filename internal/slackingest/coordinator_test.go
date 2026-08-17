@@ -107,6 +107,30 @@ func TestHandleUsesReturnedEmptyAndLiveTrustResults(t *testing.T) {
 	}
 }
 
+func TestHandleRequiresBeforeAcknowledgeHookToSucceed(t *testing.T) {
+	e, recorder := envelope("before-ack")
+	s := &fakeStore{result: store.SlackEventResult{AdmissionResult: store.SlackIgnoredUntrusted}}
+	boom := errors.New("effect intent unavailable")
+	var hookedEvent store.SlackSourceEvent
+	c := NewWithOptions(s, policy, fixedClock{}, Options{BeforeAcknowledge: func(_ context.Context, event store.SlackSourceEvent, result store.SlackEventResult) error {
+		hookedEvent = event
+		if result.AdmissionResult != store.SlackIgnoredUntrusted {
+			t.Fatalf("hook result=%+v", result)
+		}
+		return boom
+	}})
+	result, err := c.Handle(context.Background(), e)
+	if !errors.Is(err, boom) || result.AdmissionResult != store.SlackIgnoredUntrusted || recorder.Calls() != 0 {
+		t.Fatalf("result=%+v err=%v acks=%d", result, err, recorder.Calls())
+	}
+	if hookedEvent.SourceEventID != e.EventID || hookedEvent.Text != e.Text {
+		t.Fatalf("hook event=%+v", hookedEvent)
+	}
+	if got := c.Observations().LastDiagnosticCode; got != "before_ack_failed" {
+		t.Fatalf("diagnostic=%q", got)
+	}
+}
+
 func TestHandleDoesNotAcknowledgeStoreOrCanonicalFailure(t *testing.T) {
 	e, recorder := envelope("store-error")
 	boom := errors.New("database unavailable")

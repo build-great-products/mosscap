@@ -33,9 +33,10 @@ func (systemClock) Now() time.Time { return time.Now() }
 // Coordinator applies a receipt-time policy to one envelope at a time. It
 // never retains an envelope or its message body after Handle returns.
 type Coordinator struct {
-	store  Store
-	policy store.SlackAdmissionPolicy
-	clock  Clock
+	store             Store
+	policy            store.SlackAdmissionPolicy
+	clock             Clock
+	beforeAcknowledge func(context.Context, store.SlackSourceEvent, store.SlackEventResult) error
 
 	mu  sync.RWMutex
 	obs Observations
@@ -50,12 +51,24 @@ type Observations struct {
 	Results            map[store.SlackAdmissionResult]uint64 `json:"results"`
 }
 
+// Options adds work that must become durable after source commit but before
+// the Socket envelope is acknowledged.
+type Options struct {
+	BeforeAcknowledge func(context.Context, store.SlackSourceEvent, store.SlackEventResult) error
+}
+
 // New creates a coordinator bound to an immutable runtime policy snapshot.
 func New(s Store, policy store.SlackAdmissionPolicy, c Clock) *Coordinator {
+	return NewWithOptions(s, policy, c, Options{})
+}
+
+// NewWithOptions creates a coordinator with an optional pre-acknowledgement
+// durability hook. A hook failure deliberately leaves the envelope unacked.
+func NewWithOptions(s Store, policy store.SlackAdmissionPolicy, c Clock, options Options) *Coordinator {
 	if c == nil {
 		c = systemClock{}
 	}
-	return &Coordinator{store: s, policy: policy, clock: c, obs: Observations{Results: make(map[store.SlackAdmissionResult]uint64)}}
+	return &Coordinator{store: s, policy: policy, clock: c, beforeAcknowledge: options.BeforeAcknowledge, obs: Observations{Results: make(map[store.SlackAdmissionResult]uint64)}}
 }
 
 // Handle commits one envelope exactly once before consuming its acknowledgement.
@@ -82,6 +95,12 @@ func (c *Coordinator) Handle(ctx context.Context, envelope slackapi.Envelope) (s
 		return store.SlackEventResult{}, errors.New("Slack admission store returned a non-canonical result")
 	}
 	c.recordCommitted(result)
+	if c.beforeAcknowledge != nil {
+		if err := c.beforeAcknowledge(ctx, event, result); err != nil {
+			c.recordDiagnostic("before_ack_failed")
+			return result, err
+		}
+	}
 	if err := envelope.Ack.Acknowledge(ctx); err != nil {
 		c.recordDiagnostic("ack_failed")
 		return result, err

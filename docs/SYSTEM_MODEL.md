@@ -120,7 +120,7 @@ Pi and the human use ordinary Pi conversation and tools. Task state changes only
 
 ### 4. Slack activity
 
-A CLI request to send or modify Slack first creates a durable effect intent. The gateway then performs the API call and records its result. Slack activity does not implicitly change task state.
+A CLI request to send or modify Slack first creates a durable effect intent. The gateway also creates a fixed `no_entry` reaction intent for every configured-channel event rejected because its sender is untrusted. Every mutation uses the same durable effect lifecycle before the gateway performs the API call and records its result. Slack activity does not implicitly change task state.
 
 ### 5. Completion
 
