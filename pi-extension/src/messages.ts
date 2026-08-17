@@ -25,11 +25,13 @@ export function validateWork(work: Work): string | undefined {
 export function taskMessage(work: Work, sessionId: string): CustomMessage {
   const invalid = validateWork(work); if (invalid) throw new Error(invalid);
   const slack = work.source.kind === "slack";
+  const replyRequestID = notificationRequestID(work.task_id, "slack-send");
+  const doneRequestID = notificationRequestID(work.task_id, "task-done");
   const heading = slack ? `New Slack task from ${work.source.slack_author_id}` : "New local Mosscap task";
   const sourceLines = slack ? [`Thread: ${work.source.slack_thread_ts}`] : [];
   const actionLines = slack ? [
     "Reply in Slack:",
-    `mosscap slack send --thread ${work.source.slack_thread_ts} --task ${work.task_id} --request-id REPLY_REQUEST_ID --text "REPLY"`,
+    `mosscap slack send --thread ${work.source.slack_thread_ts} --task ${work.task_id} --request-id ${replyRequestID} --text "REPLY"`,
     "",
   ] : [];
   const attachments = work.attached_files ?? [];
@@ -55,7 +57,7 @@ export function taskMessage(work: Work, sessionId: string): CustomMessage {
     "",
     ...actionLines,
     "When finished:",
-    `mosscap task done ${work.task_id} --request-id DONE_REQUEST_ID`,
+    `mosscap task done ${work.task_id} --request-id ${doneRequestID}`,
     "",
     "More details:",
     `mosscap task show ${work.task_id} --json`,
@@ -63,6 +65,9 @@ export function taskMessage(work: Work, sessionId: string): CustomMessage {
   if (byteLength(content) > maxTaskTextBytes + 2_000) throw new Error("oversized_task");
   return { customType: "mosscap.task", display: true, content, details: { schemaVersion: 1, deliveryId: work.delivery_id, deliveryKey: work.delivery_key, taskId: work.task_id, taskVersion: work.task_version, sessionId } };
 }
+
+/** Task IDs are globally unique; operation suffixes make notification mutations distinct and replayable. */
+function notificationRequestID(taskID: string, operation: "slack-send" | "task-done"): string { return `pi.${taskID}.${operation}`; }
 
 /** JSON string escaping keeps untrusted metadata out of the message's control structure. */
 function escapedMetadata(value: string): string { return JSON.stringify(value); }
