@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stayradiated/mosscap/internal/client"
 	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/doctor"
 	"github.com/stayradiated/mosscap/internal/fileio"
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
@@ -74,6 +76,49 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 				t.Fatalf("help stderr = %q, want empty", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRenderDoctorIsHumanFriendlyUnlessJSONRequested(t *testing.T) {
+	report := doctor.Report{Overall: doctor.Warn, Checks: []doctor.Check{
+		{Name: "config", Status: doctor.Pass, Message: "configuration is valid"},
+		{Name: "storage_space", Status: doctor.Warn, Message: "space is low", Action: "free some space"},
+	}}
+
+	var out bytes.Buffer
+	a := App{Out: &out}
+	if err := a.renderDoctor(report, false); err != nil {
+		t.Fatal(err)
+	}
+	human := out.String()
+	for _, want := range []string{"Doctor: ⚠", "✓  config         configuration is valid", "⚠  storage_space  space is low", "↳ Action: free some space"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human doctor output missing %q: %q", want, human)
+		}
+	}
+	if json.Valid([]byte(human)) || strings.Contains(human, `"overall"`) {
+		t.Fatalf("default doctor output is JSON: %q", human)
+	}
+	if strings.Contains(human, "\x1b[") {
+		t.Fatalf("non-terminal doctor output contains ANSI colors: %q", human)
+	}
+	if got := formatDoctorStatus(doctor.Fail, true); got != "\x1b[31m✗\x1b[0m" {
+		t.Fatalf("colored failure status = %q", got)
+	}
+	if got := formatDoctorName("config", 10, true); got != "\x1b[1;34mconfig    \x1b[0m" {
+		t.Fatalf("colored check name = %q", got)
+	}
+
+	out.Reset()
+	if err := a.renderDoctor(report, true); err != nil {
+		t.Fatal(err)
+	}
+	var decoded doctor.Report
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("--json output is invalid: %v; output=%q", err, out.String())
+	}
+	if decoded.Overall != report.Overall || len(decoded.Checks) != len(report.Checks) {
+		t.Fatalf("--json output = %+v, want %+v", decoded, report)
 	}
 }
 

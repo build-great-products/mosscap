@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mattn/go-isatty"
 	"golang.org/x/sys/unix"
 
 	"github.com/stayradiated/mosscap/internal/client"
@@ -470,7 +471,7 @@ func (a App) doctorCommand(_ string, args []string) error {
 	if remoteErr != nil {
 		checks = append(checks, doctor.Check{Name: "gateway_diagnostics", Status: doctor.Skipped, Message: "gateway diagnostics unavailable", Action: "start mosscap gateway run"})
 		report := doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
-		if err := a.render(report, *j); err != nil {
+		if err := a.renderDoctor(report, *j); err != nil {
 			return err
 		}
 		return &commandError{ExitUnavailable, "gateway diagnostics unavailable"}
@@ -481,7 +482,68 @@ func (a App) doctorCommand(_ string, args []string) error {
 		return err
 	}
 	checks = append(checks, remote.Checks...)
-	return a.render(doctor.Report{Overall: doctor.Overall(checks), Checks: checks}, *j)
+	return a.renderDoctor(doctor.Report{Overall: doctor.Overall(checks), Checks: checks}, *j)
+}
+
+func (a App) renderDoctor(report doctor.Report, jsonOut bool) error {
+	if jsonOut {
+		return a.render(report, true)
+	}
+
+	color := doctorColorEnabled(a.Out)
+	fmt.Fprintf(a.Out, "Doctor: %s\n\n", formatDoctorStatus(report.Overall, color))
+	nameWidth := 0
+	for _, check := range report.Checks {
+		if len(check.Name) > nameWidth {
+			nameWidth = len(check.Name)
+		}
+	}
+	for _, check := range report.Checks {
+		name := formatDoctorName(check.Name, nameWidth, color)
+		fmt.Fprintf(a.Out, "  %s  %s  %s\n", formatDoctorStatus(check.Status, color), name, check.Message)
+		if check.Action != "" {
+			action := "↳ Action:"
+			if color {
+				action = "\x1b[36m" + action + "\x1b[0m"
+			}
+			fmt.Fprintf(a.Out, "%s%s %s\n", strings.Repeat(" ", nameWidth+7), action, check.Action)
+		}
+	}
+	return nil
+}
+
+func formatDoctorName(name string, width int, color bool) string {
+	name = fmt.Sprintf("%-*s", width, name)
+	if color {
+		return "\x1b[1;34m" + name + "\x1b[0m"
+	}
+	return name
+}
+
+func formatDoctorStatus(status doctor.CheckStatus, color bool) string {
+	icon, code := "?", "36"
+	switch status {
+	case doctor.Pass:
+		icon, code = "✓", "32"
+	case doctor.Warn:
+		icon, code = "⚠", "33"
+	case doctor.Fail:
+		icon, code = "✗", "31"
+	case doctor.Skipped:
+		icon, code = "○", "2"
+	}
+	if color {
+		return "\x1b[" + code + "m" + icon + "\x1b[0m"
+	}
+	return icon
+}
+
+func doctorColorEnabled(w io.Writer) bool {
+	if _, disabled := os.LookupEnv("NO_COLOR"); disabled || os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	f, ok := w.(*os.File)
+	return ok && (isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd()))
 }
 
 func (a App) gatewayCall(c config.Config, command, requestID string, params any, requiredCapability string) (any, error) {
