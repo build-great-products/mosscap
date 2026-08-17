@@ -50,6 +50,11 @@ type App struct {
 
 func (a App) Run(ctx context.Context, args []string) int {
 	if err := a.Execute(ctx, args); err != nil {
+		var je *jsonMutationError
+		if errors.As(err, &je) {
+			a.renderMutationError(je)
+			return exitCode(je.err)
+		}
 		var ce *commandError
 		if errors.As(err, &ce) {
 			fmt.Fprintln(a.Err, ce.Error())
@@ -400,7 +405,7 @@ func (a App) gatewayReload(args []string) error {
 	}
 	result, err := a.gatewayCall(c, "config.reload", *requestID, nil, protocol.CapabilityConfigReload)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *j, *requestID)
 	}
 	return a.render(map[string]any{"request_id": *requestID, "result": result}, *j)
 }
@@ -474,7 +479,7 @@ func (a App) doctorCommand(_ string, args []string) error {
 		if err := a.renderDoctor(report, *j); err != nil {
 			return err
 		}
-		return &commandError{ExitUnavailable, "gateway diagnostics unavailable"}
+		return &commandError{code: ExitUnavailable, message: "gateway diagnostics unavailable"}
 	}
 	b, _ := json.Marshal(remoteResult)
 	var remote doctor.Report
@@ -560,7 +565,7 @@ func (a App) gatewayCall(c config.Config, command, requestID string, params any,
 	}
 	cl, err := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
 	if err != nil {
-		return nil, &commandError{ExitUnavailable, err.Error()}
+		return nil, &commandError{code: ExitUnavailable, message: err.Error()}
 	}
 	defer cl.Close()
 	hello, err := cl.Hello(context.Background(), "req_hello_"+strings.ReplaceAll(command, ".", "_"), "cli", a.Version, nil)
@@ -679,7 +684,7 @@ func (a App) purge(args []string) error {
 	}
 	result, err := a.gatewayCall(c, "metadata.purge", *requestID, protocol.MetadataPurgeParams{Cutoff: cutoff.Format("2006-01-02T15:04:05.000000Z"), Mode: mode}, protocol.CapabilityMetadataPurge)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *jsonOut && *confirm, *requestID)
 	}
 	if *confirm {
 		result = map[string]any{"request_id": *requestID, "result": result}
@@ -772,7 +777,7 @@ func (a App) trust(args []string) error {
 	}
 	result, err := a.gatewayCall(c, command, *requestID, params, protocol.CapabilityTrustedUsers)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *j && mutation, *requestID)
 	}
 	if mutation {
 		result = map[string]any{"request_id": *requestID, "result": result}
@@ -954,18 +959,18 @@ func (a App) task(_ string, args []string) error {
 	}
 	cl, e := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
 	if e != nil {
-		return &commandError{ExitUnavailable, e.Error()}
+		return mutationJSONError(&commandError{code: ExitUnavailable, message: e.Error()}, *j && mutation, *requestID)
 	}
 	defer cl.Close()
 	if _, e = cl.Hello(context.Background(), "req_hello_"+cmd, "cli", a.Version, nil); e != nil {
-		return remote(e)
+		return mutationJSONError(remote(e), *j && mutation, *requestID)
 	}
 	response, e := cl.Call(context.Background(), request)
 	if e != nil {
-		return remote(e)
+		return mutationJSONError(remote(e), *j && mutation, *requestID)
 	}
 	if response.Error != nil {
-		return remote(&client.RemoteError{ProtocolError: *response.Error})
+		return mutationJSONError(remote(&client.RemoteError{ProtocolError: *response.Error}), *j && mutation, *requestID)
 	}
 	var out any
 	if e := json.Unmarshal(response.Result, &out); e != nil {
@@ -1027,9 +1032,9 @@ func remote(err error) error {
 		case "ambiguous":
 			code = ExitAmbiguous
 		}
-		return &commandError{code, re.Error()}
+		return &commandError{code: code, message: re.Error(), protocolError: &re.ProtocolError}
 	}
-	return &commandError{ExitUnavailable, err.Error()}
+	return &commandError{code: ExitUnavailable, message: err.Error()}
 }
 func (a App) taskReply(args []string) error {
 	fs := newPhase1FlagSet("task reply")
@@ -1073,7 +1078,7 @@ func (a App) taskReply(args []string) error {
 	}
 	out, err := a.gatewayCall(c, "task.reply", *requestID, params, protocol.CapabilityTaskReply)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *jsonOut, *requestID)
 	}
 	out = map[string]any{"request_id": *requestID, "result": out}
 	return a.render(out, *jsonOut)
@@ -1145,11 +1150,72 @@ func (a App) printLeafHelp(name string) {
 }
 
 type commandError struct {
-	code    int
-	message string
+	code          int
+	message       string
+	protocolError *protocol.Error
 }
 
 func (e *commandError) Error() string { return e.message }
-func usage(m string) error            { return &commandError{ExitUsage, "usage: " + m} }
-func unsupported(m string) error      { return &commandError{ExitUnsupported, m} }
-func isHelp(a string) bool            { return a == "--help" || a == "-h" || a == "help" }
+
+type jsonMutationError struct {
+	err       error
+	requestID string
+}
+
+func (e *jsonMutationError) Error() string { return e.err.Error() }
+func (e *jsonMutationError) Unwrap() error { return e.err }
+
+// mutationJSONError opts in only parsed mutation commands. It deliberately
+// does not inspect argv, so a value that happens to be "--json" cannot change
+// the output protocol.
+func mutationJSONError(err error, jsonOut bool, requestID string) error {
+	if !jsonOut || err == nil {
+		return err
+	}
+	return &jsonMutationError{err: err, requestID: requestID}
+}
+
+func exitCode(err error) int {
+	var ce *commandError
+	if errors.As(err, &ce) {
+		return ce.code
+	}
+	return ExitUnsafe
+}
+
+type mutationErrorJSON struct {
+	Code      string                     `json:"code"`
+	Category  string                     `json:"category"`
+	Message   string                     `json:"message"`
+	Retriable bool                       `json:"retriable"`
+	Details   map[string]string          `json:"details,omitempty"`
+	Progress  *protocol.PurgeProgressDTO `json:"progress,omitempty"`
+	RequestID string                     `json:"request_id,omitempty"`
+	Guidance  string                     `json:"guidance,omitempty"`
+}
+
+func (a App) renderMutationError(wrapped *jsonMutationError) {
+	out := mutationErrorJSON{Code: "local_error", Category: "local", Message: wrapped.err.Error()}
+	var ce *commandError
+	if errors.As(wrapped.err, &ce) && ce.protocolError != nil {
+		out.Code, out.Category, out.Message = ce.protocolError.Code, ce.protocolError.Category, ce.protocolError.Message
+		out.Retriable, out.Details, out.Progress = ce.protocolError.Retriable, ce.protocolError.Details, ce.protocolError.Progress
+	} else if exitCode(wrapped.err) == ExitUnavailable {
+		out.Code, out.Category, out.Retriable = "unavailable", "unavailable", true
+	}
+	out.RequestID = wrapped.requestID
+	switch {
+	case out.Code == "request_id_conflict":
+		out.Guidance = "This request ID is bound to another input; do not retry changed input with it."
+	case out.Category == "unavailable":
+		out.Guidance = "Replay the exact mutation with the same request ID."
+	case out.Category == "ambiguous":
+		out.Guidance = "Inspect the durable effect; never automatically resend this mutation."
+	case out.Category == "external_failed":
+		out.Guidance = "Inspect and revise the external failure; do not replay it as if uncertain."
+	}
+	_ = json.NewEncoder(a.Err).Encode(out)
+}
+func usage(m string) error       { return &commandError{code: ExitUsage, message: "usage: " + m} }
+func unsupported(m string) error { return &commandError{code: ExitUnsupported, message: m} }
+func isHelp(a string) bool       { return a == "--help" || a == "-h" || a == "help" }

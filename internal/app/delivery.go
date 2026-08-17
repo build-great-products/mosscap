@@ -89,7 +89,7 @@ func (a App) delivery(args []string) error {
 	}
 	result, err := a.gatewayCall(c, command, *requestID, params, protocol.CapabilityPiDeliveryMVP)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *jsonOut && mutation, *requestID)
 	}
 	if mutation {
 		// Preserve explicit risk wording in both human and JSON modes.

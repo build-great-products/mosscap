@@ -61,7 +61,7 @@ func (a App) fileGet(args []string) error {
 	}
 	result, err := a.gatewayCall(c, "file.get", *requestID, protocol.FileGetParams{File: fs.Arg(0)}, protocol.CapabilityFileTransfer)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *jsonOut, *requestID)
 	}
 	var transfer protocol.FileGetDTO
 	encoded, err := json.Marshal(result)
@@ -69,7 +69,7 @@ func (a App) fileGet(args []string) error {
 		return err
 	}
 	if err := json.Unmarshal(encoded, &transfer); err != nil || !validFileTransferResult(c, transfer) {
-		return &commandError{ExitUnsafe, "gateway returned an invalid file transfer result"}
+		return &commandError{code: ExitUnsafe, message: "gateway returned an invalid file transfer result"}
 	}
 	if destination == "" {
 		if *jsonOut {
@@ -119,14 +119,14 @@ func validSHA256(value string) bool {
 func outputError(err error) error {
 	switch {
 	case errors.Is(err, fileio.ErrDestinationExists), errors.Is(err, fileio.ErrChanged):
-		return &commandError{ExitConflict, err.Error()}
+		return &commandError{code: ExitConflict, message: err.Error()}
 	case errors.Is(err, fileio.ErrUnsupported):
-		return &commandError{ExitUnsupported, err.Error()}
+		return &commandError{code: ExitUnsupported, message: err.Error()}
 	case errors.Is(err, fileio.ErrUnsafePath), errors.Is(err, fileio.ErrUnsafeFileType), errors.Is(err, fileio.ErrInvalidTemporary):
-		return &commandError{ExitUnsafe, err.Error()}
+		return &commandError{code: ExitUnsafe, message: err.Error()}
 	default:
 		// Destination placement must fail closed: an unexpected filesystem error
 		// is never treated as a successful or retry-safe replacement.
-		return &commandError{ExitUnsafe, "safe output placement failed"}
+		return &commandError{code: ExitUnsafe, message: "safe output placement failed"}
 	}
 }

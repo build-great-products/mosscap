@@ -106,7 +106,7 @@ mosscap task working tsk_EXAMPLE --request-id release-working
 mosscap task list
 ```
 
-Mutations always go through the gateway. A request ID is durable: retry the *same* command with the same ID after a disconnect or gateway restart to receive its original outcome rather than repeat the mutation. Reload is also digest-aware: the gateway stores only a SHA-256 digest of the staged TOML (never token values), so reusing an ID for changed staged bytes is a conflict rather than a silent second activation.
+Mutations always go through the gateway. A request ID is durable: retry the *same* command with the same ID after a disconnect or gateway restart to receive its original outcome rather than repeat the mutation. Reload is also digest-aware: the gateway stores only a SHA-256 digest of the staged TOML (never token values), so reusing an ID for changed staged bytes is a conflict rather than a silent second activation. For a mutation explicitly run with `--json`, gateway and transport failures are one JSON object on stderr with `code`, `category`, `message`, `retriable`, optional `details`/`progress`, `request_id`, and bounded recovery `guidance`; successful JSON output remains on stdout. Reuse an ID only for identical input, inspect ambiguous effects rather than resending, and revise conclusive external failures.
 
 ```sh
 mosscap task create --text "review the release" --request-id release-create --json

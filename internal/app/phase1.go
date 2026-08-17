@@ -144,7 +144,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 	}
 	out, err := a.gatewayCall(c, "slack."+cmd, *requestID, params, capability)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *jsonOut && mutation, *requestID)
 	}
 	if mutation {
 		out = map[string]any{"request_id": *requestID, "effect": out}
@@ -222,7 +222,7 @@ func (a App) effect(args []string) error {
 	}
 	out, err := a.gatewayCall(c, "effect."+cmd, *requestID, params, protocol.CapabilitySlackEffects)
 	if err != nil {
-		return err
+		return mutationJSONError(err, *jsonOut && mutation, *requestID)
 	}
 	if mutation {
 		out = map[string]any{"request_id": *requestID, "effect": out}
