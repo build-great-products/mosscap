@@ -1,7 +1,7 @@
 // Package doctor defines non-destructive, stable diagnostic reports.
 package doctor
 
-// CheckStatus is deliberately a closed Phase 0 vocabulary.
+// CheckStatus is deliberately a closed diagnostic vocabulary.
 type CheckStatus string
 
 const (

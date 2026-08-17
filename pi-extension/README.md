@@ -1,6 +1,6 @@
 # Mosscap Pi extension
 
-This is the Phase 2 source-loaded extension for exactly Pi `0.84.1`. It has no
+This is Mosscap's source-loaded extension for exactly Pi `0.84.1`. It has no
 background connection, timer, or watcher until a human runs `/mosscap` in a
 persisted interactive TUI session.
 
@@ -35,5 +35,5 @@ Attached Slack files are rendered as
 escaped, bounded metadata with `file show` and explicit `file get --output`
 hints only; the extension never receives bytes, hashes, private URLs, temporary
 paths, or local upload paths. The extension adds no model-callable tools and
-does not itself alter task state or contact Slack. See `docs/trials/phase-2.md`
-for the deliberately deferred human-owned trial.
+does not itself alter task state or contact Slack. See the project
+[`README`](../README.md) for setup and operational guidance.

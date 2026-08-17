@@ -1,4 +1,4 @@
-// Package e2e verifies the executable-level Phase 0 release gate.
+// Package e2e verifies the executable-level local gateway release gate.
 package e2e
 
 import (
@@ -23,7 +23,7 @@ import (
 
 func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 	home := effectiveHome(t)
-	root, err := os.MkdirTemp(home, ".mosscap-phase0-")
+	root, err := os.MkdirTemp(home, ".mosscap-local-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		}
 		// Production startup always requires a real Slack runtime. This harness
 		// injects the disabled runtime directly, retaining a real private socket
-		// and SQLite ledger while keeping this Phase 0 replay proof offline.
+		// and SQLite ledger while keeping this local replay proof offline.
 		s := server.NewWithOptions(cfg, loc, "e2e", nil, server.Options{Disabled: true})
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)

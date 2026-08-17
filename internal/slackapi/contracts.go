@@ -5,7 +5,7 @@ import (
 	"io"
 )
 
-// Web is the SDK-free subset of Slack Web API operations required by Phase 1.
+// Web is the SDK-free subset of Slack Web API operations required by Mosscap.
 // Implementations must return bounded DTOs and classified, secret-safe errors.
 type Web interface {
 	Auth(context.Context) (AuthIdentity, error)

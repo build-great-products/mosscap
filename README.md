@@ -2,11 +2,9 @@
 
 **Durable Slack work for a Pi session that stays yours.**
 
-> Mosscap's Phase 1 Slack MVP is implemented; later Pi delivery and file-transfer phases remain separate.
+Mosscap connects one trusted Slack channel to an interactive [Pi](https://github.com/earendil-works/pi-coding-agent) session. Eligible Slack mentions and local requests become durable tasks in SQLite. An explicitly enabled Pi extension inserts those tasks as visible messages and starts model processing.
 
-Mosscap connects one trusted Slack channel to an interactive [Pi](https://github.com/earendil-works/pi-coding-agent) session. Eligible Slack mentions and local requests become durable tasks in SQLite. A TypeScript Pi extension inserts that work as visible messages and immediately starts model processing.
-
-Mosscap does not start, supervise, select, or reset Pi. A person starts Pi and explicitly runs `/mosscap` when that session should receive work.
+Mosscap does not start, supervise, select, or reset Pi. A person starts Pi and runs `/mosscap` in the session that should receive work.
 
 ```text
 Slack ───────┐
@@ -20,121 +18,129 @@ Go CLI ──────┘              │
                    human-owned Pi session
 ```
 
-## Intended experience
+## What is implemented
 
-```text
-mosscap setup
-mosscap gateway run
+The current v1 workflow includes:
+
+- single-workspace, single-channel Slack Socket Mode admission;
+- a live SQLite-backed allowlist of trusted Slack user IDs;
+- local and Slack-origin tasks with `open`, `working`, and `done` states;
+- explicit Slack reads, replies, edits, deletes, reactions, and file uploads;
+- lazy incoming file download and private temporary-file handling;
+- explicit Pi opt-in, visible delivery, persisted delivery evidence, and recovery;
+- durable ambiguous/uncertain outcomes that are never retried automatically; and
+- explicit metadata purge with dry-run and confirmation modes.
+
+The previous numbered milestones described implementation order. They are complete history, not current product modes or an active roadmap.
+
+## Install and configure
+
+Requirements are Go, Node/pnpm for extension development, and Pi `0.84.1` for the source-loaded extension.
+
+```sh
+just build
+./bin/mosscap setup
+./bin/mosscap config set slack_channel_id C01234567
+./bin/mosscap config secret set slack_app_token
+./bin/mosscap config secret set slack_bot_token
 ```
 
-Then, in a separately started Pi session:
+Import [`manifest.json`](manifest.json) into a Slack development app, create an app-level Socket Mode token with `connections:write`, install the app in the intended workspace, and invite it to the configured channel. The manifest targets a public channel with `message.channels`, `channels:read`, and `channels:history`. For a private `G...` channel, use `message.groups`, `groups:read`, and `groups:history` instead. Do not add administrative, DM, slash-command, interactivity, or broad channel-join permissions.
+
+Start the gateway in the foreground:
+
+```sh
+./bin/mosscap gateway run
+```
+
+Then start a persisted interactive Pi session with the checked-out extension:
+
+```sh
+pi -e /absolute/path/to/mosscap/pi-extension
+```
+
+In Pi, opt in explicitly:
 
 ```text
 /mosscap
 ```
 
-A direct mention from a trusted user in the configured Slack channel creates a task. The gateway commits it before acknowledging Slack. The extension delivers it visibly to Pi and triggers a model turn immediately, or queues it as the next follow-up if Pi is already working.
+Use `/mosscap status` to inspect the connection and `/mosscap off` to stop delivery without stopping Pi.
 
-Tasks are a small todo list with `open`, `working`, and `done` states. Slack communication is explicit and independent of task state:
+## Trust and tasks
 
-```text
-mosscap task list
-mosscap task working AbCdEfGh
-mosscap slack send --thread 1712345678.123456 --text "I found the problem."
-mosscap task done AbCdEfGh
-```
+An empty trust set admits no Slack work. Add immutable Slack user IDs only for people authorized to trigger the local Pi session:
 
-All Slack commands operate on the single configured channel; they cannot select another destination. Incoming Slack files are durable metadata only in Phase 1:
-
-```text
-mosscap file show fil_EXAMPLE --json
-```
-
-Mosscap neither downloads nor uploads file bytes in this phase. See [Phase 1 Slack operations](docs/operations/phase-1-slack.md) for credential placement, trust, effects, ambiguity, reconnect, and shutdown.
-
-## Configuration and trust
-
-`mosscap setup` writes a complete, documented, owner-only `config.toml`. It contains every scalar setting, including Slack credentials, so available settings are discoverable and editable in one place. State, database, socket, and temporary-file paths are derived from the XDG directories rather than configured in TOML.
-
-Configuration edits are staged until the foreground gateway reloads them:
-
-```text
-mosscap config show                    # Slack tokens are redacted
-mosscap config set maximum_file_size 200MiB
-mosscap gateway reload
-```
-
-`config set` updates one value atomically while preserving the file's comments and formatting. Reload validates the complete file and activates it as one immutable snapshot; if validation fails, the gateway keeps using its previous verified configuration and Slack runtime.
-
-Trusted Slack user IDs are different: the current allowlist lives in SQLite and changes take effect immediately through the running gateway. An empty allowlist is valid and admits no Slack messages.
-
-```text
+```sh
 mosscap trust list
 mosscap trust add U01234567
 mosscap trust remove U01234567
 ```
 
-Pi can invoke these ordinary CLI commands through its shell tools; the Pi extension has no separate configuration authority.
+Admission also requires the configured workspace and channel, a human sender, and a literal direct mention of the bot. A trusted Slack user can trigger a fully capable local Pi while `/mosscap` is active; these checks are authorization gates, not a sandbox.
 
-## Reliability model
-
-SQLite is the authority for tasks, Slack effects, and delivery outcomes. Pi's JSONL session records what that particular Pi session has seen.
-
-Mosscap does not claim exactly-once execution across those two stores or across Slack. Instead it records uncertainty honestly:
-
-- a delivery that may have reached Pi is `uncertain` and is not automatically repeated;
-- a Slack operation that may have reached Slack is `ambiguous` and is not automatically retried;
-- explicit inspection and retry commands preserve the prior attempt.
-
-## Trust
-
-A trusted Slack user can automatically trigger a fully capable local Pi session while `/mosscap` is active. The configured workspace, single channel, allowlisted immutable Slack user ID, and direct bot mention are admission checks—not a sandbox. The allowlist itself is live configuration and may change.
-
-Configuration, SQLite, the local socket, and temporary files live under owner-only XDG directories. Slack tokens are stored only in the owner-only TOML file; they are never written to SQLite or inserted into Pi messages.
-
-## Phase 0 local-task quick start
-
-Phase 0 implements the private local ledger, foreground gateway, and task CLI, plus the local configuration/reload and SQLite trust control-plane foundations described above. Slack networking and admission, Pi delivery, files, effects, and purge are not implemented yet. Empty Slack credential/identity fields are therefore valid for local-only operation; reload explicitly reports that Slack network verification is deferred.
+Tasks are independent of Slack activity:
 
 ```sh
-mosscap setup
-mosscap gateway run                    # keep this foreground process running
-
-# In another terminal:
-mosscap task create --text "review the release" --request-id release-create
-mosscap task working AbCdEfGh --request-id release-working
+mosscap task create --text "review the release"
 mosscap task list
+mosscap task working AbCdEfGh
+mosscap task show AbCdEfGh --json
+mosscap task reply AbCdEfGh --text "I found the problem." --done
 ```
 
-Mutations always go through the gateway. A request ID is durable: retry the *same* command with the same ID after a disconnect or gateway restart to receive its original outcome rather than repeat the mutation. Reload is also digest-aware: the gateway stores only a SHA-256 digest of the staged TOML (never token values), so reusing an ID for changed staged bytes is a conflict rather than a silent second activation. For a mutation explicitly run with `--json`, gateway and transport failures are one JSON object on stderr with `code`, `category`, `message`, `retriable`, optional `details`/`progress`, `request_id`, and bounded recovery `guidance`; successful JSON output remains on stdout. Reuse an ID only for identical input, inspect ambiguous effects rather than resending, and revise conclusive external failures.
+`task reply --done` is a resumable composition: it completes the task only after Slack confirms the reply. A plain Slack send never changes task state, and marking a task done never posts to Slack.
+
+## Files and exceptional outcomes
+
+Incoming Slack attachments are stored as metadata and downloaded only on request:
 
 ```sh
-mosscap task create --text "review the release" --request-id release-create --json
-# Restart `mosscap gateway run`, then safely replay:
-mosscap task create --text "review the release" --request-id release-create --json
+mosscap file show fil_EXAMPLE --json
+mosscap file get fil_EXAMPLE --output ./attachment.bin
+mosscap slack file --file ./result.bin
 ```
 
-### Compatibility with the original Phase 0 layout
+Mosscap retains file metadata and transfer outcomes, not permanent copies of transferred bytes.
 
-Recognized schema-v1 ledgers are transactionally migrated to schema v2 by adding the empty `trusted_users` table; existing tasks, state events, and mutation outcomes are preserved. The old TOML `[paths]`, `trusted_user_ids`, and `secrets_file` keys are rejected with actionable guidance. Mosscap never imports legacy TOML trust as authorization: after migration the live trust set starts empty and admits nobody when Slack admission is later enabled.
+SQLite is authoritative for tasks, Slack effects, and delivery outcomes. Pi JSONL records what one Pi session has seen. Mosscap does not claim exactly-once execution across SQLite, Pi, or Slack:
 
-There is no normal alternate `--config` authority. Use private `XDG_CONFIG_HOME` and `XDG_STATE_HOME` roots for isolated installations and tests.
+- a delivery that may have reached Pi becomes `uncertain` and requires inspection before requeue;
+- a Slack operation that may have reached Slack becomes `ambiguous` and requires inspection before retry; and
+- retries preserve the previous attempt and make duplicate risk explicit.
 
-### Phase 0 security and failure matrix
+```sh
+mosscap delivery list --state uncertain --json
+mosscap effect list --state ambiguous --json
+mosscap gateway status --json
+mosscap doctor --json
+```
 
-| Condition | Phase 0 behavior | Operator action |
-| --- | --- | --- |
-| Gateway stops or restarts | Committed tasks and request outcomes remain in SQLite; same-ID replays do not duplicate work. | Restart `mosscap gateway run`, then replay the original mutation ID. |
-| Unsafe mode, owner, symlink, hard link, or escaped state path | Setup/start fails closed. | Restore owner-only `0700` directories and `0600` regular files; remove unsafe links. |
-| Live or unsafe socket / second gateway | Startup refuses to replace the endpoint. | Stop the owner gateway; inspect and remove only a known stale socket. |
-| Unsupported protocol or ledger schema | Connection/start fails closed without reinterpretation. Additive v1 commands are capability-negotiated; an older gateway that omits `config_reload` or `trusted_users` is rejected locally with exit 9. | Use the matching Mosscap binary; do not edit the ledger to force compatibility. |
-| Gateway unavailable | CLI returns exit 6 and does not access SQLite directly. | Start the gateway and retry a mutation with its original request ID. |
-| Request ID reused for different input | CLI returns conflict (exit 4); neither mutation is repeated. | Generate a new request ID for the new intent. |
-| Corrupt or failed SQLite checks | Gateway refuses unsafe startup; doctor reports failures non-destructively. | Restore a known-good ledger; do not auto-repair. |
-| Secret-bearing configuration | The complete config file is owner-only; config output, status, doctor, logs, and mutation records redact tokens and omit historical task text. | Keep `config.toml` mode `0600` and never share its contents. |
+## Configuration and local state
 
-## Design documents
+`config.toml` contains all scalar settings. Slack tokens are redacted from command output and are never stored in SQLite. Paths are fixed under owner-only XDG roots:
 
-- [SYSTEM_MODEL.md](docs/SYSTEM_MODEL.md) explains the components, authority boundaries, and end-to-end flow.
-- [SPEC.md](docs/SPEC.md) describes the longer-term v1 design hypothesis.
-- [Phase 1 Slack operations](docs/operations/phase-1-slack.md) covers private credential placement, single-channel operations, trust, ambiguity, reconnect, and shutdown.
+```text
+$XDG_CONFIG_HOME/mosscap/config.toml
+$XDG_STATE_HOME/mosscap/mosscap.sqlite3
+$XDG_STATE_HOME/mosscap/control.sock
+$XDG_STATE_HOME/mosscap/tmp/
+```
+
+`config set` stages one validated change while preserving comments and formatting. `gateway reload` verifies and activates the complete candidate snapshot atomically; a failed reload leaves the active runtime unchanged.
+
+Every mutation has a request ID. When the CLI generates one, it reports it in the result. After an interrupted mutation, retry exactly the same input with the same ID; never reuse an ID for changed input.
+
+## Documentation
+
+- [`pi-extension/README.md`](pi-extension/README.md) — Pi extension installation and behavior
+- [`docs/SYSTEM_MODEL.md`](docs/SYSTEM_MODEL.md) — architecture and authority boundaries
+- [`docs/SPEC.md`](docs/SPEC.md) — normative v1 product contract
+
+## Development
+
+```sh
+just check
+just build
+cd pi-extension && pnpm install --frozen-lockfile && pnpm test && pnpm typecheck
+```

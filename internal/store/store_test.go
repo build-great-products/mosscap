@@ -258,7 +258,7 @@ func TestDefaultGenerator(t *testing.T) {
 	}
 }
 
-func phase0Database(t *testing.T, path string) *sql.DB {
+func initialSchemaDatabase(t *testing.T, path string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -285,7 +285,7 @@ func phase0Database(t *testing.T, path string) *sql.DB {
 func TestOpenMigrationFailureRollsBackV1Upgrade(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
-	db := phase0Database(t, path)
+	db := initialSchemaDatabase(t, path)
 	if _, err := db.Exec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('tsk_before_failed_upgrade',1,'open','preserved','local',1,1)"); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func breakMigration3(t *testing.T) {
 func TestOpenMigrationFailureRollsBackV3ToV4Upgrade(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
-	db := phase0Database(t, path)
+	db := initialSchemaDatabase(t, path)
 	if _, err := db.Exec(string(migration0002)); err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +399,7 @@ func assertFailedUpgradeRolledBack(t *testing.T, path string, wantVersion int, w
 func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
-	db := phase0Database(t, path)
+	db := initialSchemaDatabase(t, path)
 	if _, err := db.Exec("INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES('tsk_preserved',1,'open','preserved task','local',1,1,NULL)"); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.
 func TestOpenRejectsUnrecognizedSchemasWithoutChangingThem(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ledger.sqlite3")
-	db := phase0Database(t, path)
+	db := initialSchemaDatabase(t, path)
 	if _, err := db.Exec("UPDATE schema_migrations SET checksum='bad'"); err == nil {
 		t.Fatal("accepted invalid checksum")
 	}
@@ -489,7 +489,7 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 	ctx := context.Background()
 	t.Run("unknown object", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "ledger.sqlite3")
-		db := phase0Database(t, path)
+		db := initialSchemaDatabase(t, path)
 		if _, err := db.Exec("CREATE TABLE unknown_schema_object (id INTEGER)"); err != nil {
 			t.Fatal(err)
 		}

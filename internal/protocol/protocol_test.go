@@ -164,7 +164,10 @@ func TestFrameRejectsBadLengthsAndUTF8(t *testing.T) {
 		})
 	}
 }
-func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
+
+// TestSlackParamsStrictAndRoundTrip locks down accepted Slack/effect/file wire
+// shapes and rejects unknown, unsafe, or out-of-range request fields.
+func TestSlackParamsStrictAndRoundTrip(t *testing.T) {
 	cases := []struct{ command, params string }{
 		{"slack.history", `{"limit":100}`},
 		{"slack.thread", `{"thread_ts":"1712345678.000001"}`},
@@ -209,14 +212,16 @@ func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPhase1CapabilitiesAndSafeDTOs(t *testing.T) {
+// TestSlackCapabilitiesAndSafeDTOs ensures the server advertises the integrated
+// Slack surface while summary DTOs and errors do not leak intent text or tokens.
+func TestSlackCapabilitiesAndSafeDTOs(t *testing.T) {
 	for _, capability := range []string{CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityTaskReply} {
 		found := false
 		for _, advertised := range ServerCapabilities {
 			found = found || advertised == capability
 		}
 		if !found {
-			t.Fatalf("missing Phase 1 capability %q", capability)
+			t.Fatalf("missing Slack capability %q", capability)
 		}
 	}
 	// Effect list/mutation DTOs intentionally lack request text and reasons;

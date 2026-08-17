@@ -43,7 +43,7 @@ func (s Scope) Valid() bool {
 	return true
 }
 
-// RequiredBotScopes returns the exact Phase 1 bot-scope set for the configured
+// RequiredBotScopes returns the exact bot-scope set for the configured
 // channel type. Socket Mode's app-level connections:write scope is verified
 // separately because it belongs to a different token.
 func RequiredBotScopes(privateChannel bool) []Scope {

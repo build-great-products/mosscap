@@ -33,7 +33,7 @@ const (
 	defaultBusyTimeout = 5 * time.Second
 )
 
-//go:embed migrations/0001_phase0.sql
+//go:embed migrations/0001_initial.sql
 var migration0001 []byte
 
 //go:embed migrations/0002_trusted_users.sql
@@ -144,7 +144,7 @@ func decodeCursor(cursor string) (listCursor, error) {
 	return c, nil
 }
 
-// Checksum returns the Phase-0 migration checksum for compatibility with v1 callers.
+// Checksum returns the initial migration checksum for compatibility with v1 callers.
 func Checksum() string { return migrationChecksum(1) }
 
 // MigrationChecksum returns the checksum for a known embedded migration.

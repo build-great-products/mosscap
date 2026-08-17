@@ -119,7 +119,7 @@ type SlackSource struct {
 }
 
 // SlackFile is durable, byte-free file metadata. SizeBytes is retained as a
-// compatibility projection of DeclaredSizeBytes for Phase 1 callers.
+// compatibility projection of DeclaredSizeBytes for older callers.
 type SlackFile struct {
 	FileID             string     `json:"file_id"`
 	Direction          string     `json:"direction"`

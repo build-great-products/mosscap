@@ -54,7 +54,7 @@ type Snapshot struct {
 	PiCapability           string             `json:"pi_capability"`
 	PiDelivery             PiDeliveryStatus   `json:"pi_delivery"`
 	FileTransfer           FileTransferStatus `json:"file_transfer"`
-	// Slack is Phase 1 operational state. It is populated by server without
+	// Slack is the current operational state. It is populated by server without
 	// carrying tokens, headers, message bodies, or file bytes.
 	Slack any `json:"slack,omitempty"`
 }

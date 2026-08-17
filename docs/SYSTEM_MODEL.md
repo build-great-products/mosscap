@@ -1,12 +1,10 @@
-# Mosscap System Model
+# Mosscap system model
 
 ## Product rule
 
 **Keep coordination durable; keep the agent human-owned.**
 
-Mosscap is a durable inbox and Slack interface for an ordinary interactive Pi session. It owns coordination around Pi, but never owns Pi itself.
-
-A person starts Pi, chooses its model and thinking level, selects its working directory, and decides when it stops. Running `/mosscap` opts that process into receiving work. The extension immediately submits delivered work to the model, but normal Pi controls remain available for steering and interruption.
+Mosscap is a durable inbox and Slack interface for an ordinary interactive Pi session. A person starts Pi, chooses its model and working directory, and decides when it stops. Running `/mosscap` opts that persisted TUI session into delivery; `/mosscap off` opts out without changing tasks or stopping Pi.
 
 ## Components and authority
 
@@ -26,52 +24,39 @@ CLI ─────────┘              │
 
 The `mosscap` executable has two roles:
 
-- The **gateway** is a foreground, long-running process. It connects to Slack, owns the SQLite ledger, admits work, manages delivery leadership and leases, executes recorded Slack operations, and serves the local protocol.
-- The **CLI** performs setup and sends explicit requests to the gateway. During normal operation it does not write SQLite directly.
-
-One executable simplifies installation and version compatibility, while internal package boundaries keep the gateway and client independent.
+- The foreground **gateway** connects to Slack, owns SQLite, admits work, coordinates Pi delivery, executes recorded Slack operations, manages temporary transfers, and serves the local protocol.
+- Short-lived **CLI** commands perform setup or ask the gateway to read and mutate state. Normal CLI operation never writes SQLite directly.
 
 ### SQLite ledger
 
-SQLite is the sole authority for:
+SQLite is authoritative for tasks, Slack source deduplication, delivery attempts, Slack effect intents and outcomes, file metadata, trusted users, and mutation request deduplication. Logs, reactions, Pi conversation text, and terminal output are projections, not task state.
 
-- tasks and their current versions;
-- Slack source-event deduplication;
-- the active delivery leader;
-- delivery attempts and exceptional outcomes;
-- outbound Slack operation intents and results;
-- file metadata; and
-- mutation request deduplication.
+### Pi extension
 
-Logs, Slack reactions, Pi conversation text, and terminal output are never authoritative task state.
+The TypeScript extension integrates only with the Pi process in which it is loaded. It:
 
-### TypeScript Pi extension
-
-The extension integrates only with the Pi process in which it is loaded. It:
-
-- provides `/mosscap`, `/mosscap status`, and `/mosscap off`;
-- claims the single active delivery-leader generation;
-- maintains heartbeats while opted in;
-- inserts leased work as visible custom Pi messages;
-- triggers model processing;
+- requires explicit `/mosscap` opt-in in a persisted interactive TUI session;
+- claims the gateway's single active delivery slot;
+- reconciles delivery keys already present in that Pi session;
+- inserts work as visible custom messages and triggers a model turn;
 - records delivery keys in Pi session entries; and
-- reports insertion outcomes to the gateway.
+- reports inserting, persisted, or rejected outcomes.
 
-It does not connect to Slack, write SQLite, infer task completion from model output, or manage the Pi process.
+It does not connect to Slack, write SQLite, infer task completion from prose, add model-callable tools, or manage Pi's process. A second extension cannot silently replace the active one; the current session must opt out or disconnect first.
 
 ### Slack
 
-Slack is both a source of requests and an explicit communication surface. Mosscap is configured for exactly one workspace and one channel. It admits work only from explicitly trusted users who directly mention the bot.
+Mosscap is configured for exactly one channel. Workspace and bot identity are derived from Slack authentication. Work is admitted only when a non-bot sender is in the live trusted-user set and directly mentions the bot in the configured channel.
 
-The CLI can read history and threads and can send, edit, delete, react, unreact, and transfer files. Every operation implicitly targets the configured channel.
+Slack reads and writes are explicit. Each write records a durable intent before network submission. Slack activity and task state are independent, except for the explicit `task reply --done` composition, which marks done only after a confirmed reply.
 
 ### Local protocol
 
-A private, versioned Unix-socket protocol connects the gateway, CLI, and extension. It carries typed requests, responses, and server notifications. Request IDs prevent duplicate local mutations; generations fence stale extension connections.
+A private, versioned Unix-socket protocol connects the gateway, CLI, and extension. Request IDs deduplicate local mutations. Owner-only filesystem permissions and peer credentials protect the endpoint from other OS users; they do not protect against another process running as the same user.
 
-## Task model
+## Task and request flow
 
-A task is a generic todo item:
+A task has one current text value, a monotonic content version, and one of three states:
 
 ```text
 open → working → done
@@ -79,115 +64,53 @@ open → working → done
   └───────┴────────┘
 ```
 
-Returning a task to `open` covers abandoning active work and reopening completed work.
+State transitions do not cause Slack activity. A meaningful edit to an admitted Slack source replaces current task text and increments its version; old text is not retained. Source deletion preserves the task text and state.
 
-Each task has:
+An eligible Slack envelope follows this path:
 
-- an opaque ID;
-- a monotonic version;
-- one current text value;
-- `open`, `working`, or `done` state;
-- timestamps; and
-- either a local source or a reference to its originating Slack message.
+1. The gateway validates workspace, channel, sender, trust, and direct mention.
+2. In SQLite it deduplicates the source and creates or updates the task.
+3. Only after commit does it acknowledge the Slack envelope.
+4. An opted-in extension polls eligible task versions, inserts one visible message, and triggers a turn.
+5. The extension reports insertion start and then confirms that the delivery key is present in persisted Pi session entries.
+6. Pi or a human uses ordinary CLI commands for explicit replies and task transitions.
 
-Every eligible Slack mention creates one task automatically. Local callers can create the same task type. A Slack source reference lets Pi find the original message or thread, but task state and Slack activity remain independent:
+Tasks remain durable while Pi is absent or opted out. Slack Socket Mode does not guarantee indefinite retention while the gateway itself is offline.
 
-- replying does not complete a task;
-- completing a task does not post a reply;
-- reactions do not represent task state.
+## Cross-system uncertainty
 
-An edit to the originating Slack message replaces the task's current text and increments its version. Mosscap does not retain previous text. When Pi is connected, the live update may include a best-effort diff; recovery requires only the latest complete text.
-
-## Request flow
-
-### 1. Admission
-
-A trusted user directly mentions the bot in the configured channel. The gateway validates the workspace, channel, immutable user ID, sender type, and mention.
-
-In one SQLite transaction it deduplicates the source event and creates the task. Only after commit does it acknowledge Slack. The task therefore survives even when Pi is absent.
-
-### 2. Delivery
-
-A human-started Pi process runs `/mosscap` and claims delivery leadership. The gateway leases eligible task versions to that extension.
-
-The extension reports insertion start, writes a visible custom message containing the task and delivery key into Pi's persisted JSONL session, and starts model processing. If Pi is busy, the message waits as a follow-up until the current run settles.
-
-After observing the persisted session entry, the extension acknowledges the lease. The gateway marks the delivery `persisted`.
-
-### 3. Work
-
-Pi and the human use ordinary Pi conversation and tools. Task state changes only through explicit Mosscap operations; free-form model claims such as “finished” do not update SQLite.
-
-### 4. Slack activity
-
-A CLI request to send or modify Slack first creates a durable effect intent. The gateway also creates a fixed `no_entry` reaction intent for every configured-channel event rejected because its sender is untrusted. Every mutation uses the same durable effect lifecycle before the gateway performs the API call and records its result. Slack activity does not implicitly change task state.
-
-### 5. Completion
-
-Pi or the human explicitly changes the task to `done`. Done tasks remain inspectable until an operator runs `mosscap purge` with an explicit cutoff and confirmation.
-
-## Files
-
-Mosscap keeps durable file identity and transfer outcomes, not durable file bytes.
-
-For an admitted Slack attachment, the task contains file metadata and a retrieval command. The gateway downloads bytes only when `mosscap file get` is invoked. It either places them at an explicit user destination or returns a private temporary path.
-
-Outgoing commands read and validate a local regular file, compute its size and hash, and upload it without retaining a permanent copy. Temporary bytes expire independently of durable task and effect metadata.
-
-## Two persistence domains
-
-Delivery crosses two stores:
-
-1. SQLite says what work exists and what delivery was attempted.
-2. Pi JSONL says what a particular session has seen.
-
-They cannot share a transaction. Mosscap therefore uses stable delivery keys and explicit states:
+SQLite and Pi JSONL cannot share a transaction:
 
 ```text
-pending → leased → inserting → persisted
-                       ├──────→ uncertain
-                       └──────→ rejected
+pending → inserting → persisted
+              ├────→ uncertain
+              └────→ rejected
 ```
 
-A lease that expires before insertion starts can safely return to `pending`. Once insertion may have started, failure becomes `uncertain` and requires inspection before requeue.
+If insertion may have started but persistence cannot be confirmed, the attempt becomes `uncertain` and is not automatically repeated. Explicit requeue preserves the previous attempt and warns about duplicate insertion.
 
-Slack operations have the analogous boundary:
+SQLite and Slack also cannot share a transaction:
 
 ```text
 prepared → submitted → confirmed
-                       ├──────→ failed
-                       └──────→ ambiguous
+                       ├────→ failed
+                       └────→ ambiguous
 ```
 
-A possibly submitted operation is never retried automatically.
+A conclusive rejection is `failed`. A timeout or disconnect after submission is `ambiguous`; Mosscap never retries it automatically. Explicit retry creates a linked new effect and, after ambiguity, requires duplicate-risk confirmation.
 
-## Leadership and takeover
+## Files and retention
 
-Only one extension generation receives deliveries. A confirmed takeover increments the generation, invalidates the old connection's leases, and rejects stale acknowledgements.
+Mosscap stores durable file identity, metadata, hashes when known, and transfer outcomes—not durable file bytes. Incoming bytes are fetched only by `file get`. Outgoing bytes are validated and uploaded from regular files. Temporary bytes live under the private state root and may expire independently of durable metadata.
 
-This is delivery fencing, not process control. It cannot stop an old Pi process or a tool call already running there. Takeover therefore reports that prior work may remain in flight.
+Durable metadata is not deleted automatically. `mosscap purge` requires an absolute cutoff and exactly one of dry-run or confirmation, and preserves live tasks and unresolved delivery/effect evidence.
 
-## Recovery
+## Security boundary
 
-- If the gateway exits, committed SQLite state remains.
-- If Slack reconnects and redelivers an event, source identity deduplicates it.
-- If Pi exits before insertion starts, the lease eventually becomes pending again.
-- If Pi exits after insertion starts, the delivery becomes uncertain.
-- If a Slack request times out after submission, its effect becomes ambiguous.
-- When an opted-in Pi reconnects, the gateway reconciles delivery keys and presents current open work plus exceptional outcomes.
+A trusted Slack user can trigger a fully capable local Pi while `/mosscap` is active. Workspace, channel, immutable user ID, bot exclusion, and direct mention are authorization checks, not a sandbox. Slack text, task text, filenames, and file bytes remain untrusted input.
 
-Recovery follows durable state rather than terminal history or inferred model behavior.
+Tokens and authorization headers must not enter SQLite, protocol results, logs, or Pi messages. Local paths and ordinary diagnostics are not redacted and may enter Pi JSONL and model context. Operators choose a safe working directory and model with that disclosure in mind.
 
-## Explicitly outside Mosscap
+## Non-goals
 
-Mosscap does not:
-
-- start, stop, supervise, select, or reset Pi;
-- run hidden or headless agents;
-- infer task transitions from conversation text;
-- automatically retry ambiguous external actions;
-- keep historical task text;
-- permanently archive transferred file bytes; or
-- automatically delete durable metadata.
-
-A feature belongs in the core when it strengthens durable work, explicit authority, visible human control, or honest recovery.
+Mosscap does not start or supervise Pi, run headless agent pools, infer task state from conversation, retain historical task text, automatically retry uncertain external actions, permanently archive transferred bytes, support multiple Slack destinations, or claim end-to-end exactly-once execution.

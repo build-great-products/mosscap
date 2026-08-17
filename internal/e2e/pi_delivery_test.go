@@ -1,4 +1,4 @@
-// Package e2e verifies the Phase 2 Node extension wire against the real Go gateway.
+// Package e2e verifies the Node extension wire against the real Go gateway.
 package e2e
 
 import (
@@ -16,11 +16,11 @@ import (
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
-// TestPhase2NodeDeliveryWire is deliberately credential-free: it creates one
+// TestNodeDeliveryWire is deliberately credential-free: it creates one
 // local task, lets the native Node framed client persist it through the real
 // Unix gateway and SQLite ledger, then reconnects with branch-wide evidence.
-func TestPhase2NodeDeliveryWire(t *testing.T) {
-	root, err := os.MkdirTemp(effectiveHome(t), ".mosscap-phase2-")
+func TestNodeDeliveryWire(t *testing.T) {
+	root, err := os.MkdirTemp(effectiveHome(t), ".mosscap-delivery-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestPhase2NodeDeliveryWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := ledger.Create(context.Background(), "phase2-node-task", "local task for Node protocol E2E")
+	created, err := ledger.Create(context.Background(), "node-delivery-task", "local task for Node protocol E2E")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,10 +52,10 @@ func TestPhase2NodeDeliveryWire(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := server.NewWithOptions(cfg, loc, "phase2-e2e", nil, server.Options{Disabled: true})
+	s := server.NewWithOptions(cfg, loc, "delivery-e2e", nil, server.Options{Disabled: true})
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx) }()
-	waitPhase2Socket(t, cfg.Paths.Endpoint)
+	waitForGatewaySocket(t, cfg.Paths.Endpoint)
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -103,7 +103,7 @@ func TestPhase2NodeDeliveryWire(t *testing.T) {
 	}
 }
 
-func waitPhase2Socket(t *testing.T, endpoint string) {
+func waitForGatewaySocket(t *testing.T, endpoint string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {

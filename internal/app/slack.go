@@ -27,7 +27,7 @@ func (a App) slack(args []string) error {
 }
 
 func (a App) slackCommand(cmd string, args []string) error {
-	fs := newPhase1FlagSet("slack " + cmd)
+	fs := newCommandFlagSet("slack " + cmd)
 	jsonOut := fs.Bool("json", false, "")
 	text := fs.String("text", "", "")
 	textFile := fs.String("text-file", "", "")
@@ -56,7 +56,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 		"delete": {"json", "reason", "task", "request-id"},
 		"react":  {"json", "task", "request-id"}, "unreact": {"json", "task", "request-id"},
 	}
-	if err := phase1Only(fs, allowed[cmd]); err != nil {
+	if err := rejectUnsupportedFlags(fs, allowed[cmd]); err != nil {
 		return err
 	}
 
@@ -74,7 +74,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 		}
 		params = protocol.SlackThreadParams{ThreadTS: fs.Arg(0)}
 	case "send":
-		t, err := a.phase1Text(*text, *textFile)
+		t, err := a.readCommandText(*text, *textFile)
 		if err != nil {
 			return err
 		}
@@ -102,7 +102,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 		if fs.NArg() != 1 {
 			return usage("slack edit requires MESSAGE_TS")
 		}
-		t, err := a.phase1Text(*text, *textFile)
+		t, err := a.readCommandText(*text, *textFile)
 		if err != nil {
 			return err
 		}
@@ -128,11 +128,11 @@ func (a App) slackCommand(cmd string, args []string) error {
 	if !mutation {
 		*requestID = "req_slack_" + cmd
 	}
-	c, err := phase1Config()
+	c, err := loadCommandConfig()
 	if err != nil {
 		return err
 	}
-	if err := checkPhase1TextFrame(c, *textFile, params, cmd, *requestID, a.Version); err != nil {
+	if err := checkSlackTextFrame(c, *textFile, params, cmd, *requestID, a.Version); err != nil {
 		return err
 	}
 	capability := protocol.CapabilitySlackReads
@@ -149,7 +149,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 	if mutation {
 		out = map[string]any{"request_id": *requestID, "effect": out}
 	}
-	return a.renderPhase1(out, *jsonOut, cmd == "history" || cmd == "thread")
+	return a.renderSlackCommand(out, *jsonOut, cmd == "history" || cmd == "thread")
 }
 
 func (a App) effect(args []string) error {
@@ -161,7 +161,7 @@ func (a App) effect(args []string) error {
 	if !contains([]string{"list", "inspect", "retry"}, cmd) {
 		return usage(fmt.Sprintf("unknown effect command %q", cmd))
 	}
-	fs := newPhase1FlagSet("effect " + cmd)
+	fs := newCommandFlagSet("effect " + cmd)
 	jsonOut := fs.Bool("json", false, "")
 	state := fs.String("state", "", "")
 	reason := fs.String("reason", "", "")
@@ -177,7 +177,7 @@ func (a App) effect(args []string) error {
 		return nil
 	}
 	allowed := map[string][]string{"list": {"json", "state"}, "inspect": {"json"}, "retry": {"json", "reason", "confirm-duplicate-risk", "request-id"}}
-	if err := phase1Only(fs, allowed[cmd]); err != nil {
+	if err := rejectUnsupportedFlags(fs, allowed[cmd]); err != nil {
 		return err
 	}
 	var params any
@@ -216,7 +216,7 @@ func (a App) effect(args []string) error {
 	if !mutation {
 		*requestID = "req_effect_" + cmd
 	}
-	c, err := phase1Config()
+	c, err := loadCommandConfig()
 	if err != nil {
 		return err
 	}
@@ -227,7 +227,7 @@ func (a App) effect(args []string) error {
 	if mutation {
 		out = map[string]any{"request_id": *requestID, "effect": out}
 	}
-	return a.renderPhase1(out, *jsonOut, cmd == "inspect")
+	return a.renderSlackCommand(out, *jsonOut, cmd == "inspect")
 }
 
 func (a App) file(args []string) error {
@@ -241,7 +241,7 @@ func (a App) file(args []string) error {
 	if args[0] != "show" {
 		return usage(fmt.Sprintf("unknown file command %q", args[0]))
 	}
-	fs := newPhase1FlagSet("file show")
+	fs := newCommandFlagSet("file show")
 	jsonOut := fs.Bool("json", false, "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
@@ -252,13 +252,13 @@ func (a App) file(args []string) error {
 		fmt.Fprintln(a.Out, "Usage: mosscap file show FILE [--json]\n\nShow incoming Slack file metadata; file bytes are not supported.")
 		return nil
 	}
-	if err := phase1Only(fs, []string{"json"}); err != nil {
+	if err := rejectUnsupportedFlags(fs, []string{"json"}); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return usage("file show requires FILE")
 	}
-	c, err := phase1Config()
+	c, err := loadCommandConfig()
 	if err != nil {
 		return err
 	}
@@ -266,17 +266,17 @@ func (a App) file(args []string) error {
 	if err != nil {
 		return err
 	}
-	return a.renderPhase1(out, *jsonOut, false)
+	return a.renderSlackCommand(out, *jsonOut, false)
 }
 
-func (a App) phase1Text(text, path string) (string, error) {
+func (a App) readCommandText(text, path string) (string, error) {
 	if (text == "") == (path == "") {
 		return "", usage("exactly one of --text or --text-file is required")
 	}
 	if path == "" {
 		return text, nil
 	}
-	c, err := phase1Config()
+	c, err := loadCommandConfig()
 	if err != nil {
 		return "", err
 	}
@@ -286,14 +286,14 @@ func (a App) phase1Text(text, path string) (string, error) {
 	}
 	return string(b), nil
 }
-func phase1Config() (config.Config, error) {
+func loadCommandConfig() (config.Config, error) {
 	loc, err := config.DefaultLocation()
 	if err != nil {
 		return config.Config{}, err
 	}
 	return config.Load(loc)
 }
-func checkPhase1TextFrame(c config.Config, path string, params any, cmd, requestID, version string) error {
+func checkSlackTextFrame(c config.Config, path string, params any, cmd, requestID, version string) error {
 	_ = path
 	// Local text and file paths are resolved before the request is framed; check
 	// the complete request rather than each individual input.
@@ -302,7 +302,7 @@ func checkPhase1TextFrame(c config.Config, path string, params any, cmd, request
 	}
 	return nil
 }
-func (a App) renderPhase1(v any, jsonOut, explicitRead bool) error {
+func (a App) renderSlackCommand(v any, jsonOut, explicitRead bool) error {
 	if jsonOut {
 		return a.render(v, true)
 	}
@@ -325,7 +325,7 @@ func first(a, b any) any {
 	}
 	return b
 }
-func phase1Only(fs *flag.FlagSet, allowed []string) error {
+func rejectUnsupportedFlags(fs *flag.FlagSet, allowed []string) error {
 	ok := map[string]bool{"help": true, "h": true}
 	for _, name := range allowed {
 		ok[name] = true
@@ -373,7 +373,7 @@ func absolutePaths(paths []string) ([]string, error) {
 	return out, nil
 }
 
-func newPhase1FlagSet(name string) *flag.FlagSet {
+func newCommandFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs

@@ -287,7 +287,9 @@ func TestUnsupportedRemoteMapsToExit9(t *testing.T) {
 	}
 }
 
-func TestPhase1ExitMappingsAndForbiddenFlags(t *testing.T) {
+// TestCLIExternalExitMappingsAndForbiddenFlags protects stable external-error
+// exit codes and rejects options that could bypass single-channel/file rules.
+func TestCLIExternalExitMappingsAndForbiddenFlags(t *testing.T) {
 	for _, tc := range []struct {
 		category string
 		want     int

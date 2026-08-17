@@ -17,7 +17,7 @@ import (
 // temporary byte lifecycle; the CLI only performs an explicit safe placement
 // when the operator supplies --output.
 func (a App) fileGet(args []string) error {
-	fs := newPhase1FlagSet("file get")
+	fs := newCommandFlagSet("file get")
 	jsonOut := fs.Bool("json", false, "")
 	output := fs.String("output", "", "")
 	force := fs.Bool("force", false, "")
@@ -55,7 +55,7 @@ func (a App) fileGet(args []string) error {
 		}
 		*requestID = id
 	}
-	c, err := phase1Config()
+	c, err := loadCommandConfig()
 	if err != nil {
 		return err
 	}

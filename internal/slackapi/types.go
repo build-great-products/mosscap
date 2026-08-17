@@ -4,7 +4,7 @@
 // rest of Mosscap depends only on this package.
 package slackapi
 
-// EventKind is a normalized Slack event understood by Phase 1 ingestion.
+// EventKind is a normalized Slack event understood by Slack ingestion.
 type EventKind string
 
 const (

@@ -12,7 +12,7 @@ func TestTaskReadModelPreservesLocalTasksAndJoinsSlackMetadata(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 
-	local, err := s.Create(ctx, "phase1-query-local", "local task text")
+	local, err := s.Create(ctx, "task-read-model-local", "local task text")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,11 +24,11 @@ func TestTaskReadModelPreservesLocalTasksAndJoinsSlackMetadata(t *testing.T) {
 		t.Fatalf("local read = %#v", localRead)
 	}
 
-	if _, err := s.AddTrustedUser(ctx, "phase1-query-trust", "U12345678"); err != nil {
+	if _, err := s.AddTrustedUser(ctx, "task-read-model-trust", "U12345678"); err != nil {
 		t.Fatal(err)
 	}
 	size := int64(42)
-	event := sourceTestEvent("Ev-phase1-query", SlackEventAppMention, 100)
+	event := sourceTestEvent("Ev-task-read-model", SlackEventAppMention, 100)
 	event.Files = []SlackIncomingFile{
 		{SlackFileID: "F22222222", OriginalName: "second.txt"},
 		{SlackFileID: "F11111111", OriginalName: "first.txt", DeclaredMIME: "text/plain", SizeBytes: &size},
@@ -37,7 +37,7 @@ func TestTaskReadModelPreservesLocalTasksAndJoinsSlackMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deleted := sourceTestEvent("Ev-phase1-query-delete", SlackEventMessageDelete, 101)
+	deleted := sourceTestEvent("Ev-task-read-model-delete", SlackEventMessageDelete, 101)
 	deleted.MessageTS = event.MessageTS
 	if _, err := s.CommitSlackSourceEvent(ctx, sourceTestPolicy, deleted); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestTaskReadModelLatestSlackReplyEffectIsExactAndDeterministic(t *testing.T
 	ctx := context.Background()
 	s := testStore(t)
 	trustSourceTestUser(t, s)
-	event := sourceTestEvent("Ev-phase1-reply", SlackEventAppMention, 100)
+	event := sourceTestEvent("Ev-task-reply-model", SlackEventAppMention, 100)
 	admitted, err := s.CommitSlackSourceEvent(ctx, sourceTestPolicy, event)
 	if err != nil {
 		t.Fatal(err)
@@ -80,14 +80,14 @@ func TestTaskReadModelLatestSlackReplyEffectIsExactAndDeterministic(t *testing.T
 		t.Fatal(err)
 	}
 	// Effects must be sends related to this task and exact source thread.
-	prepareEffect(t, s, "phase1-reply-unrelated", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: "1700000009.000001", Text: "unrelated"})
-	prepareEffect(t, s, "phase1-reply-react", SlackEffectIntent{Kind: SlackEffectReact, RelatedTaskID: admitted.TaskID, TargetMessageTS: event.MessageTS, Emoji: "eyes"})
+	prepareEffect(t, s, "task-reply-model-unrelated", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: "1700000009.000001", Text: "unrelated"})
+	prepareEffect(t, s, "task-reply-model-react", SlackEffectIntent{Kind: SlackEffectReact, RelatedTaskID: admitted.TaskID, TargetMessageTS: event.MessageTS, Emoji: "eyes"})
 	if effect := read(); effect != nil {
 		t.Fatalf("unrelated effect selected = %+v", effect)
 	}
 
-	first := prepareEffect(t, s, "phase1-reply-first", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: source.ThreadTS, Text: "secret first"})
-	second := prepareEffect(t, s, "phase1-reply-second", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: source.ThreadTS, Text: "secret second"})
+	first := prepareEffect(t, s, "task-reply-model-first", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: source.ThreadTS, Text: "secret first"})
+	second := prepareEffect(t, s, "task-reply-model-second", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: source.ThreadTS, Text: "secret second"})
 	// Equal update timestamps exercise the documented effect-ID tie-breaker.
 	if _, err := s.DB().ExecContext(ctx, "UPDATE slack_effects SET updated_at_us=(SELECT max(created_at_us) FROM slack_effects) WHERE effect_id IN (?,?)", first.ID, second.ID); err != nil {
 		t.Fatal(err)
@@ -165,11 +165,11 @@ func TestSlackEffectCountsAreAccurateAndContainNoPayloadText(t *testing.T) {
 	s := testStore(t)
 	canary := "effect-payload-must-not-escape"
 
-	prepared := prepareEffect(t, s, "phase1-count-prepared", SlackEffectIntent{Kind: SlackEffectSend, Text: canary})
-	submitted := prepareEffect(t, s, "phase1-count-submitted", SlackEffectIntent{Kind: SlackEffectReact, TargetMessageTS: "1700000000.000001", Emoji: "eyes"})
-	failed := prepareEffect(t, s, "phase1-count-failed", SlackEffectIntent{Kind: SlackEffectDelete, TargetMessageTS: "1700000000.000002", OperatorReason: canary})
-	ambiguous := prepareEffect(t, s, "phase1-count-ambiguous", SlackEffectIntent{Kind: SlackEffectEdit, TargetMessageTS: "1700000000.000003", Text: canary})
-	confirmed := prepareEffect(t, s, "phase1-count-confirmed", SlackEffectIntent{Kind: SlackEffectSend, Text: canary})
+	prepared := prepareEffect(t, s, "effect-count-prepared", SlackEffectIntent{Kind: SlackEffectSend, Text: canary})
+	submitted := prepareEffect(t, s, "effect-count-submitted", SlackEffectIntent{Kind: SlackEffectReact, TargetMessageTS: "1700000000.000001", Emoji: "eyes"})
+	failed := prepareEffect(t, s, "effect-count-failed", SlackEffectIntent{Kind: SlackEffectDelete, TargetMessageTS: "1700000000.000002", OperatorReason: canary})
+	ambiguous := prepareEffect(t, s, "effect-count-ambiguous", SlackEffectIntent{Kind: SlackEffectEdit, TargetMessageTS: "1700000000.000003", Text: canary})
+	confirmed := prepareEffect(t, s, "effect-count-confirmed", SlackEffectIntent{Kind: SlackEffectSend, Text: canary})
 	if _, err := s.ClaimSlackEffect(ctx, submitted.ID); err != nil {
 		t.Fatal(err)
 	}

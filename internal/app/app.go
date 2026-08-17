@@ -1037,7 +1037,7 @@ func remote(err error) error {
 	return &commandError{code: ExitUnavailable, message: err.Error()}
 }
 func (a App) taskReply(args []string) error {
-	fs := newPhase1FlagSet("task reply")
+	fs := newCommandFlagSet("task reply")
 	jsonOut := fs.Bool("json", false, "")
 	text := fs.String("text", "", "")
 	textFile := fs.String("text-file", "", "")
@@ -1052,13 +1052,13 @@ func (a App) taskReply(args []string) error {
 		fmt.Fprintln(a.Out, "Usage: mosscap task reply TASK (--text TEXT | --text-file PATH) [--done] [--request-id ID] [--json]\n\nReply to the task's durable Slack source thread. --done completes only after Slack confirms the reply; this is resumable, not a cross-system transaction.")
 		return nil
 	}
-	if err := phase1Only(fs, []string{"json", "text", "text-file", "done", "request-id"}); err != nil {
+	if err := rejectUnsupportedFlags(fs, []string{"json", "text", "text-file", "done", "request-id"}); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		return usage("task reply requires TASK")
 	}
-	t, err := a.phase1Text(*text, *textFile)
+	t, err := a.readCommandText(*text, *textFile)
 	if err != nil {
 		return err
 	}
@@ -1068,7 +1068,7 @@ func (a App) taskReply(args []string) error {
 			return err
 		}
 	}
-	c, err := phase1Config()
+	c, err := loadCommandConfig()
 	if err != nil {
 		return err
 	}
@@ -1146,7 +1146,7 @@ func (a App) printBranchHelp(name string, children []string) {
 }
 func (a App) printLeafHelp(name string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap %s [arguments]\n\n", name)
-	fmt.Fprintln(a.Out, "This command is reserved for a later implementation phase.")
+	fmt.Fprintln(a.Out, "This command is not available in this build.")
 }
 
 type commandError struct {

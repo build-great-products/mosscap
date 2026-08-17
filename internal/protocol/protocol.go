@@ -516,8 +516,8 @@ type TrustMutationDTO struct {
 }
 
 // ConfigReloadDTO deliberately contains no configuration values or secrets.
-// SlackNetworkVerificationDeferred is true because Phase 1 does not yet make
-// Slack network verification part of reload activation.
+// SlackNetworkVerificationDeferred is true for a local-only gateway that did
+// not make Slack network verification part of reload activation.
 type ConfigReloadDTO struct {
 	Activated                        bool   `json:"activated"`
 	SlackNetworkVerificationDeferred bool   `json:"slack_network_verification_deferred"`

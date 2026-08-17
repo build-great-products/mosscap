@@ -35,10 +35,9 @@ import (
 )
 
 // Server owns one open ledger and its Unix endpoint.
-// ConfigurationVerifier is the Phase 1 seam for authenticating proposed Slack
-// credentials and checking workspace/channel access before activation. The
-// Phase 0 gateway has no Slack network integration, so a nil verifier performs
-// no network claims and reload reports that verification as deferred.
+// ConfigurationVerifier authenticates proposed Slack credentials and checks
+// workspace/channel access before activation. A local-only test gateway may
+// omit it; reload then reports network verification as deferred.
 type ConfigurationVerifier interface {
 	Verify(context.Context, config.Config) error
 }
@@ -633,7 +632,7 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		resultType = "doctor_report"
 		checks := s.store.Doctor(ctx)
 		checks = append(checks, doctor.Check{Name: "endpoint_peer_compatibility", Status: doctor.Pass, Message: "Unix endpoint accepts same-EUID peers"})
-		checks = append(checks, s.phase1Doctor(ctx)...)
+		checks = append(checks, s.slackDoctor(ctx)...)
 		checks = append(checks, s.fileTransferDoctor(ctx)...)
 		result = doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
 	case "metadata.purge":
@@ -1040,7 +1039,7 @@ func (s *Server) status(ctx context.Context) (status.Snapshot, error) {
 	if err != nil {
 		return status.Snapshot{}, err
 	}
-	slack, err := s.phase1Status(ctx)
+	slack, err := s.slackStatus(ctx)
 	if err != nil {
 		return status.Snapshot{}, err
 	}

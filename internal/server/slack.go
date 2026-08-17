@@ -23,8 +23,8 @@ import (
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
-// Options controls the Phase 1 Slack runtime. Disabled is intended only for
-// direct deterministic server tests; production callers must provide Factory.
+// Options controls the Slack runtime. Disabled is intended only for direct
+// deterministic server tests; production callers must provide Factory.
 type Options struct {
 	Factory  slackruntime.Factory
 	Disabled bool
@@ -32,7 +32,7 @@ type Options struct {
 
 func NewWithOptions(c config.Config, loc config.Location, version string, log *slog.Logger, options Options) *Server {
 	// Keep New's logger contract while allowing callers to opt in without changing
-	// the Phase 0 constructor used by existing local-only callers.
+	// the constructor used by existing local-only tests.
 	s := New(c, loc, version, log)
 	s.runtimeFactory, s.slackDisabled = options.Factory, options.Disabled
 	if options.Factory != nil {
@@ -190,7 +190,7 @@ func (s *Server) prepareFileTransfer(ctx context.Context, rt *slackruntime.Runti
 	snapshot.Release()
 	if !ok {
 		_ = tmp.Close()
-		// Deterministic Phase 1 fakes need not implement the new byte adapter.
+		// Deterministic Slack fakes need not implement the byte adapter.
 		// Production slackgo does; capability advertisement remains disabled here.
 		return nil, nil, nil
 	}
@@ -264,7 +264,7 @@ func (s *Server) ops() (*slackops.Service, func(), error) {
 	}
 	return slackops.New(s.store, snap.Web, store.SlackEffectTarget{TeamID: snap.TeamID, ChannelID: snap.ChannelID}), snap.Release, nil
 }
-func (s *Server) phase1Status(ctx context.Context) (*protocol.SlackRuntimeStatusDTO, error) {
+func (s *Server) slackStatus(ctx context.Context) (*protocol.SlackRuntimeStatusDTO, error) {
 	counts, err := s.store.SlackEffectCounts(ctx)
 	if err != nil {
 		return nil, err
@@ -359,7 +359,7 @@ func (s *Server) slackUserNames(ctx context.Context, userIDs []string) map[strin
 	return names
 }
 
-func (s *Server) phase1Doctor(ctx context.Context) []doctor.Check {
+func (s *Server) slackDoctor(ctx context.Context) []doctor.Check {
 	s.slackDiagnosticMu.RLock()
 	verificationCode, priorRuntimeRetained := s.slackVerificationCode, s.slackVerificationHeld
 	s.slackDiagnosticMu.RUnlock()
@@ -494,10 +494,3 @@ func effectIntent(command string, p protocol.Request) (store.SlackEffectIntent, 
 	return i, nil
 }
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
-func phase1Stamp(t time.Time) *string {
-	if t.IsZero() {
-		return nil
-	}
-	v := stamp(t)
-	return &v
-}

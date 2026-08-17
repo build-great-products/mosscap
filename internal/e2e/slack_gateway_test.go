@@ -1,4 +1,4 @@
-// Package e2e verifies the Phase 1 Slack release path through its real local protocol.
+// Package e2e verifies the Slack release path through its real local protocol.
 package e2e
 
 import (
@@ -21,13 +21,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestPhase1SlackVerticalSlice drives Socket admission, the Unix server/client
+// TestSlackVerticalSlice drives Socket admission, the Unix server/client
 // protocol, and the built CLI against a real temporary SQLite ledger. The fake
 // adapters are deliberately strict: unexpected Web calls (including an
 // automatic retry of an ambiguous write) fail the gate.
-func TestPhase1SlackVerticalSlice(t *testing.T) {
+func TestSlackVerticalSlice(t *testing.T) {
 	home := effectiveHome(t)
-	root, err := os.MkdirTemp(home, ".mosscap-phase1-")
+	root, err := os.MkdirTemp(home, ".mosscap-slack-")
 	if err != nil {
 		t.Fatal(err)
 	}
