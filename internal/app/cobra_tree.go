@@ -106,8 +106,16 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 		commandUse = strings.TrimPrefix(commandUse, strings.Join(path[:len(path)-1], " ")+" ")
 	}
 	cmd := &cobra.Command{Use: commandUse, Short: short, Long: short, Example: "  " + use, Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
-	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return a.runCobraHandler(handler, canonicalArgs(cmd, args))
+	if isTypedCobraHandler(handler) {
+		// Keep migrated leaves structurally separate from the compatibility
+		// bridge: their execution can never reach a legacy flag.FlagSet parser.
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			return a.runTypedCobraHandler(handler, cmd, args)
+		}
+	} else {
+		cmd.RunE = func(cmd *cobra.Command, args []string) error {
+			return a.runCobraHandler(handler, canonicalArgs(cmd, args))
+		}
 	}
 	for _, f := range flags {
 		switch {
@@ -163,9 +171,46 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 	return append(out, args...)
 }
 
-// runCobraHandler is the complete binding between Cobra leaves and the
-// established request-construction handlers. Cobra exclusively owns parsing;
-// handlers receive only normalized, flags-first operands.
+// runTypedCobraHandler binds the first migrated family directly to typed
+// operations. These leaves must not pass through the legacy flag.FlagSet
+// adapters in runCobraHandler.
+func isTypedCobraHandler(handler string) bool {
+	switch handler {
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []string) error {
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	switch handler {
+	case "setup":
+		return a.setupTyped(jsonOut)
+	case "config.show":
+		return a.configShowTyped(jsonOut)
+	case "config.set":
+		return a.configSetTyped(args[0], args[1], jsonOut)
+	case "config.secret.set":
+		stdin, _ := cmd.Flags().GetBool("stdin")
+		return a.configSecretSetTyped(args[0], stdin)
+	case "gateway.run":
+		return a.gatewayRunTyped()
+	case "gateway.reload":
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.gatewayReloadTyped(requestID, jsonOut)
+	case "gateway.status":
+		return a.gatewayStatusTyped(jsonOut)
+	case "doctor":
+		return a.doctorTyped(jsonOut)
+	default:
+		return fmt.Errorf("unbound typed Cobra handler %q", handler)
+	}
+}
+
+// runCobraHandler is the temporary compatibility bridge for command families
+// that have not yet been migrated to typed Cobra bindings.
 func (a App) runCobraHandler(handler string, args []string) error {
 	switch handler {
 	case "setup":

@@ -78,11 +78,23 @@ func commandAt(root *cobra.Command, path []string) *cobra.Command {
 	return command
 }
 
-func TestCobraTreeIsNotYetTheProductionParser(t *testing.T) {
-	// This delivery only defines the complete future tree. Existing App.Run
-	// characterization tests remain the authority for current parser behavior.
+func TestTypedFoundationLeavesBypassLegacyParserBridge(t *testing.T) {
 	tree := (App{}).NewCommandTree()
-	if tree == nil || tree.Name() != "mosscap" {
-		t.Fatal("missing Cobra tree")
+	for _, path := range []string{
+		"setup", "config show", "config set", "config secret set",
+		"gateway run", "gateway reload", "gateway status", "doctor",
+	} {
+		cmd := commandAt(tree, strings.Fields(path))
+		if cmd == nil {
+			t.Fatalf("missing %q", path)
+		}
+		if !isTypedCobraHandler(cmd.Annotations[annotationHandler]) {
+			t.Errorf("%s is still bound to the legacy parser bridge", path)
+		}
+	}
+	for _, handler := range []string{"task.list", "slack.send", "purge"} {
+		if isTypedCobraHandler(handler) {
+			t.Errorf("%s unexpectedly left the compatibility bridge", handler)
+		}
 	}
 }
