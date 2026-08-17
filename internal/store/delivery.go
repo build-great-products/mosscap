@@ -336,6 +336,15 @@ func (s *Store) ListDeliveries(ctx context.Context, state *DeliveryState, limit 
 	}
 	return out, rows.Err()
 }
+
+// HasPersistedDelivery answers the exact lifecycle question without depending
+// on the bounded operator-facing delivery listing.
+func (s *Store) HasPersistedDelivery(ctx context.Context, taskID string, version int64) (bool, error) {
+	var found int
+	err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pi_deliveries WHERE task_id=? AND task_version=? AND state='persisted')", taskID, version).Scan(&found)
+	return found != 0, err
+}
+
 func (s *Store) GetDelivery(ctx context.Context, selector string) (Delivery, error) {
 	x, err := getDelivery(ctx, s.db, selector)
 	return x.Delivery, err

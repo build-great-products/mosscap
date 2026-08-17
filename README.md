@@ -79,7 +79,7 @@ mosscap trust remove U01234567
 
 Admission also requires the configured workspace and channel, a human sender, and a literal direct mention of the bot. A trusted Slack user can trigger a fully capable local Pi while `/mosscap` is active; these checks are authorization gates, not a sandbox.
 
-Tasks are independent of Slack activity:
+Task state remains locally authoritative. Slack-origin tasks also show a durable lifecycle projection: `:hourglass_flowing_sand:` while queued, then `:eyes:` after Pi has durably persisted the current version; completion removes `:eyes:`. These are separately recorded Slack effects, so an interrupted or ambiguous Slack call remains inspectable rather than being silently retried or atomically replaced.
 
 ```sh
 mosscap task create --text "review the release"

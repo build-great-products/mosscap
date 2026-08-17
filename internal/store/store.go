@@ -867,6 +867,40 @@ func (s *Store) Get(ctx context.Context, selector string) (Task, error) {
 	return getTx(ctx, s.db, selector)
 }
 
+// LatestStateEvent returns the newest task transition matching the optional
+// prior/new-state filters. The boolean is false when no matching transition
+// exists; this is expected for tasks that have never entered or left done.
+func (s *Store) LatestStateEvent(ctx context.Context, taskID string, priorState, newState *task.State) (StateEvent, bool, error) {
+	query := "SELECT event_id,task_id,prior_state,new_state,actor,note,request_id,committed_at FROM task_state_events WHERE task_id=?"
+	args := []any{taskID}
+	if priorState != nil {
+		query += " AND prior_state=?"
+		args = append(args, *priorState)
+	}
+	if newState != nil {
+		query += " AND new_state=?"
+		args = append(args, *newState)
+	}
+	// rowid preserves commit insertion order when a clock yields the same
+	// microsecond for consecutive transitions; event IDs are random.
+	query += " ORDER BY committed_at DESC,rowid DESC LIMIT 1"
+	var event StateEvent
+	var note sql.NullString
+	var committedAt int64
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&event.ID, &event.TaskID, &event.PriorState, &event.NewState, &event.Actor, &note, &event.RequestID, &committedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StateEvent{}, false, nil
+	}
+	if err != nil {
+		return StateEvent{}, false, err
+	}
+	if note.Valid {
+		event.Note = &note.String
+	}
+	event.CommittedAt = time.UnixMicro(committedAt).UTC()
+	return event, true, nil
+}
+
 // List returns one stable updated-at/task-id page. By default done tasks are
 // excluded; an explicit state always takes precedence.
 func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool, limit int, cursor string) ([]Task, string, error) {

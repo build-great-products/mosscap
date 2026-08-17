@@ -219,7 +219,18 @@ func (s *Server) open(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		_, err = op.Recover(ctx)
+		// The first pass recreates interrupted add intents and recovers them.
+		// The second can then prepare and recover dependent removals, but only
+		// where the add was confirmed; failed/ambiguous adds remain blocking.
+		for pass := 0; pass < 2; pass++ {
+			if err = s.reconcileTaskReactions(ctx); err != nil {
+				break
+			}
+			_, err = op.Recover(ctx)
+			if err != nil {
+				break
+			}
+		}
 		release()
 		if err != nil {
 			return err
@@ -540,6 +551,18 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		if err == nil {
 			connection.opened = true
 			result = protocol.DeliveryOpenDTO{PiSessionID: p.PiSessionID, DeliveryCountsDTO: deliveryCountsDTO(counts)}
+			// Observed Pi entries can promote a delivery without a separate
+			// delivery.persisted request after reconnect. Project those exact
+			// persisted versions too.
+			for _, observed := range p.Observed {
+				delivery, getErr := s.store.GetDelivery(ctx, observed.DeliveryID)
+				if getErr != nil || delivery.State != store.DeliveryPersisted || delivery.DeliveryKey != observed.DeliveryKey {
+					continue
+				}
+				if reactionErr := s.deliveredTaskReactions(ctx, delivery.TaskID, delivery.TaskVersion); reactionErr != nil && s.Log != nil {
+					s.Log.Warn("automatic observed-delivery reactions did not confirm", "task_id", delivery.TaskID, "task_version", delivery.TaskVersion, "error", reactionErr)
+				}
+			}
 		}
 	case "delivery.poll":
 		resultType = "delivery_poll"
@@ -584,6 +607,11 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		}
 		if err == nil {
 			result = deliveryDTO(delivery)
+			if r.Command == "delivery.persisted" {
+				if reactionErr := s.deliveredTaskReactions(ctx, delivery.TaskID, delivery.TaskVersion); reactionErr != nil && s.Log != nil {
+					s.Log.Warn("automatic delivered-task reactions did not confirm", "task_id", delivery.TaskID, "task_version", delivery.TaskVersion, "error", reactionErr)
+				}
+			}
 		}
 	case "delivery.close":
 		resultType = "delivery_close"
@@ -797,11 +825,31 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_mutation"
 		result, err = s.store.Update(ctx, r.RequestID, p.Task, p.Text)
+		if err == nil {
+			mutation := result.(store.MutationResult)
+			if mutation.Changed {
+				if reactionErr := s.queueTaskReaction(ctx, mutation.TaskID, mutation.Version); reactionErr != nil && s.Log != nil {
+					s.Log.Warn("automatic queued-task reaction did not confirm", "task_id", mutation.TaskID, "task_version", mutation.Version, "error", reactionErr)
+				}
+			}
+		}
 	case "task.transition":
 		var p protocol.TaskTransitionParams
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_mutation"
 		result, err = s.store.Transition(ctx, r.RequestID, p.Task, task.State(p.State), p.Note)
+		if err == nil {
+			mutation := result.(store.MutationResult)
+			if mutation.Changed && mutation.State == task.Done {
+				if reactionErr := s.completedTaskReaction(ctx, mutation.TaskID, mutation.Version); reactionErr != nil && s.Log != nil {
+					s.Log.Warn("automatic completed-task reaction did not confirm", "task_id", mutation.TaskID, "task_version", mutation.Version, "error", reactionErr)
+				}
+			} else if mutation.Changed {
+				if reactionErr := s.restoreTaskReaction(ctx, mutation.TaskID, mutation.Version); reactionErr != nil && s.Log != nil {
+					s.Log.Warn("automatic reopened-task reaction did not confirm", "task_id", mutation.TaskID, "task_version", mutation.Version, "error", reactionErr)
+				}
+			}
+		}
 	case "task.reply":
 		var p protocol.TaskReplyParams
 		_ = json.Unmarshal(r.Params, &p)
@@ -863,6 +911,11 @@ func (s *Server) taskReply(ctx context.Context, requestID string, p protocol.Tas
 	transition, err := s.store.Transition(ctx, taskReplyDoneRequestID(requestID), source.TaskID, task.Done, nil)
 	if err != nil {
 		return protocol.TaskReplyDTO{}, err
+	}
+	if transition.Changed {
+		if reactionErr := s.completedTaskReaction(ctx, transition.TaskID, transition.Version); reactionErr != nil && s.Log != nil {
+			s.Log.Warn("automatic completed-task reaction did not confirm", "task_id", transition.TaskID, "task_version", transition.Version, "error", reactionErr)
+		}
 	}
 	m := mutationDTO(transition)
 	out.Task = &m

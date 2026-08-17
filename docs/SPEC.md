@@ -59,7 +59,7 @@ The trusted-user set lives in SQLite, may be empty, and changes immediately afte
 
 A task has a unique opaque ID, positive monotonic content version, current text, `open`/`working`/`done` state, timestamps, and a local or Slack source. Previous text is not retained.
 
-Creation yields `open`. Explicit transitions may move between all three states; same-state transitions are idempotent. Entering `done` sets `done_at`; leaving it clears `done_at`. State-only changes do not increment content version or cause Slack activity.
+Creation yields `open`. Explicit transitions may move between all three states; same-state transitions are idempotent. Entering `done` sets `done_at`; leaving it clears `done_at`. State-only changes do not increment content version. For Slack-origin tasks, entering `done` removes the current lifecycle reaction and reopening restores the reaction implied by durable delivery evidence; state transitions do not otherwise post or alter Slack content.
 
 An initial Slack message is admitted only when all of these hold:
 
@@ -72,6 +72,8 @@ For each identifiable envelope, the gateway must deduplicate and commit the admi
 An admitted message creates at most one task. A meaningful newer source edit replaces current text/attachment metadata and increments version. Stale edits must not roll content backward. Source deletion preserves task text and state while recording deletion metadata. Incoming attachments are metadata-only until explicitly retrieved.
 
 Configured-channel events rejected as untrusted must prepare a deduplicated `no_entry` reaction before acknowledgement. Failure or ambiguity of that reaction must remain inspectable and must not admit the event.
+
+An admitted Slack task version prepares an `hourglass_flowing_sand` queued reaction before acknowledgement. Once that exact latest version is durably recorded as `persisted` by Pi, Mosscap prepares ordered effects to add `eyes` and then remove the queued reaction; entering `done` removes whichever current lifecycle marker applies, and each later reopening restores the appropriate marker with a distinct durable intent. A meaningful edit invalidates an older persisted version by adding its new queued marker before removing `eyes`. These are Slack projections, not task-state transactions: duplicate delivery/restart reuses an intent, and a failed or ambiguous submission is inspectable and is never automatically retried. The remove/add replacement is explicitly not atomic.
 
 ## 5. Pi delivery
 

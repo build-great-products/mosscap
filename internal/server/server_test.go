@@ -312,6 +312,237 @@ func newTaskReplyServer(t *testing.T, ledger *store.Store, steps ...fake.Step) (
 	return &Server{store: ledger, runtime: runtime}, web
 }
 
+func TestSlackTaskReactionLifecycleUsesDurableOrderedEffects(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	source := newTaskReplySource(t, ledger, "reaction-lifecycle")
+	s, web := newTaskReplyServer(t, ledger,
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: queuedTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.RemoveReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: queuedTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.RemoveReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+	)
+	if err := s.queueTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	work, _, err := ledger.PollDelivery(ctx, "reaction-session", "reaction-connection")
+	if err != nil || work == nil {
+		t.Fatalf("delivery work=%+v err=%v", work, err)
+	}
+	if _, err = ledger.MarkDeliveryPersisted(ctx, "reaction-persisted", "reaction-connection", work.Delivery.ID, work.Delivery.DeliveryKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.deliveredTaskReactions(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ledger.Transition(ctx, "reaction-lifecycle-done", source.TaskID, task.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completedTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	effects, err := ledger.ListSlackEffects(ctx, nil, 10)
+	if err != nil || len(effects) != 4 {
+		t.Fatalf("effects=%+v err=%v", effects, err)
+	}
+	for _, effect := range effects {
+		if effect.State != store.SlackEffectConfirmed {
+			t.Fatalf("effect not confirmed: %+v", effect)
+		}
+	}
+	if err := s.queueTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	if len(web.Calls()) != 12 { // verification plus exactly four preflight/write pairs
+		t.Fatalf("duplicate lifecycle action made a Slack call: %+v", web.Calls())
+	}
+}
+
+func TestTaskReactionRecoveryDoesNotRemoveQueueWhenDeliveredAddFails(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	source := newTaskReplySource(t, ledger, "reaction-recovery-order")
+	s, web := newTaskReplyServer(t, ledger,
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: queuedTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}, Err: slackapi.NewExternalError(slackapi.ReasonRejected, slackapi.DiagnosticRejected, "", nil)},
+	)
+	if err = s.queueTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	work, _, err := ledger.PollDelivery(ctx, "recovery-session", "recovery-connection")
+	if err != nil || work == nil {
+		t.Fatalf("delivery work=%+v err=%v", work, err)
+	}
+	if _, err = ledger.MarkDeliveryPersisted(ctx, "recovery-persisted", "recovery-connection", work.Delivery.ID, work.Delivery.DeliveryKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.reconcileTaskReactions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	op, release, err := s.ops()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = op.Recover(ctx)
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.reconcileTaskReactions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	effects, err := ledger.ListSlackEffects(ctx, nil, 10)
+	if err != nil || len(effects) != 2 || effects[1].State != store.SlackEffectFailed {
+		t.Fatalf("effects=%+v err=%v", effects, err)
+	}
+	for _, effect := range effects {
+		if effect.Kind == store.SlackEffectUnreact {
+			t.Fatalf("queue removal prepared despite failed delivered add: %+v", effect)
+		}
+	}
+	if len(web.Calls()) != 8 { // verification plus two preflight/write pairs
+		t.Fatalf("unexpected recovery calls: %+v", web.Calls())
+	}
+}
+
+func TestTaskReactionProjectionSkipsStaleDoneAndLocalTasks(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	source := newTaskReplySource(t, ledger, "reaction-races")
+	work, _, err := ledger.PollDelivery(ctx, "race-session", "race-connection")
+	if err != nil || work == nil {
+		t.Fatalf("delivery work=%+v err=%v", work, err)
+	}
+	// The v1 delivery persists after the current source task has become v2.
+	updated, err := ledger.Update(ctx, "reaction-race-update", source.TaskID, "new source text")
+	if err != nil || updated.Version != source.TaskVersion+1 {
+		t.Fatalf("update=%+v err=%v", updated, err)
+	}
+	if _, err = ledger.MarkDeliveryPersisted(ctx, "reaction-race-persisted", "race-connection", work.Delivery.ID, work.Delivery.DeliveryKey); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: ledger}
+	if err := s.deliveredTaskReactions(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	// Completion is also terminal for later delivery projection.
+	if _, err = ledger.Transition(ctx, "reaction-race-done", source.TaskID, task.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.deliveredTaskReactions(ctx, source.TaskID, updated.Version); err != nil {
+		t.Fatal(err)
+	}
+	local, err := ledger.Create(ctx, "reaction-race-local", "local task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.queueTaskReaction(ctx, local.TaskID, local.Version); err != nil {
+		t.Fatalf("local lifecycle projection should be a silent no-op: %v", err)
+	}
+	effects, err := ledger.ListSlackEffects(ctx, nil, 10)
+	if err != nil || len(effects) != 0 {
+		t.Fatalf("stale, done, and local projections must not prepare effects: %+v err=%v", effects, err)
+	}
+}
+
+func TestReopenedSlackTaskRestoresDeliveredReaction(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	source := newTaskReplySource(t, ledger, "reaction-reopen")
+	s, web := newTaskReplyServer(t, ledger,
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: queuedTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.RemoveReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: queuedTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.RemoveReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.RemoveReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/message"},
+		fake.Step{Operation: fake.AddReaction, Request: slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: deliveredTaskReaction}},
+	)
+	if err := s.queueTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	work, _, err := ledger.PollDelivery(ctx, "reopen-session", "reopen-connection")
+	if err != nil || work == nil {
+		t.Fatalf("delivery work=%+v err=%v", work, err)
+	}
+	if _, err = ledger.MarkDeliveryPersisted(ctx, "reopen-persisted", "reopen-connection", work.Delivery.ID, work.Delivery.DeliveryKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.deliveredTaskReactions(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ledger.Transition(ctx, "reopen-done", source.TaskID, task.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.completedTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := ledger.Transition(ctx, "reopen-open", source.TaskID, task.Open, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.restoreTaskReaction(ctx, opened.TaskID, opened.Version); err != nil {
+		t.Fatal(err)
+	}
+	// A delayed callback from the prior completion must not remove the marker
+	// after the task has reopened.
+	if err = s.completedTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	if len(web.Calls()) != 14 {
+		t.Fatalf("stale completion changed reopened marker: %+v", web.Calls())
+	}
+	if _, err = ledger.Transition(ctx, "reopen-done-again", source.TaskID, task.Done, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.completedTaskReaction(ctx, source.TaskID, source.TaskVersion); err != nil {
+		t.Fatal(err)
+	}
+	opened, err = ledger.Transition(ctx, "reopen-open-again", source.TaskID, task.Open, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.restoreTaskReaction(ctx, opened.TaskID, opened.Version); err != nil {
+		t.Fatal(err)
+	}
+	effects, err := ledger.ListSlackEffects(ctx, nil, 10)
+	if err != nil || len(effects) != 7 || effects[6].Emoji != deliveredTaskReaction || effects[6].State != store.SlackEffectConfirmed {
+		t.Fatalf("reopened task did not restore delivered marker per cycle: %+v err=%v", effects, err)
+	}
+	if len(web.Calls()) != 18 { // verification plus seven preflight/write pairs
+		t.Fatalf("each reopen did not issue a fresh delivered reaction: %+v", web.Calls())
+	}
+}
+
 func TestTaskReplyConfirmedSuccessReplaysAndConsumesReplyRequestID(t *testing.T) {
 	ctx := context.Background()
 	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
