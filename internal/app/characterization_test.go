@@ -37,7 +37,8 @@ func TestCommandTreeCharacterization(t *testing.T) {
 				t.Fatalf("%s help exit=%d stderr=%q", branch, exit, stderr.String())
 			}
 			for _, child := range children {
-				if !strings.Contains(stdout.String(), "\n  "+child+"\n") {
+				name := strings.Fields(child)[0]
+				if !strings.Contains(stdout.String(), "\n  "+name+" ") {
 					t.Errorf("%s help omitted %q:\n%s", branch, child, stdout.String())
 				}
 			}
@@ -57,7 +58,7 @@ func TestCommandTreeCharacterization(t *testing.T) {
 		t.Run(strings.Join(leaf, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			args := append(append([]string(nil), leaf...), "--help")
-			if exit := (App{Out: &stdout, Err: &stderr, Version: "test"}).Run(context.Background(), args); exit != ExitSuccess || !strings.HasPrefix(stdout.String(), "Usage: mosscap ") || stderr.Len() != 0 {
+			if exit := (App{Out: &stdout, Err: &stderr, Version: "test"}).Run(context.Background(), args); exit != ExitSuccess || !strings.Contains(stdout.String(), "Usage:\n") || stderr.Len() != 0 {
 				t.Fatalf("help exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
 			}
 		})

@@ -81,43 +81,21 @@ func (a App) Execute(_ context.Context, args []string) error {
 	if a.Version == "" {
 		a.Version = "devel"
 	}
-	if len(args) == 0 || isHelp(args[0]) {
-		a.printRootHelp()
-		return nil
-	}
-	if args[0] == "--version" || args[0] == "version" {
-		if len(args) != 1 {
-			return usage("version accepts no arguments")
+	root := a.NewCommandTree()
+	root.SetArgs(args)
+	root.SetOut(a.Out)
+	root.SetErr(a.Err)
+	if err := root.Execute(); err != nil {
+		root.SetOut(a.Err)
+		var ce *commandError
+		if errors.As(err, &ce) {
+			_ = root.Usage()
+			return ce
 		}
-		fmt.Fprintln(a.Out, a.Version)
-		return nil
+		_ = root.Usage()
+		return usage(err.Error())
 	}
-	switch args[0] {
-	case "setup":
-		return a.setup("", args[1:])
-	case "config":
-		return a.config("", args[1:])
-	case "doctor":
-		return a.doctorCommand("", args[1:])
-	case "gateway":
-		return a.gateway("", args[1:])
-	case "trust":
-		return a.trust(args[1:])
-	case "purge":
-		return a.purge(args[1:])
-	case "task":
-		return a.task("", args[1:])
-	case "slack":
-		return a.slack(args[1:])
-	case "effect":
-		return a.effect(args[1:])
-	case "file":
-		return a.file(args[1:])
-	case "delivery":
-		return a.delivery(args[1:])
-	default:
-		return usage(fmt.Sprintf("unknown command %q", args[0]))
-	}
+	return nil
 }
 func (a App) setup(_ string, args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
@@ -193,7 +171,7 @@ func (a App) configSet(_ string, args []string) error {
 	j := fs.Bool("json", false, "")
 	h := fs.Bool("help", false, "")
 	fs.BoolVar(h, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return usage(err.Error())
 	}
 	if *h {
@@ -230,7 +208,7 @@ func (a App) configSecret(_ string, args []string) error {
 	stdin := fs.Bool("stdin", false, "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *help {
@@ -730,7 +708,7 @@ func (a App) trust(args []string) error {
 	h := fs.Bool("help", false, "")
 	fs.BoolVar(h, "h", false, "")
 	requestID := fs.String("request-id", "", "")
-	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *h {
@@ -848,7 +826,7 @@ func (a App) task(_ string, args []string) error {
 	state := fs.String("state", "", "")
 	all := fs.Bool("all", false, "")
 	limit := fs.Int("limit", 0, "")
-	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *h {
@@ -982,27 +960,6 @@ func (a App) task(_ string, args []string) error {
 	return a.render(out, *j)
 }
 
-// reorderTaskFlags allows the documented TASK-before-flags form while keeping
-// the standard library flag parser for all option validation.
-func reorderTaskFlags(args []string) []string {
-	valueFlags := map[string]bool{"--text": true, "--text-file": true, "--comment": true, "--request-id": true, "--note": true, "--state": true, "--limit": true, "--thread": true, "--task": true, "--reason": true, "--file": true, "--output": true}
-	flags := make([]string, 0, len(args))
-	positionals := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "-") {
-			flags = append(flags, arg)
-			if valueFlags[arg] && i+1 < len(args) {
-				i++
-				flags = append(flags, args[i])
-			}
-			continue
-		}
-		positionals = append(positionals, arg)
-	}
-	return append(flags, positionals...)
-}
-
 func hasCapability(capabilities []string, required string) bool {
 	for _, capability := range capabilities {
 		if capability == required {
@@ -1045,7 +1002,7 @@ func (a App) taskReply(args []string) error {
 	requestID := fs.String("request-id", "", "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return usage(err.Error())
 	}
 	if *help {

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
@@ -35,8 +36,17 @@ func (a App) NewCommandTree() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       a.Version,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.AddCommand(&cobra.Command{Use: "version", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), a.Version)
+		return err
+	}})
 	root.AddCommand(commandBranch("config", "Inspect or stage configuration."), commandBranch("gateway", "Run or inspect the local gateway."), commandBranch("trust", "Manage trusted Slack users."), commandBranch("task", "Manage durable tasks."), commandBranch("slack", "Read and operate in the configured Slack channel."), commandBranch("effect", "Inspect durable Slack effects."), commandBranch("file", "Inspect or retrieve admitted Slack files."), commandBranch("delivery", "Inspect and recover Pi delivery attempts."))
 	findCommand(root, []string{"config"}).AddCommand(commandBranch("secret", "Manage private Slack credentials."))
 	root.AddCommand(a.cobraLeaf([]string{"setup"}, "Create private local configuration and state directories.", "mosscap setup [--json]", true, "", "setup", []flagSpec{boolFlag("json", "Render the result as JSON.")}, nil))
@@ -64,14 +74,18 @@ type flagSpec struct {
 	name, usage string
 	bool        bool
 	integer     bool
+	repeat      bool
 }
 
 func stringFlag(name, usage string) flagSpec { return flagSpec{name: name, usage: usage} }
-func intFlag(name, usage string) flagSpec    { return flagSpec{name: name, usage: usage, integer: true} }
-func boolFlag(name, usage string) flagSpec   { return flagSpec{name: name, usage: usage, bool: true} }
+func repeatStringFlag(name, usage string) flagSpec {
+	return flagSpec{name: name, usage: usage, repeat: true}
+}
+func intFlag(name, usage string) flagSpec  { return flagSpec{name: name, usage: usage, integer: true} }
+func boolFlag(name, usage string) flagSpec { return flagSpec{name: name, usage: usage, bool: true} }
 
 func commandBranch(use, short string) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs}
+	return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 }
 func findCommand(root *cobra.Command, path []string) *cobra.Command {
 	c := root
@@ -92,11 +106,8 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 		commandUse = strings.TrimPrefix(commandUse, strings.Join(path[:len(path)-1], " ")+" ")
 	}
 	cmd := &cobra.Command{Use: commandUse, Short: short, Long: short, Example: "  " + use, Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
-	cmd.RunE = func(_ *cobra.Command, _ []string) error {
-		// A handler is registered for every future leaf, but this tree must not
-		// delegate to the legacy parser: Cobra has already consumed its flags.
-		// Step 1.3 replaces this guard atomically with the registered handler.
-		return fmt.Errorf("Cobra command tree is not active")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return a.runCobraHandler(handler, canonicalArgs(cmd, args))
 	}
 	for _, f := range flags {
 		switch {
@@ -104,22 +115,96 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 			cmd.Flags().Bool(f.name, false, f.usage)
 		case f.integer:
 			cmd.Flags().Int(f.name, 0, f.usage)
+		case f.repeat:
+			cmd.Flags().StringArray(f.name, nil, f.usage)
 		default:
 			cmd.Flags().String(f.name, "", f.usage)
 		}
-		if !f.bool {
-			_ = cmd.Flags().SetAnnotation(f.name, cobra.BashCompOneRequiredFlag, nil)
-		}
 	}
-	for _, name := range required {
-		_ = cmd.MarkFlagRequired(name)
-	}
+	// Required combinations are validated by the request handlers so their
+	// established, command-specific diagnostics remain intact.
 	for _, pair := range [][2]string{{"text", "text-file"}, {"state", "all"}, {"dry-run", "confirm"}} {
 		if cmd.Flags().Lookup(pair[0]) != nil && cmd.Flags().Lookup(pair[1]) != nil {
 			cmd.MarkFlagsMutuallyExclusive(pair[0], pair[1])
 		}
 	}
 	return cmd
+}
+
+// canonicalArgs gives the business handlers flags-first input after Cobra has
+// performed all command selection and option parsing. Keeping positional values
+// separate is what permits options on either side of selectors.
+func canonicalArgs(cmd *cobra.Command, args []string) []string {
+	out := make([]string, 0, len(args)+cmd.Flags().NFlag()*2)
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if !f.Changed {
+			return
+		}
+		if f.Value.Type() == "bool" {
+			out = append(out, "--"+f.Name+"="+f.Value.String())
+			return
+		}
+		if f.Value.Type() == "stringArray" {
+			values, _ := cmd.Flags().GetStringArray(f.Name)
+			for _, value := range values {
+				out = append(out, "--"+f.Name, value)
+			}
+			return
+		}
+		out = append(out, "--"+f.Name, f.Value.String())
+	})
+	if len(args) != 0 {
+		// The second-stage compatibility handlers use flag.FlagSet, whose parser
+		// must not reinterpret a positional value beginning with '-'. Cobra has
+		// already identified these as operands, including after a user-supplied
+		// end-of-options marker.
+		out = append(out, "--")
+	}
+	return append(out, args...)
+}
+
+// runCobraHandler is the complete binding between Cobra leaves and the
+// established request-construction handlers. Cobra exclusively owns parsing;
+// handlers receive only normalized, flags-first operands.
+func (a App) runCobraHandler(handler string, args []string) error {
+	switch handler {
+	case "setup":
+		return a.setup("", args)
+	case "doctor":
+		return a.doctorCommand("", args)
+	case "purge":
+		return a.purge(args)
+	case "config.show":
+		return a.configShow("", args)
+	case "config.set":
+		return a.configSet("", args)
+	case "config.secret.set":
+		return a.configSecret("", append([]string{"set"}, args...))
+	case "gateway.run":
+		return a.gateway("", append([]string{"run"}, args...))
+	case "gateway.reload":
+		return a.gatewayReload(args)
+	case "gateway.status":
+		return a.gatewayStatus("", args)
+	case "trust.list", "trust.add", "trust.remove":
+		return a.trust(append([]string{strings.TrimPrefix(handler, "trust.")}, args...))
+	case "task.reply":
+		return a.taskReply(args)
+	case "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done":
+		return a.task("", append([]string{strings.TrimPrefix(handler, "task.")}, args...))
+	case "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
+		return a.slackCommand(strings.TrimPrefix(handler, "slack."), args)
+	case "effect.list", "effect.inspect", "effect.retry":
+		return a.effect(append([]string{strings.TrimPrefix(handler, "effect.")}, args...))
+	case "file.show":
+		return a.file(append([]string{"show"}, args...))
+	case "file.get":
+		return a.fileGet(args)
+	case "delivery.list", "delivery.inspect", "delivery.requeue":
+		return a.delivery(append([]string{strings.TrimPrefix(handler, "delivery.")}, args...))
+	default:
+		return fmt.Errorf("unbound Cobra handler %q", handler)
+	}
 }
 
 func expectedArgs(handler string) int {
@@ -159,8 +244,8 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"task", "reply"}, "Reply to a Slack task, optionally completing it after confirmation.", "mosscap task reply TASK (--text TEXT|--text-file PATH) [--done] [--request-id ID] [--json]", false, protocol.CapabilityTaskReply, "task.reply", append(textFlags(), boolFlag("done", "Complete only after Slack confirms the reply.")), nil},
 	{[]string{"slack", "history"}, "Read recent messages from the configured Slack channel.", "mosscap slack history [--limit N] [--json]", true, "slack_reads", "slack.history", []flagSpec{intFlag("limit", "Maximum messages to return."), boolFlag("json", "Render messages as JSON.")}, nil},
 	{[]string{"slack", "thread"}, "Read a Slack message thread.", "mosscap slack thread THREAD_TS [--json]", true, "slack_reads", "slack.thread", []flagSpec{boolFlag("json", "Render messages as JSON.")}, nil},
-	{[]string{"slack", "send"}, "Send a Slack message or threaded reply.", "mosscap slack send [--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.send", append(textFlags(), stringFlag("thread", "Reply thread timestamp."), stringFlag("task", "Related durable task."), stringFlag("file", "Regular file to upload; repeatable.")), nil},
-	{[]string{"slack", "file"}, "Upload a file to the configured Slack channel.", "mosscap slack file [--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK] [--request-id ID] [--json]", false, protocol.CapabilityFileTransfer, "slack.file", []flagSpec{stringFlag("thread", "Reply thread timestamp."), stringFlag("file", "Regular file to upload."), stringFlag("comment", "Optional file comment."), stringFlag("task", "Related durable task."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"file"}},
+	{[]string{"slack", "send"}, "Send a Slack message or threaded reply.", "mosscap slack send [--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.send", append(textFlags(), stringFlag("thread", "Reply thread timestamp."), stringFlag("task", "Related durable task."), repeatStringFlag("file", "Regular file to upload; repeatable.")), nil},
+	{[]string{"slack", "file"}, "Upload a file to the configured Slack channel.", "mosscap slack file [--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK] [--request-id ID] [--json]", false, protocol.CapabilityFileTransfer, "slack.file", []flagSpec{stringFlag("thread", "Reply thread timestamp."), repeatStringFlag("file", "Regular file to upload."), stringFlag("comment", "Optional file comment."), stringFlag("task", "Related durable task."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"file"}},
 	{[]string{"slack", "edit"}, "Replace a Slack message's text.", "mosscap slack edit MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.edit", append(textFlags(), stringFlag("task", "Related durable task.")), nil},
 	{[]string{"slack", "delete"}, "Delete a Slack message with an audit reason.", "mosscap slack delete MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.delete", []flagSpec{stringFlag("reason", "Required audit reason."), stringFlag("task", "Related durable task."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 	{[]string{"slack", "react"}, "Add a reaction to a Slack message.", "mosscap slack react MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.react", taskMutationFlags(), nil},

@@ -41,7 +41,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 	limit := fs.Int("limit", 50, "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return usage(err.Error())
 	}
 	if *help {
@@ -169,7 +169,7 @@ func (a App) effect(args []string) error {
 	requestID := fs.String("request-id", "", "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *help {
@@ -245,7 +245,7 @@ func (a App) file(args []string) error {
 	jsonOut := fs.Bool("json", false, "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *help {

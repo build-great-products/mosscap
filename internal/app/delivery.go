@@ -28,7 +28,7 @@ func (a App) delivery(args []string) error {
 	state := fs.String("state", "", "")
 	reason := fs.String("reason", "", "")
 	requestID := fs.String("request-id", "", "")
-	if err := fs.Parse(reorderTaskFlags(args[1:])); err != nil {
+	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *help {

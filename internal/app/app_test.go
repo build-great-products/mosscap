@@ -70,7 +70,7 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 			if got != ExitSuccess {
 				t.Fatalf("Run(%q) exit = %d, stderr = %q", args, got, stderr.String())
 			}
-			if !strings.HasPrefix(stdout.String(), "Usage: mosscap") {
+			if !strings.Contains(stdout.String(), "Usage:\n") {
 				t.Fatalf("help = %q, want usage", stdout.String())
 			}
 			if stderr.Len() != 0 {
@@ -252,7 +252,7 @@ func TestSecretCredentialInputBoundsAndFieldValidation(t *testing.T) {
 func TestAlternateConfigPathIsNotAuthority(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	got := (App{Out: &stdout, Err: &stderr}).Run(context.Background(), []string{"--config", "/tmp/mosscap.toml", "task", "--help"})
-	if got != ExitUsage || stdout.Len() != 0 || !strings.Contains(stderr.String(), "unknown command") {
+	if got != ExitUsage || stdout.Len() != 0 || !strings.Contains(stderr.String(), "unknown flag") {
 		t.Fatalf("alternate config path: exit=%d stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
 }
@@ -366,7 +366,7 @@ func TestUsageErrors(t *testing.T) {
 	if got := a.Run(context.Background(), []string{"unknown"}); got != ExitUsage {
 		t.Fatalf("unknown exit = %d, want %d", got, ExitUsage)
 	}
-	if !strings.HasPrefix(stderr.String(), "usage:") {
-		t.Fatalf("stderr = %q, want usage error", stderr.String())
+	if !strings.Contains(stderr.String(), "usage:") || !strings.Contains(stderr.String(), "Usage:") {
+		t.Fatalf("stderr = %q, want usage error and usage", stderr.String())
 	}
 }

@@ -24,7 +24,7 @@ func (a App) fileGet(args []string) error {
 	requestID := fs.String("request-id", "", "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
-	if err := fs.Parse(reorderTaskFlags(args)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return usage(err.Error())
 	}
 	if *help {
