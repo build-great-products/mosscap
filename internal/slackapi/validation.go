@@ -18,6 +18,7 @@ const (
 	MaxFiles          = 1000
 	MaxReadLimit      = 100
 	MaxEmojiBytes     = 100
+	MaxUserNameBytes  = 128
 )
 
 // ValidateTeamID validates an immutable Slack workspace ID.
@@ -25,6 +26,15 @@ func ValidateTeamID(value string) error { return validatePrefixedID(value, "T") 
 
 // ValidateChannelID validates a public/private Slack channel ID.
 func ValidateChannelID(value string) error { return validatePrefixedID(value, "CG") }
+
+// ValidateUserName bounds presentation-only Slack usernames and rejects
+// terminal control characters.
+func ValidateUserName(value string) error {
+	if value == "" || len(value) > MaxUserNameBytes || !utf8.ValidString(value) || strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return errors.New("invalid Slack username")
+	}
+	return nil
+}
 
 // ValidateUserID validates a workspace or enterprise Slack user ID.
 func ValidateUserID(value string) error { return validatePrefixedID(value, "UW") }

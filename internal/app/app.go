@@ -490,7 +490,7 @@ func (a App) renderDoctor(report doctor.Report, jsonOut bool) error {
 		return a.render(report, true)
 	}
 
-	color := doctorColorEnabled(a.Out)
+	color := colorEnabled(a.Out)
 	fmt.Fprintf(a.Out, "Doctor: %s\n\n", formatDoctorStatus(report.Overall, color))
 	nameWidth := 0
 	for _, check := range report.Checks {
@@ -538,7 +538,7 @@ func formatDoctorStatus(status doctor.CheckStatus, color bool) string {
 	return icon
 }
 
-func doctorColorEnabled(w io.Writer) bool {
+func colorEnabled(w io.Writer) bool {
 	if _, disabled := os.LookupEnv("NO_COLOR"); disabled || os.Getenv("TERM") == "dumb" {
 		return false
 	}
@@ -776,8 +776,47 @@ func (a App) trust(args []string) error {
 	}
 	if mutation {
 		result = map[string]any{"request_id": *requestID, "result": result}
+		return a.render(result, *j)
 	}
-	return a.render(result, *j)
+	b, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	var users protocol.TrustedUserListDTO
+	if err := json.Unmarshal(b, &users); err != nil {
+		return err
+	}
+	return a.renderTrustedUsers(users, *j)
+}
+
+func (a App) renderTrustedUsers(users protocol.TrustedUserListDTO, jsonOut bool) error {
+	if jsonOut {
+		return a.render(users, true)
+	}
+
+	color := colorEnabled(a.Out)
+	fmt.Fprintf(a.Out, "Trusted Slack users: %d\n\n", len(users.SlackUserIDs))
+	if len(users.SlackUserIDs) == 0 {
+		fmt.Fprintln(a.Out, "  No users are trusted.")
+		return nil
+	}
+	for _, userID := range users.SlackUserIDs {
+		bullet, formattedID := "•", userID
+		name := users.SlackUserNames[userID]
+		formattedName := ""
+		if name != "" {
+			formattedName = "  @" + name
+		}
+		if color {
+			bullet = "\x1b[32m" + bullet + "\x1b[0m"
+			formattedID = "\x1b[1;34m" + formattedID + "\x1b[0m"
+			if formattedName != "" {
+				formattedName = "  \x1b[36m@" + name + "\x1b[0m"
+			}
+		}
+		fmt.Fprintf(a.Out, "  %s  %s%s\n", bullet, formattedID, formattedName)
+	}
+	return nil
 }
 
 func (a App) task(_ string, args []string) error {

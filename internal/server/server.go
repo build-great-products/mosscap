@@ -658,7 +658,7 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		resultType = "trusted_user_list"
 		var users []string
 		users, err = s.store.ListTrustedUsers(ctx)
-		result = protocol.TrustedUserListDTO{SlackUserIDs: users}
+		result = protocol.TrustedUserListDTO{SlackUserIDs: users, SlackUserNames: s.slackUserNames(ctx, users)}
 	case "trust.add", "trust.remove":
 		var p protocol.TrustMutationParams
 		_ = json.Unmarshal(r.Params, &p)

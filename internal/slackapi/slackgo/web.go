@@ -189,9 +189,15 @@ func (web *Web) User(ctx context.Context, userID string) (slackapi.User, error) 
 	if err := slackapi.ValidateTeamID(response.TeamID); err != nil {
 		return slackapi.User{}, invalidResponse()
 	}
+	if response.Name != "" {
+		if err := slackapi.ValidateUserName(response.Name); err != nil {
+			return slackapi.User{}, invalidResponse()
+		}
+	}
 	return slackapi.User{
 		ID:          response.ID,
 		TeamID:      response.TeamID,
+		Name:        response.Name,
 		Bot:         response.IsBot || response.IsAppUser || response.IsConnectorBot || response.IsWorkflowBot,
 		Deactivated: response.Deleted,
 	}, nil

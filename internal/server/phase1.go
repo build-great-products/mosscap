@@ -332,6 +332,33 @@ func settingsValid(settings filetransfer.Settings) bool {
 	return settings.MaximumBytes > 0 && settings.MaximumLiveFiles > 0 && settings.Lifetime > 0
 }
 
+// slackUserNames resolves presentation-only usernames from the active Slack
+// runtime. Trust remains entirely ID-based, and an unavailable lookup never
+// prevents the committed allowlist from being returned.
+func (s *Server) slackUserNames(ctx context.Context, userIDs []string) map[string]string {
+	if s.runtime == nil || len(userIDs) == 0 {
+		return nil
+	}
+	snapshot, err := s.runtime.Acquire()
+	if err != nil {
+		return nil
+	}
+	defer snapshot.Release()
+
+	names := make(map[string]string, len(userIDs))
+	for _, userID := range userIDs {
+		user, err := snapshot.Web.User(ctx, userID)
+		if err != nil || user.ID != userID || user.TeamID != snapshot.TeamID || user.Bot || user.Deactivated || slackapi.ValidateUserName(user.Name) != nil {
+			continue
+		}
+		names[userID] = user.Name
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
 func (s *Server) phase1Doctor(ctx context.Context) []doctor.Check {
 	s.slackDiagnosticMu.RLock()
 	verificationCode, priorRuntimeRetained := s.slackVerificationCode, s.slackVerificationHeld

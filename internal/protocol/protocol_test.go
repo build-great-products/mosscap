@@ -107,8 +107,8 @@ func TestTrustAndReloadResultGolden(t *testing.T) {
 	if got := mustJSON(t, trust); got != `{"slack_user_id":"U01234567","trusted":true,"changed":true}` {
 		t.Fatalf("trust result = %s", got)
 	}
-	users := TrustedUserListDTO{SlackUserIDs: []string{"U01234567", "U76543210"}}
-	if got := mustJSON(t, users); got != `{"slack_user_ids":["U01234567","U76543210"]}` {
+	users := TrustedUserListDTO{SlackUserIDs: []string{"U01234567", "U76543210"}, SlackUserNames: map[string]string{"U01234567": "george", "U76543210": "moss"}}
+	if got := mustJSON(t, users); got != `{"slack_user_ids":["U01234567","U76543210"],"slack_user_names":{"U01234567":"george","U76543210":"moss"}}` {
 		t.Fatalf("trusted-user list = %s", got)
 	}
 	reload := ConfigReloadDTO{Activated: true, SlackNetworkVerificationDeferred: true, ActiveConfigGeneration: 3, ActiveConfigDigest: "sha256:abc"}

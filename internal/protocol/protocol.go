@@ -468,9 +468,11 @@ type TaskListDTO struct {
 	NextCursor string    `json:"next_cursor,omitempty"`
 }
 
-// TrustedUserListDTO contains lexicographically sorted immutable Slack user IDs.
+// TrustedUserListDTO contains lexicographically sorted immutable Slack user
+// IDs and any presentation-only usernames resolved from the active runtime.
 type TrustedUserListDTO struct {
-	SlackUserIDs []string `json:"slack_user_ids"`
+	SlackUserIDs   []string          `json:"slack_user_ids"`
+	SlackUserNames map[string]string `json:"slack_user_names,omitempty"`
 }
 
 // TrustMutationDTO reports the resulting authorization state for one Slack user.

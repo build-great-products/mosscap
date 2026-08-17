@@ -97,11 +97,12 @@ type Team struct {
 	ID string `json:"id"`
 }
 
-// User contains immutable identity and bot/deactivation flags. Display names
-// are intentionally excluded from the contract.
+// User contains immutable identity, the current Slack username, and
+// bot/deactivation flags. Name is presentation metadata and is never authority.
 type User struct {
 	ID          string `json:"id"`
 	TeamID      string `json:"team_id"`
+	Name        string `json:"name,omitempty"`
 	Bot         bool   `json:"bot"`
 	Deactivated bool   `json:"deactivated"`
 }
