@@ -327,16 +327,34 @@ type DeliveryRequeueDTO struct {
 
 // TaskDTO deliberately represents current task text only; mutation results omit text.
 type TaskDTO struct {
-	TaskID      string          `json:"task_id"`
-	Version     int64           `json:"version"`
-	State       string          `json:"state"`
-	Text        string          `json:"text"`
-	SourceKind  string          `json:"source_kind"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
-	DoneAt      *string         `json:"done_at"`
-	SlackSource *SlackSourceDTO `json:"slack_source,omitempty"`
-	Files       []SlackFileDTO  `json:"files,omitempty"`
+	TaskID       string               `json:"task_id"`
+	Version      int64                `json:"version"`
+	State        string               `json:"state"`
+	Text         string               `json:"text"`
+	SourceKind   string               `json:"source_kind"`
+	CreatedAt    string               `json:"created_at"`
+	UpdatedAt    string               `json:"updated_at"`
+	DoneAt       *string              `json:"done_at"`
+	SlackSource  *SlackSourceDTO      `json:"slack_source,omitempty"`
+	Files        []SlackFileDTO       `json:"files,omitempty"`
+	SlackActions *SlackTaskActionsDTO `json:"slack_actions,omitempty"`
+}
+
+// SlackTaskActionsDTO is the durable recovery state for a Slack-origin task.
+// ReplyStatus is none, prepared, submitted, confirmed, failed, or ambiguous;
+// CompletionStatus is done or not_done. It never contains reply text.
+type SlackTaskActionsDTO struct {
+	ReplyTarget      SlackReplyTargetDTO `json:"reply_target"`
+	ReplyStatus      string              `json:"reply_status"`
+	ReplyEffectID    string              `json:"reply_effect_id,omitempty"`
+	CompletionStatus string              `json:"completion_status"`
+}
+
+// SlackReplyTargetDTO identifies the exact thread to which task replies go.
+type SlackReplyTargetDTO struct {
+	TeamID    string `json:"team_id"`
+	ChannelID string `json:"channel_id"`
+	ThreadTS  string `json:"thread_ts"`
 }
 
 // SlackSourceDTO and SlackFileDTO expose metadata only. They intentionally

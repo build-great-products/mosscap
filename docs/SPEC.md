@@ -504,7 +504,13 @@ Retry of an ambiguous predecessor requires `--confirm-duplicate-risk`. Retry of 
 
 There is no effect cancellation operation.
 
-### 8.5 Independence from tasks
+### 8.5 Task-show action recovery
+
+For a Slack-origin task, `task show --json` includes additive `slack_actions` state. `reply_target` contains the exact durable `team_id`, `channel_id`, and `thread_ts`; `reply_status` is `none`, `prepared`, `submitted`, `confirmed`, `failed`, or `ambiguous`; `reply_effect_id` is present when a matching effect exists; and `completion_status` is `done` or `not_done`, independently derived from the current task state. Reply text and other effect payloads are not included.
+
+A matching reply is a durable `send` effect whose related task, team, channel, and thread all equal the task source. If more than one matches, the selected effect is the latest by `updated_at_us` descending and then `effect_id` descending. This makes confirmed-plus-`not_done`, and failed/ambiguous-plus-`not_done`, explicit recovery states. Local tasks do not have `slack_actions`.
+
+### 8.6 Independence from tasks
 
 Effects may optionally reference a task for audit, but:
 

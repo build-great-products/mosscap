@@ -1208,6 +1208,9 @@ func dto(v any) any {
 			out.SlackSource = slackSourceDTO(*x.SlackSource)
 		}
 		out.Files = slackFileDTOs(x.Files)
+		if x.SlackSource != nil {
+			out.SlackActions = slackTaskActionsDTO(*x.SlackSource, x.LatestReplyEffect, x.Task.State)
+		}
 		return out
 	case store.SlackFile:
 		return slackFileDTO(x)
@@ -1322,6 +1325,22 @@ func taskDTO(t store.Task) protocol.TaskDTO {
 func mutationDTO(m store.MutationResult) protocol.TaskMutationDTO {
 	return protocol.TaskMutationDTO{TaskID: m.TaskID, Version: m.Version, State: string(m.State), Changed: m.Changed, CreatedAt: stamp(m.CreatedAt), UpdatedAt: stamp(m.UpdatedAt)}
 }
+func slackTaskActionsDTO(source store.SlackSource, effect *store.SlackEffect, state task.State) *protocol.SlackTaskActionsDTO {
+	out := &protocol.SlackTaskActionsDTO{
+		ReplyTarget:      protocol.SlackReplyTargetDTO{TeamID: source.TeamID, ChannelID: source.ChannelID, ThreadTS: source.ThreadTS},
+		ReplyStatus:      "none",
+		CompletionStatus: "not_done",
+	}
+	if state == task.Done {
+		out.CompletionStatus = "done"
+	}
+	if effect != nil {
+		out.ReplyStatus = string(effect.State)
+		out.ReplyEffectID = effect.ID
+	}
+	return out
+}
+
 func slackSourceDTO(s store.SlackSource) *protocol.SlackSourceDTO {
 	out := &protocol.SlackSourceDTO{InitialSourceEventID: s.InitialSourceEventID, TeamID: s.TeamID, ChannelID: s.ChannelID, AuthorUserID: s.AuthorUserID, MessageTS: s.MessageTS, ThreadTS: s.ThreadTS, Permalink: s.Permalink, LatestEventAt: stamp(time.UnixMicro(s.LatestEventAtUS))}
 	if s.SourceDeletedAt != nil {

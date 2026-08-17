@@ -55,6 +55,64 @@ func TestTaskReadModelPreservesLocalTasksAndJoinsSlackMetadata(t *testing.T) {
 	}
 }
 
+func TestTaskReadModelLatestSlackReplyEffectIsExactAndDeterministic(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	trustSourceTestUser(t, s)
+	event := sourceTestEvent("Ev-phase1-reply", SlackEventAppMention, 100)
+	admitted, err := s.CommitSlackSourceEvent(ctx, sourceTestPolicy, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() *SlackEffect {
+		t.Helper()
+		model, err := s.GetTaskReadModel(ctx, admitted.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return model.LatestReplyEffect
+	}
+	if effect := read(); effect != nil {
+		t.Fatalf("no reply effect = %+v", effect)
+	}
+	source, err := s.GetSlackSource(ctx, admitted.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Effects must be sends related to this task and exact source thread.
+	prepareEffect(t, s, "phase1-reply-unrelated", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: "1700000009.000001", Text: "unrelated"})
+	prepareEffect(t, s, "phase1-reply-react", SlackEffectIntent{Kind: SlackEffectReact, RelatedTaskID: admitted.TaskID, TargetMessageTS: event.MessageTS, Emoji: "eyes"})
+	if effect := read(); effect != nil {
+		t.Fatalf("unrelated effect selected = %+v", effect)
+	}
+
+	first := prepareEffect(t, s, "phase1-reply-first", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: source.ThreadTS, Text: "secret first"})
+	second := prepareEffect(t, s, "phase1-reply-second", SlackEffectIntent{Kind: SlackEffectSend, RelatedTaskID: admitted.TaskID, ThreadTS: source.ThreadTS, Text: "secret second"})
+	// Equal update timestamps exercise the documented effect-ID tie-breaker.
+	if _, err := s.DB().ExecContext(ctx, "UPDATE slack_effects SET updated_at_us=(SELECT max(created_at_us) FROM slack_effects) WHERE effect_id IN (?,?)", first.ID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	want := first
+	if second.ID > first.ID {
+		want = second
+	}
+	if got := read(); got == nil || got.ID != want.ID || got.State != SlackEffectPrepared {
+		t.Fatalf("prepared latest = %+v, want %s", got, want.ID)
+	}
+	if _, err := s.ClaimSlackEffect(ctx, want.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got == nil || got.ID != want.ID || got.State != SlackEffectSubmitted {
+		t.Fatalf("submitted latest = %+v", got)
+	}
+	if _, err := s.CommitSlackEffectOutcome(ctx, want.ID, SlackEffectOutcome{State: SlackEffectConfirmed, ResponseMessageTS: "1700000001.000001"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got == nil || got.ID != want.ID || got.State != SlackEffectConfirmed {
+		t.Fatalf("confirmed latest = %+v", got)
+	}
+}
+
 func TestTaskReadModelUsesSafeUnambiguousPrefixes(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)

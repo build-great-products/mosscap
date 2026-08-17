@@ -358,6 +358,42 @@ func TestTaskReplyConfirmedSuccessReplaysAndConsumesReplyRequestID(t *testing.T)
 	}
 }
 
+func TestSlackTaskActionsDTOReportsDurableRecoveryStateWithoutReplyText(t *testing.T) {
+	source := store.SlackSource{TeamID: "T012ABC", ChannelID: "C012ABC", ThreadTS: "1699999999.000001"}
+	for _, tc := range []struct {
+		name       string
+		effect     *store.SlackEffect
+		state      task.State
+		reply      string
+		completion string
+	}{
+		{"no reply open", nil, task.Open, "none", "not_done"},
+		{"prepared", &store.SlackEffect{ID: "eff_prepared", State: store.SlackEffectPrepared}, task.Open, "prepared", "not_done"},
+		{"submitted", &store.SlackEffect{ID: "eff_submitted", State: store.SlackEffectSubmitted}, task.Open, "submitted", "not_done"},
+		{"confirmed recovery", &store.SlackEffect{ID: "eff_confirmed", State: store.SlackEffectConfirmed}, task.Working, "confirmed", "not_done"},
+		{"failed open", &store.SlackEffect{ID: "eff_failed", State: store.SlackEffectFailed}, task.Open, "failed", "not_done"},
+		{"ambiguous open", &store.SlackEffect{ID: "eff_ambiguous", State: store.SlackEffectAmbiguous}, task.Open, "ambiguous", "not_done"},
+		{"done", &store.SlackEffect{ID: "eff_done", State: store.SlackEffectConfirmed}, task.Done, "confirmed", "done"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.effect != nil {
+				tc.effect.Text = "secret reply payload"
+			}
+			got := slackTaskActionsDTO(source, tc.effect, tc.state)
+			if got.ReplyStatus != tc.reply || got.CompletionStatus != tc.completion || got.ReplyTarget.TeamID != source.TeamID || got.ReplyTarget.ChannelID != source.ChannelID || got.ReplyTarget.ThreadTS != source.ThreadTS {
+				t.Fatalf("actions = %+v", got)
+			}
+			if tc.effect != nil && got.ReplyEffectID != tc.effect.ID {
+				t.Fatalf("effect ID = %q, want %q", got.ReplyEffectID, tc.effect.ID)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil || bytes.Contains(encoded, []byte("Text")) || bytes.Contains(encoded, []byte("secret")) {
+				t.Fatalf("actions JSON = %s, err=%v", encoded, err)
+			}
+		})
+	}
+}
+
 func TestTaskReplyTerminalSlackOutcomesDoNotCloseTask(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

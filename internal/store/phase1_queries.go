@@ -10,9 +10,10 @@ import (
 // metadata. Local tasks retain their normal Task shape and have no source or
 // incoming files.
 type TaskReadModel struct {
-	Task        Task         `json:"task"`
-	SlackSource *SlackSource `json:"slack_source,omitempty"`
-	Files       []SlackFile  `json:"files,omitempty"`
+	Task              Task         `json:"task"`
+	SlackSource       *SlackSource `json:"slack_source,omitempty"`
+	Files             []SlackFile  `json:"files,omitempty"`
+	LatestReplyEffect *SlackEffect `json:"latest_reply_effect,omitempty"`
 }
 
 // GetTaskReadModel resolves an exact task ID or an unambiguous tsk_ prefix and
@@ -58,7 +59,26 @@ func (s *Store) GetTaskReadModel(ctx context.Context, selector string) (TaskRead
 		return TaskReadModel{}, err
 	}
 	model.Files = files
+	effect, err := latestSlackReplyEffect(ctx, s.db, model.Task.ID, model.SlackSource)
+	if err != nil {
+		return TaskReadModel{}, err
+	}
+	model.LatestReplyEffect = effect
 	return model, nil
+}
+
+// latestSlackReplyEffect selects only durable send effects addressed to this
+// task's exact source thread. "Latest" is updated_at_us descending then
+// effect_id descending, so ties are stable and visible via ReplyEffectID.
+func latestSlackReplyEffect(ctx context.Context, q rowQueryer, taskID string, source *SlackSource) (*SlackEffect, error) {
+	effect, err := scanSlackEffect(q.QueryRowContext(ctx, slackEffectSelect+` WHERE related_task_id=? AND kind='send' AND team_id=? AND channel_id=? AND thread_ts=? ORDER BY updated_at_us DESC,effect_id DESC LIMIT 1`, taskID, source.TeamID, source.ChannelID, source.ThreadTS))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &effect, nil
 }
 
 func scanTaskReadModel(row rowsScanner) (TaskReadModel, error) {
