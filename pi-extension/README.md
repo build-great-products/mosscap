@@ -15,7 +15,13 @@ pnpm typecheck
 Load it from a checked-out Mosscap tree (not as a published package):
 
 ```sh
-pi -e /absolute/path/to/mosscap/pi-extension/src/index.ts
+pi -e /absolute/path/to/mosscap/pi-extension
+```
+
+To install that checkout persistently, use:
+
+```sh
+pi install /absolute/path/to/mosscap/pi-extension
 ```
 
 `/mosscap` opts in the current persisted TUI session, `/mosscap status` shows
