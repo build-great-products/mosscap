@@ -821,10 +821,13 @@ func (a App) renderTrustedUsers(users protocol.TrustedUserListDTO, jsonOut bool)
 
 func (a App) task(_ string, args []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
-		a.printBranchHelp("task", []string{"create", "list", "show", "update", "open", "working", "done"})
+		a.printBranchHelp("task", []string{"create", "list", "show", "update", "open", "working", "done", "reply"})
 		return nil
 	}
 	cmd := args[0]
+	if cmd == "reply" {
+		return a.taskReply(args[1:])
+	}
 	if cmd != "create" && cmd != "list" && cmd != "show" && cmd != "update" && cmd != "open" && cmd != "working" && cmd != "done" {
 		return usage(fmt.Sprintf("unknown task command %q", cmd))
 	}
@@ -1028,7 +1031,59 @@ func remote(err error) error {
 	}
 	return &commandError{ExitUnavailable, err.Error()}
 }
+func (a App) taskReply(args []string) error {
+	fs := newPhase1FlagSet("task reply")
+	jsonOut := fs.Bool("json", false, "")
+	text := fs.String("text", "", "")
+	textFile := fs.String("text-file", "", "")
+	done := fs.Bool("done", false, "")
+	requestID := fs.String("request-id", "", "")
+	help := fs.Bool("help", false, "")
+	fs.BoolVar(help, "h", false, "")
+	if err := fs.Parse(reorderTaskFlags(args)); err != nil {
+		return usage(err.Error())
+	}
+	if *help {
+		fmt.Fprintln(a.Out, "Usage: mosscap task reply TASK (--text TEXT | --text-file PATH) [--done] [--request-id ID] [--json]\n\nReply to the task's durable Slack source thread. --done completes only after Slack confirms the reply; this is resumable, not a cross-system transaction.")
+		return nil
+	}
+	if err := phase1Only(fs, []string{"json", "text", "text-file", "done", "request-id"}); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usage("task reply requires TASK")
+	}
+	t, err := a.phase1Text(*text, *textFile)
+	if err != nil {
+		return err
+	}
+	if *requestID == "" {
+		*requestID, err = identity.NewGenerator(nil).NewRequestID()
+		if err != nil {
+			return err
+		}
+	}
+	c, err := phase1Config()
+	if err != nil {
+		return err
+	}
+	params := protocol.TaskReplyParams{Task: fs.Arg(0), Text: t, Done: *done}
+	if b, e := protocol.EncodeRequest(protocol.Request{ProtocolVersion: protocol.Version, RequestID: *requestID, ClientKind: "cli", ClientVersion: a.Version, Command: "task.reply", Params: mustJSON(params)}); e != nil || len(b) > c.LocalProtocolMaximumFrame {
+		return usage("request exceeds the protocol frame limit")
+	}
+	out, err := a.gatewayCall(c, "task.reply", *requestID, params, protocol.CapabilityTaskReply)
+	if err != nil {
+		return err
+	}
+	out = map[string]any{"request_id": *requestID, "result": out}
+	return a.render(out, *jsonOut)
+}
+
 func (a App) printTaskHelp(cmd string) {
+	if cmd == "reply" {
+		fmt.Fprintln(a.Out, "Usage: mosscap task reply TASK (--text TEXT | --text-file PATH) [--done] [--request-id ID] [--json]")
+		return
+	}
 	fmt.Fprintf(a.Out, "Usage: mosscap task %s [arguments]\n", cmd)
 }
 

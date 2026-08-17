@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -802,6 +803,11 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task_mutation"
 		result, err = s.store.Transition(ctx, r.RequestID, p.Task, task.State(p.State), p.Note)
+	case "task.reply":
+		var p protocol.TaskReplyParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_reply"
+		result, err = s.taskReply(ctx, r.RequestID, p)
 	default:
 		err = errors.New("unsupported command")
 	}
@@ -814,6 +820,64 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 	}
 	return protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: resultType, Result: b}
 }
+
+// taskReply is deliberately a resumable composition, not a cross-system
+// transaction. A deterministic sub-request first durably prepares/executes the
+// Slack effect; only its confirmed state permits the separate SQLite transition.
+func (s *Server) taskReply(ctx context.Context, requestID string, p protocol.TaskReplyParams) (protocol.TaskReplyDTO, error) {
+	source, err := s.store.GetSlackSource(ctx, p.Task)
+	if err != nil {
+		return protocol.TaskReplyDTO{}, err
+	}
+	intent := store.SlackEffectIntent{Kind: store.SlackEffectSend, ThreadTS: source.ThreadTS, Text: p.Text, RelatedTaskID: source.TaskID}
+	prepared, err := s.store.PrepareSlackEffect(ctx, requestID, store.SlackEffectTarget{TeamID: source.TeamID, ChannelID: source.ChannelID}, intent)
+	if err != nil {
+		return protocol.TaskReplyDTO{}, err
+	}
+	effect, err := s.store.GetSlackEffect(ctx, prepared.EffectID)
+	if err != nil {
+		return protocol.TaskReplyDTO{}, err
+	}
+	// A prior confirmed effect is sufficient to recover the SQLite half even
+	// when the gateway is now unavailable; do not re-preflight or re-send it.
+	if effect.State == store.SlackEffectPrepared {
+		op, release, opErr := s.ops()
+		if opErr != nil {
+			return protocol.TaskReplyDTO{}, opErr
+		}
+		defer release()
+		if !op.MatchesTarget(source.TeamID, source.ChannelID) {
+			return protocol.TaskReplyDTO{}, slackops.ErrUnavailable
+		}
+		effect, err = op.Execute(ctx, requestID, intent)
+		if err != nil {
+			return protocol.TaskReplyDTO{}, err
+		}
+	}
+	if effect.State == store.SlackEffectFailed || effect.State == store.SlackEffectAmbiguous {
+		return protocol.TaskReplyDTO{}, &slackops.FailureError{State: effect.State, Diagnostic: effect.DiagnosticCode}
+	}
+	out := protocol.TaskReplyDTO{Effect: slackEffectDTO(effect)}
+	if !p.Done || effect.State != store.SlackEffectConfirmed {
+		return out, nil
+	}
+	transition, err := s.store.Transition(ctx, taskReplyDoneRequestID(requestID), source.TaskID, task.Done, nil)
+	if err != nil {
+		return protocol.TaskReplyDTO{}, err
+	}
+	m := mutationDTO(transition)
+	out.Task = &m
+	return out, nil
+}
+
+// taskReplyDoneRequestID maps a valid reply-intent ID to a distinct bounded
+// local-completion ID. The caller ID is deliberately the Slack send ID, so it
+// remains globally consumed and cannot be reused for another mutation.
+func taskReplyDoneRequestID(requestID string) string {
+	sum := sha256.Sum256([]byte("mosscap.task.reply.done.v1\x00" + requestID))
+	return fmt.Sprintf("req_task_reply_done_%x", sum[:16])
+}
+
 func (s *Server) reload(ctx context.Context, requestID string) (protocol.ConfigReloadDTO, error) {
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()

@@ -82,6 +82,8 @@ func TestTrustAndReloadParamsStrict(t *testing.T) {
 	}{
 		{"list empty", "trust.list", `{}`, true},
 		{"reload empty", "config.reload", `{}`, true},
+		{"task reply", "task.reply", `{"task":"tsk_abcdefghijklmnopqrstuv","text":"reply","done":true}`, true},
+		{"task reply missing text", "task.reply", `{"task":"tsk_abcdefghijklmnopqrstuv"}`, false},
 		{"add valid immutable ID", "trust.add", `{"slack_user_id":"U01234567"}`, true},
 		{"remove valid enterprise ID", "trust.remove", `{"slack_user_id":"W01234567"}`, true},
 		{"empty params reject fields", "trust.list", `{"extra":true}`, false},
@@ -207,7 +209,7 @@ func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
 }
 
 func TestPhase1CapabilitiesAndSafeDTOs(t *testing.T) {
-	for _, capability := range []string{CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer} {
+	for _, capability := range []string{CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityTaskReply} {
 		found := false
 		for _, advertised := range ServerCapabilities {
 			found = found || advertised == capability

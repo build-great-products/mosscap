@@ -45,6 +45,7 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"task", "open", "--help"},
 		{"task", "working", "--help"},
 		{"task", "done", "--help"},
+		{"task", "reply", "--help"},
 		{"slack", "--help"},
 		{"slack", "history", "--help"},
 		{"slack", "thread", "--help"},

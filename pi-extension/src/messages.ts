@@ -30,8 +30,8 @@ export function taskMessage(work: Work, sessionId: string): CustomMessage {
   const heading = slack ? `New Slack task from ${work.source.slack_author_id}` : "New local Mosscap task";
   const sourceLines = slack ? [`Thread: ${work.source.slack_thread_ts}`] : [];
   const actionLines = slack ? [
-    "Reply in Slack:",
-    `mosscap slack send --thread ${work.source.slack_thread_ts} --task ${work.task_id} --request-id ${replyRequestID} --text "REPLY"`,
+    "Reply in Slack and mark the task done after confirmation:",
+    `mosscap task reply ${work.task_id} --request-id ${replyRequestID} --text "REPLY" --done`,
     "",
   ] : [];
   const attachments = work.attached_files ?? [];
@@ -56,9 +56,11 @@ export function taskMessage(work: Work, sessionId: string): CustomMessage {
     ...attachmentLines,
     "",
     ...actionLines,
-    "When finished:",
-    `mosscap task done ${work.task_id} --request-id ${doneRequestID}`,
-    "",
+    ...(slack ? [] : [
+      "When finished:",
+      `mosscap task done ${work.task_id} --request-id ${doneRequestID}`,
+      "",
+    ]),
     "More details:",
     `mosscap task show ${work.task_id} --json`,
   ].join("\n");

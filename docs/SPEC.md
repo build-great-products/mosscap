@@ -613,6 +613,7 @@ mosscap task update TASK (--text TEXT|--text-file PATH)
 mosscap task open TASK [--note TEXT]
 mosscap task working TASK [--note TEXT]
 mosscap task done TASK [--note TEXT]
+mosscap task reply TASK (--text TEXT|--text-file PATH) [--done]
 
 mosscap delivery list [--state pending|leased|inserting|persisted|uncertain|rejected]
 mosscap delivery inspect DELIVERY

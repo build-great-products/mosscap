@@ -55,7 +55,15 @@ mosscap slack react 1700000000.000001 eyes --request-id react-1
 mosscap slack unreact 1700000000.000001 eyes --request-id unreact-1
 ```
 
-Use a stable request ID while resolving an interrupted mutation. Targeted writes preflight the target in the configured channel before recording an effect. Every effect intent is durable before its single Slack call. Reads do not alter SQLite task state, and Slack effects do not transition tasks.
+Use a stable request ID while resolving an interrupted mutation. Targeted writes preflight the target in the configured channel before recording an effect. Every effect intent is durable before its single Slack call. Reads do not alter SQLite task state, and standalone Slack effects do not transition tasks.
+
+For a Slack-origin task, use the resumable composition instead of copying a thread timestamp from task output:
+
+```sh
+mosscap task reply TASK --text 'operator reply' --done --request-id reply-1 --json
+```
+
+`task reply` derives the thread and workspace/channel identity from the durable Slack task source. Its `--request-id` identifies the reply intent and is used directly for the durable Slack send, so global request-ID reuse is rejected when the reply input changes and can never issue another Slack post. It records and confirms the reply effect before applying `--done`; a failed, ambiguous, unavailable, local, or invalid task never closes. Replaying the same reply request with `--done` added after a confirmed send does not post again and resumes the local completion using a bounded derived done-step ID. This is a resumable Slack/SQLite composition, not a cross-system transaction.
 
 ## Failed and ambiguous effects
 

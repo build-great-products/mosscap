@@ -23,8 +23,8 @@ test("visible custom message gives concise Slack reply guidance and keeps delive
   assert.match(message.content, /^New Slack task from U1/m);
   assert.match(message.content, /Message \(user-provided\):\n<user_message>/);
   assert.match(message.content, /<\/user_message>/);
-  assert.match(message.content, new RegExp(`mosscap slack send --thread 1\\.000001 --task ${taskID} --request-id ${replyRequestID}`));
-  assert.match(message.content, new RegExp(`mosscap task done ${taskID} --request-id ${doneRequestID}`));
+  assert.match(message.content, new RegExp(`mosscap task reply ${taskID} --request-id ${replyRequestID} --text "REPLY" --done`));
+  assert.doesNotMatch(message.content, /mosscap slack send|mosscap task done/);
   for (const requestID of [replyRequestID, doneRequestID]) assert.match(requestID, /^[A-Za-z0-9._~-]{1,128}$/, "request IDs satisfy Go identity.ValidRequestID");
   assert.notEqual(replyRequestID, doneRequestID, "operation-specific IDs cannot collide");
   assert.equal(taskMessage(work, "session-1").content, message.content, "re-rendering keeps request IDs stable");

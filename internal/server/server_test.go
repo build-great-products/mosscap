@@ -23,6 +23,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/slackapi/fake"
 	"github.com/stayradiated/mosscap/internal/slackruntime"
 	"github.com/stayradiated/mosscap/internal/store"
+	"github.com/stayradiated/mosscap/internal/task"
 )
 
 func testConfig(paths config.Paths) config.Config {
@@ -272,6 +273,151 @@ func TestAutomaticUntrustedReactionIsDurableAndMessageIdempotent(t *testing.T) {
 	effects, err := ledger.ListSlackEffects(ctx, nil, 10)
 	if err != nil || len(effects) != 1 || effects[0].ID != first.ID {
 		t.Fatalf("effects=%+v err=%v", effects, err)
+	}
+}
+
+func newTaskReplySource(t *testing.T, ledger *store.Store, id string) store.SlackEventResult {
+	t.Helper()
+	ctx := context.Background()
+	id = strings.ReplaceAll(id, " ", "_")
+	if _, err := ledger.AddTrustedUser(ctx, "req_trust_"+id, "U12345678"); err != nil {
+		t.Fatal(err)
+	}
+	source, err := ledger.CommitSlackSourceEvent(ctx, store.SlackAdmissionPolicy{TeamID: "T012ABC", ChannelID: "C012ABC", BotUserID: "U012BOT"}, store.SlackSourceEvent{SourceEventID: "Ev-" + id, EventKind: store.SlackEventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", ThreadTS: "1699999999.000001", Text: "do this <@U012BOT>", SlackEventAtUS: 1700000000000001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
+func newTaskReplyServer(t *testing.T, ledger *store.Store, steps ...fake.Step) (*Server, *fake.Web) {
+	t.Helper()
+	verification := []fake.Step{
+		{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
+		{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
+		{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
+		{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+	}
+	web := fake.NewWeb(append(verification, steps...)...)
+	runtime, err := slackruntime.New(slackruntime.Options{Factory: &fakeRuntimeFactory{webs: []slackapi.Web{web}, sockets: []slackapi.Socket{fake.NewSocket(fake.SocketSession{})}}, Handler: func(context.Context, slackapi.Envelope) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := testConfig(config.Paths{})
+	c.SlackAppToken, c.SlackBotToken, c.SlackChannelID = "xapp-test", "xoxb-test", "C012ABC"
+	if err := runtime.Start(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	return &Server{store: ledger, runtime: runtime}, web
+}
+
+func TestTaskReplyConfirmedSuccessReplaysAndConsumesReplyRequestID(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	source := newTaskReplySource(t, ledger, "reply-success")
+	s, web := newTaskReplyServer(t, ledger,
+		fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/thread"},
+		fake.Step{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: "C012ABC", MessageTS: "1700000001.000001"}},
+	)
+	requestID := "req_reply_success"
+	params := protocol.TaskReplyParams{Task: source.TaskID, Text: "completed"}
+	out, err := s.taskReply(ctx, requestID, params)
+	if err != nil || out.Effect.State != string(store.SlackEffectConfirmed) || out.Task != nil {
+		t.Fatalf("reply=%+v err=%v", out, err)
+	}
+	params.Done = true
+	out, err = s.taskReply(ctx, requestID, params)
+	if err != nil || out.Task == nil || out.Task.State != "done" {
+		t.Fatalf("done replay=%+v err=%v", out, err)
+	}
+	if _, err := s.taskReply(ctx, requestID, params); err != nil {
+		t.Fatalf("done replay: %v", err)
+	}
+	posts := 0
+	for _, call := range web.Calls() {
+		if call.Operation == fake.PostMessage {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("Slack post calls=%d, want one", posts)
+	}
+	if _, err := s.taskReply(ctx, requestID, protocol.TaskReplyParams{Task: source.TaskID, Text: "changed", Done: true}); !errors.Is(err, store.ErrRequestConflict) {
+		t.Fatalf("changed reply error=%v, want request conflict", err)
+	}
+	for _, id := range []string{requestID, taskReplyDoneRequestID(requestID)} {
+		var count int
+		if err := ledger.DB().QueryRow("SELECT count(*) FROM mutation_requests WHERE request_id=?", id).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("mutation request %q count=%d err=%v", id, count, err)
+		}
+	}
+}
+
+func TestTaskReplyTerminalSlackOutcomesDoNotCloseTask(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		step  fake.Step
+		state store.SlackEffectState
+	}{
+		{"conclusive failure", fake.Step{Operation: fake.PostMessage, Err: slackapi.NewExternalError(slackapi.ReasonRejected, slackapi.DiagnosticRejected, "", nil)}, store.SlackEffectFailed},
+		{"ambiguous timeout", fake.Step{Operation: fake.PostMessage, PreCall: fake.CallScript{Fault: fake.Timeout}}, store.SlackEffectAmbiguous},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ledger.Close()
+			source := newTaskReplySource(t, ledger, "reply-"+tc.name)
+			s, _ := newTaskReplyServer(t, ledger, fake.Step{Operation: fake.Permalink, Result: "https://example.invalid/thread"}, tc.step)
+			if _, err := s.taskReply(ctx, "req_reply_"+strings.ReplaceAll(tc.name, " ", "_"), protocol.TaskReplyParams{Task: source.TaskID, Text: "completed", Done: true}); err == nil {
+				t.Fatal("task reply unexpectedly succeeded")
+			}
+			effects, err := ledger.ListSlackEffects(ctx, nil, 10)
+			if err != nil || len(effects) != 1 || effects[0].State != tc.state {
+				t.Fatalf("effects=%+v err=%v", effects, err)
+			}
+			model, err := ledger.GetTaskReadModel(ctx, source.TaskID)
+			if err != nil || model.Task.State != task.Open {
+				t.Fatalf("task=%+v err=%v", model.Task, err)
+			}
+		})
+	}
+}
+
+func TestTaskReplyRecoversConfirmedEffectWithoutGateway(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := store.Initialize(ctx, filepath.Join(t.TempDir(), "mosscap.db"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	source := newTaskReplySource(t, ledger, "reply-recovery")
+	requestID := "req_reply_recovery"
+	prepared, err := ledger.PrepareSlackEffect(ctx, requestID, store.SlackEffectTarget{TeamID: "T012ABC", ChannelID: "C012ABC"}, store.SlackEffectIntent{Kind: store.SlackEffectSend, ThreadTS: "1699999999.000001", Text: "done", RelatedTaskID: source.TaskID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.ClaimSlackEffect(ctx, prepared.EffectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.CommitSlackEffectOutcome(ctx, prepared.EffectID, store.SlackEffectOutcome{State: store.SlackEffectConfirmed, ResponseMessageTS: "1700000001.000001"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&Server{store: ledger}).taskReply(ctx, requestID, protocol.TaskReplyParams{Task: source.TaskID, Text: "done", Done: true})
+	if err != nil || out.Effect.State != string(store.SlackEffectConfirmed) || out.Task == nil || out.Task.State != "done" {
+		t.Fatalf("reply=%+v err=%v", out, err)
+	}
+	model, err := ledger.GetTaskReadModel(ctx, source.TaskID)
+	if err != nil || string(model.Task.State) != "done" {
+		t.Fatalf("task=%+v err=%v", model.Task, err)
 	}
 }
 

@@ -143,6 +143,12 @@ func (s *Service) Thread(ctx context.Context, threadTS string) (slackapi.Message
 	return page, nil
 }
 
+// MatchesTarget reports whether a durable source belongs to this active Slack
+// workspace/channel. It prevents a reply from being redirected after reload.
+func (s *Service) MatchesTarget(teamID, channelID string) bool {
+	return s != nil && s.target.TeamID == teamID && s.target.ChannelID == channelID
+}
+
 // Execute durably prepares, claims, and executes one public Slack mutation.
 // It never retries a submitted effect, including after an uncertain response.
 func (s *Service) Execute(ctx context.Context, requestID string, intent store.SlackEffectIntent) (store.SlackEffect, error) {

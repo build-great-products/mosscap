@@ -34,12 +34,13 @@ const (
 	CapabilitySlackSourceMetadata = "slack_source_metadata"
 	CapabilityFileTransfer        = "file_transfer_v1"
 	CapabilityMetadataPurge       = "metadata_purge_v1"
+	CapabilityTaskReply           = "task_reply_v1"
 	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
 	// the gateway owns every delivery route and disconnect cleanup (T1).
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -147,6 +148,19 @@ type TaskTransitionParams struct {
 	Task  string  `json:"task"`
 	State string  `json:"state"`
 	Note  *string `json:"note,omitempty"`
+}
+
+// TaskReplyParams composes a durable Slack reply to a Slack-origin task with
+// an optional local completion. The thread is intentionally not caller input.
+type TaskReplyParams struct {
+	Task string `json:"task"`
+	Text string `json:"text"`
+	Done bool   `json:"done,omitempty"`
+}
+
+type TaskReplyDTO struct {
+	Effect SlackEffectDTO   `json:"effect"`
+	Task   *TaskMutationDTO `json:"task,omitempty"`
 }
 type TaskListParams struct {
 	State       *string `json:"state,omitempty"`
@@ -626,6 +640,8 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &TaskUpdateParams{}
 	case "task.transition":
 		target = &TaskTransitionParams{}
+	case "task.reply":
+		target = &TaskReplyParams{}
 	default:
 		return fmt.Errorf("protocol: unknown command %q", command)
 	}
@@ -673,6 +689,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	case *TaskTransitionParams:
 		if p.Task == "" || (p.State != "open" && p.State != "working" && p.State != "done") || (p.Note != nil && len(*p.Note) > 4096) {
 			return errors.New("invalid task transition")
+		}
+	case *TaskReplyParams:
+		if p.Task == "" || !validText(p.Text, true) {
+			return errors.New("invalid task reply")
 		}
 	case *TaskListParams:
 		if p.State != nil && *p.State != "open" && *p.State != "working" && *p.State != "done" {
@@ -825,7 +845,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.update", "task.transition", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	}
 	return false
