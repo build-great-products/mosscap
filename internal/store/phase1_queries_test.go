@@ -117,22 +117,46 @@ func TestTaskReadModelUsesSafeUnambiguousPrefixes(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 
-	firstID := "tsk_aaaaabcdefghijklmnopqr"
-	secondID := "tsk_aaaazbcdefghijklmnopqr"
+	firstID := "aaaaabcdefghijklmnopqr"
+	secondID := "aaaazbcdefghijklmnopqr"
 	for _, id := range []string{firstID, secondID} {
 		if _, err := s.db.ExecContext(ctx, "INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES(?,1,'open','task','local',1,1)", id); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.GetTaskReadModel(ctx, "tsk_aaaa"); !errors.Is(err, ErrAmbiguous) {
-		t.Fatalf("shared prefix error = %v", err)
+	if _, err := s.GetTaskReadModel(ctx, "aaaa"); !errors.Is(err, ErrAmbiguous) {
+		t.Fatalf("shared bare prefix error = %v", err)
 	}
-	if _, err := s.GetTaskReadModel(ctx, "tsk_%"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetTaskReadModel(ctx, "%"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unsafe selector error = %v", err)
 	}
-	read, err := s.GetTaskReadModel(ctx, secondID)
+	read, err := s.GetTaskReadModel(ctx, "aaaaz")
+	if err != nil || read.Task.ID != secondID {
+		t.Fatalf("bare prefix read = %#v, %v", read, err)
+	}
+	read, err = s.GetTaskReadModel(ctx, secondID)
 	if err != nil || read.Task.ID != secondID {
 		t.Fatalf("exact read = %#v, %v", read, err)
+	}
+}
+
+func TestShortestTaskSelectorHasReadableMinimumAndGrowsForCollisions(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	firstID := "abcdefghA1234567890123"
+	secondID := "abcdefghB1234567890123"
+	for _, id := range []string{firstID, secondID} {
+		if _, err := s.db.ExecContext(ctx, "INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES(?,1,'open','task','local',1,1)", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selector, err := shortestTaskSelector(ctx, s.db, firstID)
+	if err != nil || selector != "abcdefghA" {
+		t.Fatalf("selector = %q, %v", selector, err)
+	}
+	read, err := s.GetTaskReadModel(ctx, selector)
+	if err != nil || read.Task.ID != firstID {
+		t.Fatalf("selector read = %#v, %v", read, err)
 	}
 }
 

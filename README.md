@@ -39,9 +39,9 @@ Tasks are a small todo list with `open`, `working`, and `done` states. Slack com
 
 ```text
 mosscap task list
-mosscap task working tsk_123
+mosscap task working AbCdEfGh
 mosscap slack send --thread 1712345678.123456 --text "I found the problem."
-mosscap task done tsk_123
+mosscap task done AbCdEfGh
 ```
 
 All Slack commands operate on the single configured channel; they cannot select another destination. Incoming Slack files are durable metadata only in Phase 1:
@@ -102,7 +102,7 @@ mosscap gateway run                    # keep this foreground process running
 
 # In another terminal:
 mosscap task create --text "review the release" --request-id release-create
-mosscap task working tsk_EXAMPLE --request-id release-working
+mosscap task working AbCdEfGh --request-id release-working
 mosscap task list
 ```
 

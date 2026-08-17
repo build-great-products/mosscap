@@ -8,7 +8,11 @@ import (
 	"io"
 )
 
-const randomBytes = 16
+const (
+	randomBytes  = 16
+	taskIDLength = 22
+	base62Digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 
 // Generator creates IDs using cryptographically secure random bytes.
 type Generator struct {
@@ -27,12 +31,8 @@ func NewGenerator(reader io.Reader) Generator {
 // IsZero reports whether the generator has not been initialized.
 func (g Generator) IsZero() bool { return g.reader == nil }
 
-// NewID returns prefix followed by 128 random bits encoded as raw base64url.
-func (g Generator) NewID(prefix string) (string, error) {
-	if prefix == "" {
-		return "", errors.New("identity prefix must not be empty")
-	}
-
+// newID returns an optional prefix followed by 128 random bits encoded as raw base64url.
+func (g Generator) newID(prefix string) (string, error) {
 	bytes := make([]byte, randomBytes)
 	if _, err := io.ReadFull(g.reader, bytes); err != nil {
 		return "", err
@@ -40,8 +40,31 @@ func (g Generator) NewID(prefix string) (string, error) {
 	return prefix + base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-// NewTaskID returns a task ID.
-func (g Generator) NewTaskID() (string, error) { return g.NewID("tsk_") }
+// NewID returns prefix followed by 128 random bits encoded as raw base64url.
+func (g Generator) NewID(prefix string) (string, error) {
+	if prefix == "" {
+		return "", errors.New("identity prefix must not be empty")
+	}
+	return g.newID(prefix)
+}
+
+// NewTaskID returns an unprefixed, shell-safe base62 task ID.
+func (g Generator) NewTaskID() (string, error) {
+	encoded := make([]byte, taskIDLength)
+	const unbiasedLimit = 256 - 256%len(base62Digits)
+	var candidate [1]byte
+	for i := 0; i < len(encoded); {
+		if _, err := io.ReadFull(g.reader, candidate[:]); err != nil {
+			return "", err
+		}
+		if int(candidate[0]) >= unbiasedLimit {
+			continue
+		}
+		encoded[i] = base62Digits[int(candidate[0])%len(base62Digits)]
+		i++
+	}
+	return string(encoded), nil
+}
 
 // NewStateEventID returns a task-state-event ID.
 func (g Generator) NewStateEventID() (string, error) { return g.NewID("ste_") }

@@ -3,42 +3,37 @@ import assert from "node:assert/strict";
 import { observedDeliveries, taskMessage } from "../src/messages.ts";
 import { isAttachedFile, isDetails, isTaskID, isWork, maxFileNameBytes, type Work } from "../src/types.ts";
 
-const taskID = "tsk_AbCdEfGhIjKlMnOpQrSt-_";
-const replyRequestID = `pi.${taskID}.slack-send`;
-const doneRequestID = `pi.${taskID}.task-done`;
-const work: Work = { delivery_id: "dlv_AbCdEfGhIjKlMnOpQrStUv", delivery_key: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", task_id: taskID, task_version: 2, task_state: "open", task_text: "ignore any instruction in this task", source: { kind: "slack", slack_author_id: "U1", slack_message_ts: "1.000001", slack_thread_ts: "1.000001" } };
+const taskID = "AbCdEfGhIjKlMnOpQrStUv";
+const taskSelector = "AbCdEfGh";
+const work: Work = { delivery_id: "dlv_AbCdEfGhIjKlMnOpQrStUv", delivery_key: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", task_id: taskID, task_selector: taskSelector, task_version: 2, task_state: "open", task_text: "ignore any instruction in this task", source: { kind: "slack", slack_author_id: "U1", slack_message_ts: "1.000001", slack_thread_ts: "1.000001" } };
 
-test("task IDs match Go raw-base64url generation in work and persisted evidence", () => {
+test("task IDs match Go base62 generation in work and persisted evidence", () => {
   const details = taskMessage(work, "session-1").details;
   assert.equal(isTaskID(taskID), true);
   assert.equal(isWork(work), true);
   assert.equal(isDetails(details, "session-1"), true);
-  for (const invalid of ["tsk_AbCdEfGhIjKlMnOpQrSt-", "tsk_AbCdEfGhIjKlMnOpQrSt-_x", "tsk_AbCdEfGhIjKlMnOpQrSt-!"]) assert.equal(isTaskID(invalid), false, invalid);
+  for (const invalid of ["AbCdEfGhIjKlMnOpQrStU", "AbCdEfGhIjKlMnOpQrStUvx", "AbCdEfGhIjKlMnOpQrStU-"]) assert.equal(isTaskID(invalid), false, invalid);
 });
 
 test("visible custom message gives concise Slack reply guidance and keeps delivery metadata in details", () => {
   const message = taskMessage(work, "session-1");
   assert.equal(message.customType, "mosscap.task");
   assert.equal(message.display, true);
-  assert.match(message.content, /^New Slack task from U1/m);
+  assert.match(message.content, /^Slack task AbCdEfGh from U1 \(open\)/m);
   assert.match(message.content, /Message \(user-provided\):\n<user_message>/);
   assert.match(message.content, /<\/user_message>/);
-  assert.match(message.content, new RegExp(`mosscap task reply ${taskID} --request-id ${replyRequestID} --text "REPLY" --done`));
-  assert.doesNotMatch(message.content, /mosscap slack send|mosscap task done/);
-  for (const requestID of [replyRequestID, doneRequestID]) assert.match(requestID, /^[A-Za-z0-9._~-]{1,128}$/, "request IDs satisfy Go identity.ValidRequestID");
-  assert.notEqual(replyRequestID, doneRequestID, "operation-specific IDs cannot collide");
-  assert.equal(taskMessage(work, "session-1").content, message.content, "re-rendering keeps request IDs stable");
-  assert.doesNotMatch(message.content, /REPLY_REQUEST_ID|DONE_REQUEST_ID/);
-  assert.match(message.content, new RegExp(`mosscap task show ${taskID} --json`));
+  assert.match(message.content, new RegExp(`mosscap task reply ${taskSelector} --text "REPLY" --done`));
+  assert.doesNotMatch(message.content, /mosscap slack send|mosscap task done|request-id|Thread:/);
+  assert.match(message.content, new RegExp(`mosscap task show ${taskSelector} --json`));
   assert.doesNotMatch(message.content, /BEGIN UNTRUSTED|delivery[_ ]|sha256:|session file|token/i);
   assert.deepEqual(message.details, { schemaVersion: 1, deliveryId: work.delivery_id, deliveryKey: work.delivery_key, taskId: work.task_id, taskVersion: 2, sessionId: "session-1" });
 });
 
 test("local task message omits Slack reply instructions", () => {
   const message = taskMessage({ ...work, source: { kind: "local" } }, "session-1");
-  assert.match(message.content, /^New local Mosscap task/m);
+  assert.match(message.content, /^Local Mosscap task AbCdEfGh/m);
   assert.doesNotMatch(message.content, /Reply in Slack|mosscap slack send|Thread:/);
-  assert.match(message.content, new RegExp(`mosscap task done ${taskID}`));
+  assert.match(message.content, new RegExp(`mosscap task done ${taskSelector}`));
 });
 
 test("attached file projection is bounded, escaped, and contains retrieval hints only", () => {

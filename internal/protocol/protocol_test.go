@@ -82,8 +82,9 @@ func TestTrustAndReloadParamsStrict(t *testing.T) {
 	}{
 		{"list empty", "trust.list", `{}`, true},
 		{"reload empty", "config.reload", `{}`, true},
-		{"task reply", "task.reply", `{"task":"tsk_abcdefghijklmnopqrstuv","text":"reply","done":true}`, true},
-		{"task reply missing text", "task.reply", `{"task":"tsk_abcdefghijklmnopqrstuv"}`, false},
+		{"task reply", "task.reply", `{"task":"abcdefghijklmnopqrstuv","text":"reply","done":true}`, true},
+		{"task reply bare selector", "task.reply", `{"task":"abcdefgh","text":"reply","done":true}`, true},
+		{"task reply missing text", "task.reply", `{"task":"abcdefghijklmnopqrstuv"}`, false},
 		{"add valid immutable ID", "trust.add", `{"slack_user_id":"U01234567"}`, true},
 		{"remove valid enterprise ID", "trust.remove", `{"slack_user_id":"W01234567"}`, true},
 		{"empty params reject fields", "trust.list", `{"extra":true}`, false},
@@ -167,7 +168,7 @@ func TestPhase1ParamsStrictAndRoundTrip(t *testing.T) {
 	cases := []struct{ command, params string }{
 		{"slack.history", `{"limit":100}`},
 		{"slack.thread", `{"thread_ts":"1712345678.000001"}`},
-		{"slack.send", `{"thread_ts":"1712345678.000001","text":"hello","task":"tsk_abc"}`},
+		{"slack.send", `{"thread_ts":"1712345678.000001","text":"hello","task":"abc"}`},
 		{"slack.edit", `{"message_ts":"1712345678.000001","text":"hello"}`},
 		{"slack.delete", `{"message_ts":"1712345678.000001","reason":"operator request"}`},
 		{"slack.react", `{"message_ts":"1712345678.000001","emoji":"eyes"}`},

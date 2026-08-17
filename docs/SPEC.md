@@ -175,7 +175,7 @@ Identifiers are opaque URL-safe strings with type prefixes. Output timestamps ar
 
 A task contains:
 
-- `task_id` (`tsk_…`), unique;
+- `task_id` (22-character base62), unique;
 - `version`, a positive monotonically increasing integer;
 - `state`: `open`, `working`, or `done`;
 - current `text`;

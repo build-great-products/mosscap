@@ -16,18 +16,19 @@ type TaskReadModel struct {
 	LatestReplyEffect *SlackEffect `json:"latest_reply_effect,omitempty"`
 }
 
-// GetTaskReadModel resolves an exact task ID or an unambiguous tsk_ prefix and
+// GetTaskReadModel resolves an exact task ID or an unambiguous prefix and
 // includes current Slack source and metadata-only incoming file details when
 // the task originated in Slack.
 func (s *Store) GetTaskReadModel(ctx context.Context, selector string) (TaskReadModel, error) {
-	if !validTaskSelector(selector) {
+	canonical, ok := canonicalTaskSelector(selector)
+	if !ok {
 		return TaskReadModel{}, ErrNotFound
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT t.task_id,t.version,t.state,t.text,t.source_kind,t.created_at,t.updated_at,t.done_at,
 		s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us
 		FROM tasks t LEFT JOIN slack_task_sources s ON s.task_id=t.task_id
 		WHERE t.task_id=? OR substr(t.task_id,1,length(?))=?
-		ORDER BY t.task_id LIMIT 2`, selector, selector, selector)
+		ORDER BY t.task_id LIMIT 2`, canonical, canonical, canonical)
 	if err != nil {
 		return TaskReadModel{}, err
 	}

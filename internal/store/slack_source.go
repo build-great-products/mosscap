@@ -483,8 +483,8 @@ func lookupSlackEventResult(ctx context.Context, q interface {
 	return result, nil
 }
 
-// GetSlackSource resolves only a tsk_ selector and requires both the task and
-// source row to agree that this is a Slack-origin task.
+// GetSlackSource resolves a typed or bare task selector and requires both the
+// task and source row to agree that this is a Slack-origin task.
 func (s *Store) GetSlackSource(ctx context.Context, taskSelector string) (SlackSource, error) {
 	taskID, err := s.resolveSlackTaskSelector(ctx, taskSelector)
 	if err != nil {
@@ -494,11 +494,12 @@ func (s *Store) GetSlackSource(ctx context.Context, taskSelector string) (SlackS
 }
 
 func (s *Store) resolveSlackTaskSelector(ctx context.Context, selector string) (string, error) {
-	if !validTypedSelector(selector, "tsk_") {
+	canonical, ok := canonicalTaskSelector(selector)
+	if !ok {
 		return "", ErrNotFound
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT s.task_id,t.source_kind FROM slack_task_sources s JOIN tasks t ON t.task_id=s.task_id
-		WHERE s.task_id=? OR substr(s.task_id,1,length(?))=? ORDER BY s.task_id LIMIT 2`, selector, selector, selector)
+		WHERE s.task_id=? OR substr(s.task_id,1,length(?))=? ORDER BY s.task_id LIMIT 2`, canonical, canonical, canonical)
 	if err != nil {
 		return "", err
 	}

@@ -61,7 +61,7 @@ func (a App) fileGet(args []string) error {
 	}
 	result, err := a.gatewayCall(c, "file.get", *requestID, protocol.FileGetParams{File: fs.Arg(0)}, protocol.CapabilityFileTransfer)
 	if err != nil {
-		return mutationJSONError(err, *jsonOut, *requestID)
+		return mutationJSONError(err, true, *jsonOut, *requestID)
 	}
 	var transfer protocol.FileGetDTO
 	encoded, err := json.Marshal(result)

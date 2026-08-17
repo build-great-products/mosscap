@@ -426,15 +426,15 @@ func TestSlackRepositoryRejectsSchemaValidLocalTaskSource(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	for _, statement := range []string{
-		"INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('tsk_abcdefghijklmnopqrstuv',1,'open','local','local',1,1)",
-		"INSERT INTO slack_source_events(source_event_id,event_kind,team_id,channel_id,message_ts,user_id,slack_event_at_us,received_at_us,committed_at_us,admission_result,task_id,task_version,changed,last_seen_at_us) VALUES('Ev-local-invariant','message','T12345678','C12345678','1700000099.000001','U12345678',1,1,1,'admitted','tsk_abcdefghijklmnopqrstuv',1,1,1)",
-		"INSERT INTO slack_task_sources(task_id,initial_source_event_id,team_id,channel_id,author_user_id,message_ts,thread_ts,latest_event_at_us,created_at_us,updated_at_us) VALUES('tsk_abcdefghijklmnopqrstuv','Ev-local-invariant','T12345678','C12345678','U12345678','1700000099.000001','1700000099.000001',1,1,1)",
+		"INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES('abcdefghijklmnopqrstuv',1,'open','local','local',1,1)",
+		"INSERT INTO slack_source_events(source_event_id,event_kind,team_id,channel_id,message_ts,user_id,slack_event_at_us,received_at_us,committed_at_us,admission_result,task_id,task_version,changed,last_seen_at_us) VALUES('Ev-local-invariant','message','T12345678','C12345678','1700000099.000001','U12345678',1,1,1,'admitted','abcdefghijklmnopqrstuv',1,1,1)",
+		"INSERT INTO slack_task_sources(task_id,initial_source_event_id,team_id,channel_id,author_user_id,message_ts,thread_ts,latest_event_at_us,created_at_us,updated_at_us) VALUES('abcdefghijklmnopqrstuv','Ev-local-invariant','T12345678','C12345678','U12345678','1700000099.000001','1700000099.000001',1,1,1)",
 	} {
 		if _, err := s.DB().ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.GetSlackSource(ctx, "tsk_abcdefghijklmnopqrstuv"); !errors.Is(err, ErrSlackInvariant) {
+	if _, err := s.GetSlackSource(ctx, "abcdefghijklmnopqrstuv"); !errors.Is(err, ErrSlackInvariant) {
 		t.Fatalf("task source invariant=%v", err)
 	}
 	if _, err := s.FindSlackSource(ctx, "T12345678", "C12345678", "1700000099.000001"); !errors.Is(err, ErrSlackInvariant) {

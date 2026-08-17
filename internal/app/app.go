@@ -405,7 +405,7 @@ func (a App) gatewayReload(args []string) error {
 	}
 	result, err := a.gatewayCall(c, "config.reload", *requestID, nil, protocol.CapabilityConfigReload)
 	if err != nil {
-		return mutationJSONError(err, *j, *requestID)
+		return mutationJSONError(err, true, *j, *requestID)
 	}
 	return a.render(map[string]any{"request_id": *requestID, "result": result}, *j)
 }
@@ -684,7 +684,7 @@ func (a App) purge(args []string) error {
 	}
 	result, err := a.gatewayCall(c, "metadata.purge", *requestID, protocol.MetadataPurgeParams{Cutoff: cutoff.Format("2006-01-02T15:04:05.000000Z"), Mode: mode}, protocol.CapabilityMetadataPurge)
 	if err != nil {
-		return mutationJSONError(err, *jsonOut && *confirm, *requestID)
+		return mutationJSONError(err, *confirm, *jsonOut, *requestID)
 	}
 	if *confirm {
 		result = map[string]any{"request_id": *requestID, "result": result}
@@ -777,7 +777,7 @@ func (a App) trust(args []string) error {
 	}
 	result, err := a.gatewayCall(c, command, *requestID, params, protocol.CapabilityTrustedUsers)
 	if err != nil {
-		return mutationJSONError(err, *j && mutation, *requestID)
+		return mutationJSONError(err, mutation, *j, *requestID)
 	}
 	if mutation {
 		result = map[string]any{"request_id": *requestID, "result": result}
@@ -959,18 +959,18 @@ func (a App) task(_ string, args []string) error {
 	}
 	cl, e := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
 	if e != nil {
-		return mutationJSONError(&commandError{code: ExitUnavailable, message: e.Error()}, *j && mutation, *requestID)
+		return mutationJSONError(&commandError{code: ExitUnavailable, message: e.Error()}, mutation, *j, *requestID)
 	}
 	defer cl.Close()
 	if _, e = cl.Hello(context.Background(), "req_hello_"+cmd, "cli", a.Version, nil); e != nil {
-		return mutationJSONError(remote(e), *j && mutation, *requestID)
+		return mutationJSONError(remote(e), mutation, *j, *requestID)
 	}
 	response, e := cl.Call(context.Background(), request)
 	if e != nil {
-		return mutationJSONError(remote(e), *j && mutation, *requestID)
+		return mutationJSONError(remote(e), mutation, *j, *requestID)
 	}
 	if response.Error != nil {
-		return mutationJSONError(remote(&client.RemoteError{ProtocolError: *response.Error}), *j && mutation, *requestID)
+		return mutationJSONError(remote(&client.RemoteError{ProtocolError: *response.Error}), mutation, *j, *requestID)
 	}
 	var out any
 	if e := json.Unmarshal(response.Result, &out); e != nil {
@@ -1078,7 +1078,7 @@ func (a App) taskReply(args []string) error {
 	}
 	out, err := a.gatewayCall(c, "task.reply", *requestID, params, protocol.CapabilityTaskReply)
 	if err != nil {
-		return mutationJSONError(err, *jsonOut, *requestID)
+		return mutationJSONError(err, true, *jsonOut, *requestID)
 	}
 	out = map[string]any{"request_id": *requestID, "result": out}
 	return a.render(out, *jsonOut)
@@ -1160,6 +1160,7 @@ func (e *commandError) Error() string { return e.message }
 type jsonMutationError struct {
 	err       error
 	requestID string
+	jsonOut   bool
 }
 
 func (e *jsonMutationError) Error() string { return e.err.Error() }
@@ -1168,11 +1169,11 @@ func (e *jsonMutationError) Unwrap() error { return e.err }
 // mutationJSONError opts in only parsed mutation commands. It deliberately
 // does not inspect argv, so a value that happens to be "--json" cannot change
 // the output protocol.
-func mutationJSONError(err error, jsonOut bool, requestID string) error {
-	if !jsonOut || err == nil {
+func mutationJSONError(err error, mutation, jsonOut bool, requestID string) error {
+	if err == nil || !mutation {
 		return err
 	}
-	return &jsonMutationError{err: err, requestID: requestID}
+	return &jsonMutationError{err: err, requestID: requestID, jsonOut: jsonOut}
 }
 
 func exitCode(err error) int {
@@ -1214,7 +1215,15 @@ func (a App) renderMutationError(wrapped *jsonMutationError) {
 	case out.Category == "external_failed":
 		out.Guidance = "Inspect and revise the external failure; do not replay it as if uncertain."
 	}
-	_ = json.NewEncoder(a.Err).Encode(out)
+	if wrapped.jsonOut {
+		_ = json.NewEncoder(a.Err).Encode(out)
+		return
+	}
+	fmt.Fprintln(a.Err, wrapped.err)
+	fmt.Fprintf(a.Err, "request_id: %s\n", wrapped.requestID)
+	if out.Guidance != "" {
+		fmt.Fprintf(a.Err, "guidance: %s\n", out.Guidance)
+	}
 }
 func usage(m string) error       { return &commandError{code: ExitUsage, message: "usage: " + m} }
 func unsupported(m string) error { return &commandError{code: ExitUnsupported, message: m} }

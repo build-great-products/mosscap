@@ -16,7 +16,7 @@ func TestJSONMutationErrorPreservesProtocolFields(t *testing.T) {
 		Code: "interrupted", Category: "unavailable", Message: "transport interrupted", Retriable: true,
 		Details: map[string]string{"phase": "commit"}, Progress: progress,
 	}}
-	a.renderMutationError(mutationJSONError(err, true, "req_same").(*jsonMutationError))
+	a.renderMutationError(mutationJSONError(err, true, true, "req_same").(*jsonMutationError))
 
 	var got mutationErrorJSON
 	if decodeErr := json.Unmarshal(stderr.Bytes(), &got); decodeErr != nil {
@@ -45,7 +45,7 @@ func TestJSONMutationErrorGuidanceAndNonJSONCompatibility(t *testing.T) {
 		t.Run(tc.code+tc.category, func(t *testing.T) {
 			var stderr bytes.Buffer
 			a := App{Err: &stderr}
-			a.renderMutationError(&jsonMutationError{err: &commandError{code: ExitUnsafe, message: "human", protocolError: &protocol.Error{Code: tc.code, Category: tc.category, Message: "safe"}}, requestID: "req_x"})
+			a.renderMutationError(&jsonMutationError{err: &commandError{code: ExitUnsafe, message: "human", protocolError: &protocol.Error{Code: tc.code, Category: tc.category, Message: "safe"}}, requestID: "req_x", jsonOut: true})
 			var got mutationErrorJSON
 			if err := json.Unmarshal(stderr.Bytes(), &got); err != nil || got.Guidance != tc.want {
 				t.Fatalf("got %+v, err %v", got, err)
@@ -53,8 +53,15 @@ func TestJSONMutationErrorGuidanceAndNonJSONCompatibility(t *testing.T) {
 		})
 	}
 
+	var stderr bytes.Buffer
+	a := App{Err: &stderr}
 	err := &commandError{code: ExitUnavailable, message: "existing human error"}
-	if got := mutationJSONError(err, false, "req_x"); got != err {
-		t.Fatal("non-JSON mutation error was wrapped")
+	wrapped, ok := mutationJSONError(err, true, false, "req_x").(*jsonMutationError)
+	if !ok {
+		t.Fatal("non-JSON mutation error was not wrapped")
+	}
+	a.renderMutationError(wrapped)
+	if got := stderr.String(); got != "existing human error\nrequest_id: req_x\nguidance: Replay the exact mutation with the same request ID.\n" {
+		t.Fatalf("non-JSON error = %q", got)
 	}
 }

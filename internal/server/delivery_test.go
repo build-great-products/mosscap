@@ -121,7 +121,7 @@ func TestFileTransferErrorCodesRemainSafeAndSpecific(t *testing.T) {
 
 func TestDeliveryWorkAttachedFilesAreIncomingAndAttachedOnly(t *testing.T) {
 	declared := int64(42)
-	work := &store.DeliveryWork{Delivery: store.Delivery{ID: "dlv_AbCdEfGhIjKlMnOpQrStUv", DeliveryKey: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, Task: store.Task{ID: "tsk_AbCdEfGhIjKlMnOpQrStUv", Version: 1, SourceKind: "slack"}}
+	work := &store.DeliveryWork{Delivery: store.Delivery{ID: "dlv_AbCdEfGhIjKlMnOpQrStUv", DeliveryKey: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}, Task: store.Task{ID: "AbCdEfGhIjKlMnOpQrStUv", Version: 1, SourceKind: "slack"}}
 	files := []store.SlackFile{
 		{FileID: "fil_AbCdEfGhIjKlMnOpQrStUv", Direction: "from_slack", SourceAttached: true, OriginalName: "report\x1b.txt", DeclaredMIME: "text/plain", DeclaredSizeBytes: &declared, TransferState: "metadata_only"},
 		{FileID: "fil_BbCdEfGhIjKlMnOpQrStUv", Direction: "from_slack", SourceAttached: false, OriginalName: "detached", TransferState: "validated", SHA256: strings.Repeat("a", 64)},

@@ -290,6 +290,7 @@ type DeliveryWorkDTO struct {
 	DeliveryID    string                    `json:"delivery_id"`
 	DeliveryKey   string                    `json:"delivery_key"`
 	TaskID        string                    `json:"task_id"`
+	TaskSelector  string                    `json:"task_selector"`
 	TaskVersion   int64                     `json:"task_version"`
 	TaskState     string                    `json:"task_state"`
 	TaskText      string                    `json:"task_text"`
@@ -697,19 +698,19 @@ func ValidateParams(command string, raw json.RawMessage) error {
 			return errors.New("missing task text")
 		}
 	case *TaskSelector:
-		if p.Task == "" || len(p.Task) > 128 {
+		if !validTaskSelector(p.Task) {
 			return errors.New("invalid task selector")
 		}
 	case *TaskUpdateParams:
-		if p.Task == "" || p.Text == "" {
+		if !validTaskSelector(p.Task) || p.Text == "" {
 			return errors.New("invalid task update")
 		}
 	case *TaskTransitionParams:
-		if p.Task == "" || (p.State != "open" && p.State != "working" && p.State != "done") || (p.Note != nil && len(*p.Note) > 4096) {
+		if !validTaskSelector(p.Task) || (p.State != "open" && p.State != "working" && p.State != "done") || (p.Note != nil && len(*p.Note) > 4096) {
 			return errors.New("invalid task transition")
 		}
 	case *TaskReplyParams:
-		if p.Task == "" || !validText(p.Text, true) {
+		if !validTaskSelector(p.Task) || !validText(p.Text, true) {
 			return errors.New("invalid task reply")
 		}
 	case *TaskListParams:
@@ -896,15 +897,21 @@ func validText(value string, required bool) bool {
 func validReason(value string) bool {
 	return value != "" && len(value) <= 4096 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
-func validTask(value string) bool             { return value == "" || validTypedSelector(value, "tsk_") }
+func validTask(value string) bool { return value == "" || validTaskSelector(value) }
+func validTaskSelector(value string) bool {
+	return value != "" && len(value) <= 22 && validSelectorSuffix(value)
+}
 func validEffectSelector(value string) bool   { return validTypedSelector(value, "eff_") }
 func validFileSelector(value string) bool     { return validTypedSelector(value, "fil_") }
 func validTransferSelector(value string) bool { return validTypedSelector(value, "xfr_") }
 func validTypedSelector(value, prefix string) bool {
-	if !strings.HasPrefix(value, prefix) || len(value) <= len(prefix) || len(value) > 128 || !utf8.ValidString(value) {
+	return strings.HasPrefix(value, prefix) && len(value) > len(prefix) && len(value) <= 128 && validSelectorSuffix(value[len(prefix):])
+}
+func validSelectorSuffix(value string) bool {
+	if !utf8.ValidString(value) {
 		return false
 	}
-	for _, r := range value[len(prefix):] {
+	for _, r := range value {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
 			return false
 		}

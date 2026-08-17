@@ -8,7 +8,8 @@ import type { Work } from "../src/types.ts";
 const work: Work = {
   delivery_id: "dlv_AbCdEfGhIjKlMnOpQrStUv",
   delivery_key: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  task_id: "tsk_AbCdEfGhIjKlMnOpQrSt-_",
+  task_id: "AbCdEfGhIjKlMnOpQrStUv",
+  task_selector: "AbCdEfGh",
   task_version: 1,
   task_state: "open",
   task_text: "task",
@@ -111,7 +112,7 @@ test("missing post-start evidence closes for server-side uncertainty without aut
   assert.equal(secondClosed, 1);
 });
 
-test("reconnect submits persisted evidence for a raw-base64url task ID without duplicate delivery", async () => {
+test("reconnect submits persisted evidence for a base62 task ID without duplicate delivery", async () => {
   const later: (() => void)[] = [];
   const entries = [{ type: "custom_message", customType: "mosscap.task", details: taskMessage(work, "session-1").details }];
   let sends = 0;

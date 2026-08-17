@@ -8,13 +8,13 @@ import (
 )
 
 func TestGeneratorPrefixesAndEntropy(t *testing.T) {
-	generator := NewGenerator(bytes.NewReader(make([]byte, 96)))
+	generator := NewGenerator(bytes.NewReader(make([]byte, 128)))
 	for _, test := range []struct {
 		name string
 		new  func() (string, error)
 		want string
 	}{
-		{"task", generator.NewTaskID, "tsk_"},
+		{"task", generator.NewTaskID, ""},
 		{"state event", generator.NewStateEventID, "ste_"},
 		{"effect", generator.NewEffectID, "eff_"},
 		{"delivery", generator.NewDeliveryID, "dlv_"},
@@ -27,7 +27,7 @@ func TestGeneratorPrefixesAndEntropy(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !strings.HasPrefix(got, test.want) || len(got) != len(test.want)+22 {
-				t.Fatalf("ID %q does not have expected prefix and 128-bit payload", got)
+				t.Fatalf("ID %q does not have expected prefix and encoded payload", got)
 			}
 		})
 	}

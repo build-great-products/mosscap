@@ -688,11 +688,16 @@ func validSlackTimestamp(value string) bool {
 	return true
 }
 
-func validTaskSelector(selector string) bool {
-	if !strings.HasPrefix(selector, "tsk_") || len(selector) <= len("tsk_") || len(selector) > 26 {
-		return false
+func canonicalTaskSelector(selector string) (string, bool) {
+	if len(selector) == 0 || len(selector) > 22 || !validOpaqueIDSuffix(selector) {
+		return "", false
 	}
-	return validOpaqueIDSuffix(selector[len("tsk_"):])
+	return selector, true
+}
+
+func validTaskSelector(selector string) bool {
+	_, ok := canonicalTaskSelector(selector)
+	return ok
 }
 
 func validSlackEffectSelector(selector string) bool {
@@ -721,11 +726,15 @@ func resolveOptionalTaskID(ctx context.Context, tx *sql.Tx, selector string) (st
 	if selector == "" {
 		return "", nil
 	}
+	canonical, ok := canonicalTaskSelector(selector)
+	if !ok {
+		return "", ErrNotFound
+	}
 	// Do not use LIKE for opaque prefixes: '_' is valid base64url data and is
 	// a SQL wildcard. substr compares the caller's selector literally.
 	rows, err := tx.QueryContext(ctx, `SELECT task_id FROM tasks
 		WHERE task_id=? OR substr(task_id,1,length(?))=? ORDER BY task_id LIMIT 2`,
-		selector, selector, selector)
+		canonical, canonical, canonical)
 	if err != nil {
 		return "", err
 	}

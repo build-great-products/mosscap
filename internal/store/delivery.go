@@ -72,9 +72,10 @@ type DeliveryObservation struct {
 // DeliveryWork is sent only to an opted-in extension. Unlike Delivery it has
 // current task text and immutable Slack metadata needed for the visible message.
 type DeliveryWork struct {
-	Delivery Delivery
-	Task     Task
-	Slack    *SlackSource
+	Delivery     Delivery
+	Task         Task
+	TaskSelector string
+	Slack        *SlackSource
 }
 
 // DeliveryKey is stable across requeues and state-only task transitions.
@@ -471,7 +472,31 @@ func deliveryWorkFor(ctx context.Context, q rowQueryer, x storedDelivery) (Deliv
 	if model.Task.Version != x.TaskVersion {
 		return DeliveryWork{}, ErrDeliveryNotFound
 	}
-	return DeliveryWork{Delivery: x.Delivery, Task: model.Task, Slack: model.SlackSource}, nil
+	selector, err := shortestTaskSelector(ctx, q, model.Task.ID)
+	if err != nil {
+		return DeliveryWork{}, err
+	}
+	return DeliveryWork{Delivery: x.Delivery, Task: model.Task, TaskSelector: selector, Slack: model.SlackSource}, nil
+}
+
+// shortestTaskSelector returns a bare selector with a readable minimum length.
+// It grows only when needed to distinguish tasks currently in the ledger.
+func shortestTaskSelector(ctx context.Context, q rowQueryer, taskID string) (string, error) {
+	canonical, ok := canonicalTaskSelector(taskID)
+	if !ok || canonical != taskID || len(taskID) != 22 {
+		return "", ErrNotFound
+	}
+	for length := 8; length <= len(taskID); length++ {
+		selector := taskID[:length]
+		var count int
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM tasks WHERE substr(task_id,1,?)=?`, length, selector).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 1 {
+			return selector, nil
+		}
+	}
+	return taskID, nil
 }
 func getTaskReadModelExact(ctx context.Context, q rowQueryer, id string) (TaskReadModel, error) {
 	row := q.QueryRowContext(ctx, `SELECT t.task_id,t.version,t.state,t.text,t.source_kind,t.created_at,t.updated_at,t.done_at,s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us FROM tasks t LEFT JOIN slack_task_sources s ON s.task_id=t.task_id WHERE t.task_id=?`, id)

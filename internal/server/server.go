@@ -1272,7 +1272,14 @@ func deliveryWorkDTO(work *store.DeliveryWork, files []store.SlackFile) *protoco
 	if work == nil {
 		return nil
 	}
-	out := &protocol.DeliveryWorkDTO{DeliveryID: work.Delivery.ID, DeliveryKey: work.Delivery.DeliveryKey, TaskID: work.Task.ID, TaskVersion: work.Task.Version, TaskState: string(work.Task.State), TaskText: work.Task.Text, SourceKind: work.Task.SourceKind}
+	selector := work.TaskSelector
+	if selector == "" {
+		selector = work.Task.ID
+		if len(selector) > 8 {
+			selector = selector[:8]
+		}
+	}
+	out := &protocol.DeliveryWorkDTO{DeliveryID: work.Delivery.ID, DeliveryKey: work.Delivery.DeliveryKey, TaskID: work.Task.ID, TaskSelector: selector, TaskVersion: work.Task.Version, TaskState: string(work.Task.State), TaskText: work.Task.Text, SourceKind: work.Task.SourceKind}
 	if work.Slack != nil {
 		out.SlackSource = &protocol.DeliverySlackSourceDTO{AuthorUserID: work.Slack.AuthorUserID, MessageTS: work.Slack.MessageTS, ThreadTS: work.Slack.ThreadTS}
 	}

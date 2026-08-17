@@ -138,7 +138,7 @@ func decodeCursor(cursor string) (listCursor, error) {
 		return listCursor{}, invalidInput("invalid task list cursor")
 	}
 	var c listCursor
-	if err := json.Unmarshal(b, &c); err != nil || c.UpdatedAt < 0 || c.TaskID == "" || !strings.HasPrefix(c.TaskID, "tsk_") {
+	if err := json.Unmarshal(b, &c); err != nil || c.UpdatedAt < 0 || len(c.TaskID) != 22 || !validOpaqueIDSuffix(c.TaskID) {
 		return listCursor{}, invalidInput("invalid task list cursor")
 	}
 	return c, nil
@@ -936,10 +936,11 @@ type queryer interface {
 }
 
 func getTx(ctx context.Context, q queryer, selector string) (Task, error) {
-	if !strings.HasPrefix(selector, "tsk_") {
+	canonical, ok := canonicalTaskSelector(selector)
+	if !ok {
 		return Task{}, ErrNotFound
 	}
-	rows, err := q.QueryContext(ctx, "SELECT task_id,version,state,text,source_kind,created_at,updated_at,done_at FROM tasks WHERE task_id=? OR task_id LIKE ?", selector, selector+"%")
+	rows, err := q.QueryContext(ctx, "SELECT task_id,version,state,text,source_kind,created_at,updated_at,done_at FROM tasks WHERE task_id=? OR substr(task_id,1,length(?))=? ORDER BY task_id LIMIT 2", canonical, canonical, canonical)
 	if err != nil {
 		return Task{}, err
 	}
