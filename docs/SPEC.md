@@ -429,18 +429,15 @@ A lease may return automatically to pending only when it expires in `leased`. Ex
 
 ### 7.4 Visible message
 
-Each work message contains in visible text and structured details:
+Each work message presents concise, actionable visible text:
 
-- task, version, delivery ID, and delivery key;
-- current state and complete current text within Pi message limits;
-- local or Slack origin;
-- Slack author, message/thread reference, and permalink when applicable;
-- source and gateway commit timestamps;
-- source-deleted status;
-- attachment metadata and retrieval commands; and
-- a CLI retrieval command when content is truncated.
+- task ID, current state, and complete current text within Pi message limits;
+- local or Slack origin, plus Slack author and thread when applicable;
+- the exact Slack reply command when applicable;
+- the task completion and detail commands; and
+- attachment metadata and retrieval commands only when attachments exist.
 
-Slack content must be clearly delimited as untrusted data. Tokens and raw Slack envelopes must never appear.
+Version, delivery ID, delivery key, and Pi session ID remain in the custom message's structured details rather than cluttering the visible instructions. User-provided text is visibly delimited from Mosscap control text. Tokens and raw Slack envelopes must never appear.
 
 The extension must use a custom message with `display: true` so it is visible and participates in model context. Hidden context injection does not satisfy delivery. The delivery key must be stored in that same custom message's structured details.
 
