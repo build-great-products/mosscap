@@ -7,10 +7,12 @@
     "extensions": ["./src/index.ts"]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1"
+    "@earendil-works/pi-coding-agent": "*"
   },
-  "engines": { "node": "26.x" },
-  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": "26.x",
+    "pnpm": ">=11 <12"
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.1",
     "@types/node": "24.10.1",
