@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/stayradiated/mosscap/internal/config"
+	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
 func TestCobraTreeContainsEveryDocumentedLeafWithCutoverMetadata(t *testing.T) {
@@ -78,12 +81,23 @@ func commandAt(root *cobra.Command, path []string) *cobra.Command {
 	return command
 }
 
+func TestTaskReplyFramePreflightCoversLiteralAndFileText(t *testing.T) {
+	params := protocol.TaskReplyParams{Task: "abcdefghijklmnopqrstuv", Text: strings.Repeat("x", 4096)}
+	for _, source := range []bool{false, true} {
+		err := checkTaskFrame(config.Config{LocalProtocolMaximumFrame: 100}, "reply", "req_reply_frame", params, source, "test")
+		if err == nil || !strings.Contains(err.Error(), "request exceeds the protocol frame limit") {
+			t.Fatalf("textFile=%t frame error=%v", source, err)
+		}
+	}
+}
+
 func TestTypedLeavesBypassLegacyParserBridge(t *testing.T) {
 	tree := (App{}).NewCommandTree()
 	for _, path := range []string{
 		"setup", "config show", "config set", "config secret set",
 		"gateway run", "gateway reload", "gateway status", "doctor",
 		"trust list", "trust add", "trust remove", "purge",
+		"task create", "task list", "task show", "task update", "task open", "task working", "task done", "task reply",
 		"effect list", "effect inspect", "effect retry",
 		"file show", "file get", "slack file",
 		"delivery list", "delivery inspect", "delivery requeue",
@@ -96,7 +110,7 @@ func TestTypedLeavesBypassLegacyParserBridge(t *testing.T) {
 			t.Errorf("%s is still bound to the legacy parser bridge", path)
 		}
 	}
-	for _, handler := range []string{"task.list", "slack.send", "task.reply"} {
+	for _, handler := range []string{"slack.send", "slack.history", "slack.edit"} {
 		if isTypedCobraHandler(handler) {
 			t.Errorf("%s unexpectedly left the compatibility bridge", handler)
 		}

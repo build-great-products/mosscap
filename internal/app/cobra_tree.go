@@ -188,7 +188,7 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // adapters in runCobraHandler.
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.file", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.file", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	default:
 		return false
@@ -227,6 +227,27 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 	case "trust.add", "trust.remove":
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.trustTyped(strings.TrimPrefix(handler, "trust."), args[0], requestID, jsonOut)
+	case "task.create", "task.update", "task.reply":
+		text, _ := cmd.Flags().GetString("text")
+		textFile, _ := cmd.Flags().GetString("text-file")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		done, _ := cmd.Flags().GetBool("done")
+		selector := ""
+		if len(args) != 0 {
+			selector = args[0]
+		}
+		return a.taskTyped(strings.TrimPrefix(handler, "task."), selector, text, textFile, "", false, 0, "", done, requestID, jsonOut)
+	case "task.list":
+		state, _ := cmd.Flags().GetString("state")
+		all, _ := cmd.Flags().GetBool("all")
+		limit, _ := cmd.Flags().GetInt("limit")
+		return a.taskTyped("list", "", "", "", state, all, limit, "", false, "", jsonOut)
+	case "task.show":
+		return a.taskTyped("show", args[0], "", "", "", false, 0, "", false, "", jsonOut)
+	case "task.open", "task.working", "task.done":
+		note, _ := cmd.Flags().GetString("note")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.taskTyped(strings.TrimPrefix(handler, "task."), args[0], "", "", "", false, 0, note, false, requestID, jsonOut)
 	case "effect.list":
 		state, _ := cmd.Flags().GetString("state")
 		return a.effectTyped("list", "", state, "", false, "", jsonOut)
