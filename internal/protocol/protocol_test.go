@@ -201,9 +201,9 @@ func TestSlackParamsStrictAndRoundTrip(t *testing.T) {
 		{"slack.history", `{"limit":51}`}, {"slack.history", `{"cursor":"has space"}`}, {"slack.history", `{"cursor":"\u0001"}`}, {"slack.thread", `{"thread_ts":"bad"}`}, {"slack.thread", `{"thread_ts":"1712345678.000001","limit":51}`},
 		{"slack.send", `{"text":"","extra":true}`}, {"slack.edit", `{"message_ts":"1.000001","text":"x","thread_ts":"1.000001"}`},
 		{"slack.delete", `{"message_ts":"1.000001","reason":""}`}, {"slack.react", `{"message_ts":"1.000001","emoji":"bad emoji"}`},
-		{"effect.list", `{"state":"unknown"}`}, {"effect.inspect", `{"effect":"tsk_abc"}`},
+		{"effect.list", `{"state":"unknown"}`}, {"effect.inspect", `{"effect":"invalid!"}`},
 		{"effect.retry", `{"effect":"eff_abc","reason":""}`}, {"file.show", `{"file":"/tmp/file"}`},
-		{"file.get", `{"file":"fil_abc","bytes":"forbidden"}`}, {"file.release", `{"transfer_id":"fil_abc"}`},
+		{"file.get", `{"file":"fil_abc","bytes":"forbidden"}`}, {"file.release", `{"transfer_id":"invalid!"}`},
 		{"slack.file", `{"file_path":"relative"}`}, {"slack.send", `{"text":"ok","file_paths":["/tmp/a"],"channel":"CINJECT"}`},
 	} {
 		if err := ValidateParams(tc.command, []byte(tc.params)); err == nil {

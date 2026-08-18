@@ -82,8 +82,8 @@ type IncomingFailureRecorder interface {
 	RecordIncomingFileFailure(context.Context, string, string) error
 }
 
-// IDSource creates opaque transfer IDs. It must return full xfr_ IDs.
-type IDSource interface{ NewID(string) (string, error) }
+// IDSource creates opaque transfer IDs.
+type IDSource interface{ NewID() (string, error) }
 
 // TemporaryFile is an unpublished owner-private file. Sync must durably flush
 // bytes before its name is recorded in SQLite.
@@ -274,7 +274,7 @@ func (s *Service) Get(ctx context.Context, requestID, fileID string) (Result, er
 		s.recordFailure(ctx, file.FileID, "file_content_changed")
 		return Result{}, ErrContentChanged
 	}
-	id, err := s.ids.NewID("xfr_")
+	id, err := s.ids.NewID()
 	if err != nil {
 		return Result{}, err
 	}

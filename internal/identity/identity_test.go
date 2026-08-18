@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestGeneratorPrefixesAndEntropy(t *testing.T) {
+func TestGeneratorIDsArePrefixFreeAndHaveEntropy(t *testing.T) {
 	generator := NewGenerator(bytes.NewReader(make([]byte, 128)))
 	for _, test := range []struct {
 		name string
@@ -15,19 +15,19 @@ func TestGeneratorPrefixesAndEntropy(t *testing.T) {
 		want string
 	}{
 		{"task", generator.NewTaskID, ""},
-		{"state event", generator.NewStateEventID, "ste_"},
-		{"effect", generator.NewEffectID, "eff_"},
-		{"delivery", generator.NewDeliveryID, "dlv_"},
-		{"file", generator.NewFileID, "fil_"},
-		{"request", generator.NewRequestID, "req_"},
+		{"state event", generator.NewStateEventID, ""},
+		{"effect", generator.NewEffectID, ""},
+		{"delivery", generator.NewDeliveryID, ""},
+		{"file", generator.NewFileID, ""},
+		{"request", generator.NewRequestID, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := test.new()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.HasPrefix(got, test.want) || len(got) != len(test.want)+22 {
-				t.Fatalf("ID %q does not have expected prefix and encoded payload", got)
+			if !strings.HasPrefix(got, test.want) || len(got) != 22 {
+				t.Fatalf("ID %q is not a 22-character prefix-free opaque ID", got)
 			}
 		})
 	}

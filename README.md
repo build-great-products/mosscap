@@ -104,8 +104,8 @@ Default output is compact human-readable cards, rows, and labelled details; use 
 Incoming Slack attachments are stored as metadata and downloaded only on request:
 
 ```sh
-mosscap file show fil_EXAMPLE --json
-mosscap file get fil_EXAMPLE --output ./attachment.bin
+mosscap file show EXAMPLE --json
+mosscap file get EXAMPLE --output ./attachment.bin
 mosscap slack file --file ./result.bin
 ```
 

@@ -46,30 +46,31 @@ const (
 type DiagnosticCode string
 
 const (
-	DiagnosticInvalidAuth          DiagnosticCode = "invalid_auth"
-	DiagnosticTokenRevoked         DiagnosticCode = "token_revoked"
-	DiagnosticMissingScope         DiagnosticCode = "missing_scope"
-	DiagnosticTeamMismatch         DiagnosticCode = "team_mismatch"
-	DiagnosticBotMismatch          DiagnosticCode = "bot_mismatch"
-	DiagnosticChannelNotFound      DiagnosticCode = "channel_not_found"
-	DiagnosticChannelArchived      DiagnosticCode = "channel_archived"
-	DiagnosticChannelReadOnly      DiagnosticCode = "channel_read_only"
-	DiagnosticUnsupportedChannel   DiagnosticCode = "unsupported_channel"
-	DiagnosticNotInChannel         DiagnosticCode = "not_in_channel"
-	DiagnosticUserNotFound         DiagnosticCode = "user_not_found"
-	DiagnosticMessageNotFound      DiagnosticCode = "message_not_found"
-	DiagnosticRejected             DiagnosticCode = "external_rejected"
-	DiagnosticRateLimited          DiagnosticCode = "rate_limited"
-	DiagnosticTimeout              DiagnosticCode = "timeout"
-	DiagnosticCanceled             DiagnosticCode = "canceled"
-	DiagnosticDisconnected         DiagnosticCode = "disconnected"
-	DiagnosticMalformedResponse    DiagnosticCode = "malformed_response"
-	DiagnosticUnavailable          DiagnosticCode = "unavailable"
-	DiagnosticInvalidRequest       DiagnosticCode = "invalid_request"
-	DiagnosticUnsafeFileRedirect   DiagnosticCode = "unsafe_file_redirect"
-	DiagnosticFileTooLarge         DiagnosticCode = "file_too_large"
-	DiagnosticSlackFileUnavailable DiagnosticCode = "slack_file_unavailable"
-	DiagnosticPermalinkUnavailable DiagnosticCode = "permalink_unavailable"
+	DiagnosticInvalidAuth           DiagnosticCode = "invalid_auth"
+	DiagnosticTokenRevoked          DiagnosticCode = "token_revoked"
+	DiagnosticMissingScope          DiagnosticCode = "missing_scope"
+	DiagnosticTeamMismatch          DiagnosticCode = "team_mismatch"
+	DiagnosticBotMismatch           DiagnosticCode = "bot_mismatch"
+	DiagnosticChannelNotFound       DiagnosticCode = "channel_not_found"
+	DiagnosticChannelArchived       DiagnosticCode = "channel_archived"
+	DiagnosticChannelReadOnly       DiagnosticCode = "channel_read_only"
+	DiagnosticUnsupportedChannel    DiagnosticCode = "unsupported_channel"
+	DiagnosticNotInChannel          DiagnosticCode = "not_in_channel"
+	DiagnosticUserNotFound          DiagnosticCode = "user_not_found"
+	DiagnosticMessageNotFound       DiagnosticCode = "message_not_found"
+	DiagnosticRejected              DiagnosticCode = "external_rejected"
+	DiagnosticRateLimited           DiagnosticCode = "rate_limited"
+	DiagnosticSocketConnectionLimit DiagnosticCode = "socket_connection_limit"
+	DiagnosticTimeout               DiagnosticCode = "timeout"
+	DiagnosticCanceled              DiagnosticCode = "canceled"
+	DiagnosticDisconnected          DiagnosticCode = "disconnected"
+	DiagnosticMalformedResponse     DiagnosticCode = "malformed_response"
+	DiagnosticUnavailable           DiagnosticCode = "unavailable"
+	DiagnosticInvalidRequest        DiagnosticCode = "invalid_request"
+	DiagnosticUnsafeFileRedirect    DiagnosticCode = "unsafe_file_redirect"
+	DiagnosticFileTooLarge          DiagnosticCode = "file_too_large"
+	DiagnosticSlackFileUnavailable  DiagnosticCode = "slack_file_unavailable"
+	DiagnosticPermalinkUnavailable  DiagnosticCode = "permalink_unavailable"
 )
 
 // Valid reports whether d is in the durable diagnostic allowlist.
@@ -79,8 +80,8 @@ func (d DiagnosticCode) Valid() bool {
 		DiagnosticTeamMismatch, DiagnosticBotMismatch, DiagnosticChannelNotFound,
 		DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel,
 		DiagnosticNotInChannel, DiagnosticUserNotFound, DiagnosticMessageNotFound,
-		DiagnosticRejected, DiagnosticRateLimited, DiagnosticTimeout,
-		DiagnosticCanceled, DiagnosticDisconnected, DiagnosticMalformedResponse,
+		DiagnosticRejected, DiagnosticRateLimited, DiagnosticSocketConnectionLimit,
+		DiagnosticTimeout, DiagnosticCanceled, DiagnosticDisconnected, DiagnosticMalformedResponse,
 		DiagnosticUnavailable, DiagnosticInvalidRequest, DiagnosticUnsafeFileRedirect,
 		DiagnosticFileTooLarge, DiagnosticSlackFileUnavailable, DiagnosticPermalinkUnavailable:
 		return true
@@ -216,6 +217,8 @@ func VerificationAdvice(code DiagnosticCode) string {
 		return "Review trusted users: each must be an active human in the configured workspace, then restart or gateway reload."
 	case DiagnosticInvalidRequest:
 		return "Check the configured Slack IDs and runtime configuration, then restart or gateway reload."
+	case DiagnosticSocketConnectionLimit:
+		return "Slack has reached this app's Socket Mode connection limit. Stop duplicate gateway instances, wait for stale connections to close, then retry startup or gateway reload."
 	case DiagnosticTimeout, DiagnosticCanceled, DiagnosticDisconnected, DiagnosticUnavailable, DiagnosticRateLimited:
 		return "Check Slack network availability and retry startup or gateway reload."
 	case DiagnosticMalformedResponse:

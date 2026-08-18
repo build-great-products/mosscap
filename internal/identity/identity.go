@@ -4,7 +4,6 @@ package identity
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"io"
 )
 
@@ -31,21 +30,13 @@ func NewGenerator(reader io.Reader) Generator {
 // IsZero reports whether the generator has not been initialized.
 func (g Generator) IsZero() bool { return g.reader == nil }
 
-// newID returns an optional prefix followed by 128 random bits encoded as raw base64url.
-func (g Generator) newID(prefix string) (string, error) {
+// NewID returns 128 random bits encoded as raw base64url.
+func (g Generator) NewID() (string, error) {
 	bytes := make([]byte, randomBytes)
 	if _, err := io.ReadFull(g.reader, bytes); err != nil {
 		return "", err
 	}
-	return prefix + base64.RawURLEncoding.EncodeToString(bytes), nil
-}
-
-// NewID returns prefix followed by 128 random bits encoded as raw base64url.
-func (g Generator) NewID(prefix string) (string, error) {
-	if prefix == "" {
-		return "", errors.New("identity prefix must not be empty")
-	}
-	return g.newID(prefix)
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
 // NewTaskID returns an unprefixed, shell-safe base62 task ID.
@@ -67,19 +58,19 @@ func (g Generator) NewTaskID() (string, error) {
 }
 
 // NewStateEventID returns a task-state-event ID.
-func (g Generator) NewStateEventID() (string, error) { return g.NewID("ste_") }
+func (g Generator) NewStateEventID() (string, error) { return g.NewID() }
 
 // NewEffectID returns a Slack effect ID.
-func (g Generator) NewEffectID() (string, error) { return g.NewID("eff_") }
+func (g Generator) NewEffectID() (string, error) { return g.NewID() }
 
 // NewDeliveryID returns an opaque durable Pi delivery ID.
-func (g Generator) NewDeliveryID() (string, error) { return g.NewID("dlv_") }
+func (g Generator) NewDeliveryID() (string, error) { return g.NewID() }
 
 // NewFileID returns a durable file-metadata ID.
-func (g Generator) NewFileID() (string, error) { return g.NewID("fil_") }
+func (g Generator) NewFileID() (string, error) { return g.NewID() }
 
 // NewRequestID returns a request ID.
-func (g Generator) NewRequestID() (string, error) { return g.NewID("req_") }
+func (g Generator) NewRequestID() (string, error) { return g.NewID() }
 
 // ValidRequestID reports whether id is valid for a caller-supplied request ID.
 func ValidRequestID(id string) bool {

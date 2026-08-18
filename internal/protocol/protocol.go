@@ -984,8 +984,14 @@ func validEffectSelector(value string) bool   { return validTypedSelector(value,
 func validFullEffectID(value string) bool     { return len(value) == 26 && validEffectSelector(value) }
 func validFileSelector(value string) bool     { return validTypedSelector(value, "fil_") }
 func validTransferSelector(value string) bool { return validTypedSelector(value, "xfr_") }
-func validTypedSelector(value, prefix string) bool {
-	return strings.HasPrefix(value, prefix) && len(value) > len(prefix) && len(value) <= 128 && validSelectorSuffix(value[len(prefix):])
+
+// validTypedSelector accepts unprefixed IDs and durable IDs from before the
+// prefix-free migration.
+func validTypedSelector(value, legacyPrefix string) bool {
+	if strings.HasPrefix(value, legacyPrefix) {
+		value = value[len(legacyPrefix):]
+	}
+	return value != "" && len(value) <= 22 && validSelectorSuffix(value)
 }
 func validSelectorSuffix(value string) bool {
 	if !utf8.ValidString(value) {
@@ -1012,18 +1018,10 @@ func validPaths(values []string) bool {
 	}
 	return true
 }
-func validDeliveryID(value string) bool { return validDeliverySelector(value) && len(value) == 26 }
-func validDeliverySelector(value string) bool {
-	if !strings.HasPrefix(value, "dlv_") || len(value) <= 4 || len(value) > 128 || !utf8.ValidString(value) {
-		return false
-	}
-	for _, r := range value[4:] {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
-			return false
-		}
-	}
-	return true
+func validDeliveryID(value string) bool {
+	return (len(value) == 22 && validSelectorSuffix(value)) || (len(value) == 26 && strings.HasPrefix(value, "dlv_") && validSelectorSuffix(value[4:]))
 }
+func validDeliverySelector(value string) bool { return validTypedSelector(value, "dlv_") }
 func validDeliveryKey(value string) bool {
 	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
 		return false

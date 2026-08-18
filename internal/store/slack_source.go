@@ -527,18 +527,13 @@ func (s *Store) resolveSlackTaskSelector(ctx context.Context, selector string) (
 	return ids[0], nil
 }
 
-func validTypedSelector(selector, prefix string) bool {
-	if !strings.HasPrefix(selector, prefix) || len(selector) > len(prefix)+22 {
-		return false
+// validTypedSelector accepts unprefixed IDs and durable IDs from before the
+// prefix-free migration.
+func validTypedSelector(selector, legacyPrefix string) bool {
+	if strings.HasPrefix(selector, legacyPrefix) {
+		selector = selector[len(legacyPrefix):]
 	}
-	for i := len(prefix); i < len(selector); i++ {
-		c := selector[i]
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
-			continue
-		}
-		return false
-	}
-	return true
+	return len(selector) > 0 && len(selector) <= 22 && validOpaqueIDSuffix(selector)
 }
 
 // FindSlackSource performs an exact immutable source-identity lookup.

@@ -93,7 +93,13 @@ func DeliveryKey(taskID string, version int64, piSessionID string) string {
 func validPiSessionID(value string) bool {
 	return value != "" && len(value) <= maxPiSessionID && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
-func validDeliveryID(value string) bool { return validFullTypedID(value, "dlv_") }
+func validDeliveryID(value string) bool { return validFullOpaqueID(value, "dlv_") }
+func validDeliverySelector(value string) bool {
+	if strings.HasPrefix(value, "dlv_") {
+		return len(value) > 4 && len(value) <= 26 && validOpaqueIDSuffix(value[4:])
+	}
+	return len(value) > 0 && len(value) <= 22 && validOpaqueIDSuffix(value)
+}
 func validDeliveryKey(value string) bool {
 	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
 		return false
@@ -115,16 +121,13 @@ func validDeliveryDiagnostic(value string) bool {
 	}
 	return false
 }
-func validFullTypedID(value, prefix string) bool {
-	if len(value) != len(prefix)+22 || !strings.HasPrefix(value, prefix) {
-		return false
+
+// validFullOpaqueID accepts current unprefixed IDs and durable legacy IDs.
+func validFullOpaqueID(value, legacyPrefix string) bool {
+	if len(value) == 22 {
+		return validOpaqueIDSuffix(value)
 	}
-	for _, c := range value[len(prefix):] {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
-			return false
-		}
-	}
-	return true
+	return strings.HasPrefix(value, legacyPrefix) && len(value) == len(legacyPrefix)+22 && validOpaqueIDSuffix(value[len(legacyPrefix):])
 }
 
 // ReconcileDeliveryObservations promotes exact durable Pi evidence. Unknown or
@@ -493,10 +496,11 @@ func getDeliveryExact(ctx context.Context, q rowQueryer, id string) (storedDeliv
 	return x, err
 }
 func getDelivery(ctx context.Context, q queryer, selector string) (storedDelivery, error) {
-	if !strings.HasPrefix(selector, "dlv_") {
+	if !validDeliverySelector(selector) {
 		return storedDelivery{}, ErrDeliveryNotFound
 	}
-	rows, err := q.QueryContext(ctx, deliverySelect+" WHERE delivery_id=? OR delivery_id LIKE ? ORDER BY delivery_id LIMIT 2", selector, selector+"%")
+	// A selector is never interpolated into SQL: '_' is valid opaque ID data.
+	rows, err := q.QueryContext(ctx, deliverySelect+" WHERE delivery_id=? OR substr(delivery_id,1,length(?))=? ORDER BY delivery_id LIMIT 2", selector, selector, selector)
 	if err != nil {
 		return storedDelivery{}, err
 	}

@@ -78,7 +78,20 @@ func (a App) configSecretSetTyped(key string, stdin bool) error {
 	return nil
 }
 
-func (a App) gatewayRunTyped() error {
+func (a App) gatewayRunTyped() (err error) {
+	// Gateway startup has passed Cobra parsing. Preserve startup failures as
+	// runtime errors rather than allowing the command tree to render them as
+	// usage errors (and obscure their operator guidance).
+	defer func() {
+		if err == nil {
+			return
+		}
+		var command *commandError
+		if !errors.As(err, &command) {
+			err = &commandError{code: ExitUnsafe, message: err.Error()}
+		}
+	}()
+
 	loc, err := config.DefaultLocation()
 	if err != nil {
 		return err

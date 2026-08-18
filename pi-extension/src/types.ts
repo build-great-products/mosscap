@@ -28,11 +28,13 @@ export type PollResult = Counts & { work: Work | null };
 export type OpenResult = Counts & { pi_session_id: string };
 
 export const byteLength = (value: string): number => Buffer.byteLength(value, "utf8");
-export function isDeliveryID(value: unknown): value is string { return typeof value === "string" && /^dlv_[A-Za-z0-9_-]{22}$/.test(value); }
+/** Matches Go identity.Generator.NewDeliveryID: 22 random base64url characters. */
+export function isDeliveryID(value: unknown): value is string { return typeof value === "string" && /^(?:[A-Za-z0-9_-]{22}|dlv_[A-Za-z0-9_-]{22})$/.test(value); }
 /** Matches Go identity.Generator.NewTaskID: 22 random base62 characters. */
 export function isTaskID(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9]{22}$/.test(value); }
 export function isTaskSelector(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9]{8,22}$/.test(value); }
-export function isFileID(value: unknown): value is string { return typeof value === "string" && /^fil_[A-Za-z0-9_-]{22}$/.test(value); }
+/** Matches Go identity.Generator.NewFileID: 22 random base64url characters. */
+export function isFileID(value: unknown): value is string { return typeof value === "string" && /^(?:[A-Za-z0-9_-]{22}|fil_[A-Za-z0-9_-]{22})$/.test(value); }
 export function isDeliveryKey(value: unknown): value is string { return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value); }
 export function isDetails(value: unknown, sessionId?: string): value is DeliveryDetails {
   if (value === null || typeof value !== "object") return false;

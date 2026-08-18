@@ -155,7 +155,7 @@ func (s fixedSettings) Settings(context.Context) (Settings, error) { return s.va
 
 type fixedIDs struct{}
 
-func (fixedIDs) NewID(string) (string, error) { return "xfr_abcdefghijklmnopqrstuv", nil }
+func (fixedIDs) NewID() (string, error) { return "abcdefghijklmnopqrstuv", nil }
 
 type downloadSlack struct {
 	bytes     []byte

@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	SchemaVersion      = 5
+	SchemaVersion      = 6
 	ApplicationID      = 0x4d435030 // "MCP0"
 	RequestRetention   = 30 * 24 * time.Hour
 	defaultBusyTimeout = 5 * time.Second
@@ -46,6 +46,9 @@ var migration0004 []byte
 
 //go:embed migrations/0005_file_transfer.sql
 var migration0005 []byte
+
+//go:embed migrations/0006_prefix_free_ids.sql
+var migration0006 []byte
 
 var (
 	ErrIncompatibleSchema = errors.New("incompatible SQLite schema")
@@ -140,6 +143,8 @@ func migrationChecksum(version int) string {
 		migration = migration0004
 	case 5:
 		migration = migration0005
+	case 6:
+		migration = migration0006
 	default:
 		return ""
 	}
@@ -322,7 +327,7 @@ func (s *Store) initialize(ctx context.Context, created bool) error {
 	for _, migration := range []struct {
 		version int
 		sql     []byte
-	}{{1, migration0001}, {2, migration0002}, {3, migration0003}, {4, migration0004}, {5, migration0005}} {
+	}{{1, migration0001}, {2, migration0002}, {3, migration0003}, {4, migration0004}, {5, migration0005}, {6, migration0006}} {
 		if _, err = tx.ExecContext(ctx, string(migration.sql)); err != nil {
 			return err
 		}
@@ -360,7 +365,7 @@ func (s *Store) upgrade(ctx context.Context, fromVersion int) error {
 	if err := compatibleVersion(ctx, tx, fromVersion); err != nil {
 		return err
 	}
-	migrations := map[int][]byte{2: migration0002, 3: migration0003, 4: migration0004, 5: migration0005}
+	migrations := map[int][]byte{2: migration0002, 3: migration0003, 4: migration0004, 5: migration0005, 6: migration0006}
 	for version := fromVersion + 1; version <= SchemaVersion; version++ {
 		migration, ok := migrations[version]
 		if !ok {
@@ -481,7 +486,7 @@ func expectedSchemaFingerprints(ctx context.Context, version int) (map[string]st
 	}
 	db.SetMaxOpenConns(1)
 	defer db.Close()
-	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005}
+	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006}
 	if version < 1 || version > len(migrations) {
 		return nil, errors.New("unknown schema version")
 	}
@@ -934,7 +939,7 @@ func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool,
 	}
 	var anchorCreated int64
 	if cursor != "" {
-		if len(cursor) != 22 || !validOpaqueIDSuffix(cursor) {
+		if !validFullTaskID(cursor) {
 			return nil, "", invalidInput("invalid task list cursor")
 		}
 		if err := s.db.QueryRowContext(ctx, "SELECT created_at FROM tasks WHERE task_id=?", cursor).Scan(&anchorCreated); errors.Is(err, sql.ErrNoRows) {

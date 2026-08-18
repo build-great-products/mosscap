@@ -6,7 +6,7 @@ import { taskMessage } from "../src/messages.ts";
 import type { Work } from "../src/types.ts";
 
 const work: Work = {
-  delivery_id: "dlv_AbCdEfGhIjKlMnOpQrStUv",
+  delivery_id: "AbCdEfGhIjKlMnOpQrStUv",
   delivery_key: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   task_id: "AbCdEfGhIjKlMnOpQrStUv",
   task_selector: "AbCdEfGh",
@@ -62,7 +62,7 @@ test("observed-delivery cap fails closed before creating or opening a gateway cl
   const entries = Array.from({ length: 257 }, (_, i) => ({
     type: "custom_message",
     customType: "mosscap.task",
-    details: taskMessage({ ...work, delivery_id: `dlv_${String(i).padStart(22, "0")}` }, "session-1").details,
+    details: taskMessage({ ...work, delivery_id: String(i).padStart(22, "0") }, "session-1").details,
   }));
   const controller = new Controller(adapter({ entries: () => entries, notify: text => notifications.push(text) }), {
     client: () => { factories++; return gateway(); },

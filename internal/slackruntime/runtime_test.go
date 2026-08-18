@@ -100,6 +100,13 @@ func TestSafeErrorRendersTypedVerificationAdviceWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestSafeErrorRendersSocketConnectionLimitRemediation(t *testing.T) {
+	err := safeError(slackapi.NewExternalError(slackapi.ReasonUnavailable, slackapi.DiagnosticSocketConnectionLimit, "", nil))
+	if err == nil || !contains(err.Error(), "socket_connection_limit") || !contains(err.Error(), "Stop duplicate gateway instances") {
+		t.Fatalf("safeError = %q", err)
+	}
+}
+
 func TestStartGatesEnvelopeHandlingUntilActivation(t *testing.T) {
 	c := validConfig(t)
 	ack, ackRecorder := fake.NewAckRecorder(nil)

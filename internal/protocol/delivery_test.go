@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-const deliveryID = "dlv_AbCdEfGhIjKlMnOpQrStUv"
+const deliveryID = "AbCdEfGhIjKlMnOpQrStUv"
 const deliveryKey = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func TestDeliveryCapabilityIsDefinedButNotAdvertised(t *testing.T) {
@@ -38,7 +38,7 @@ func TestDeliveryParamsAreStrictAndBounded(t *testing.T) {
 		{"delivery.rejected", `{"delivery_id":"` + deliveryID + `","delivery_key":"` + deliveryKey + `","diagnostic_code":"bad-code"}`, false},
 		{"delivery.close", `{}`, true}, {"delivery.close", `{"extra":true}`, false},
 		{"delivery.list", `{"state":"uncertain"}`, true}, {"delivery.list", `{"state":"lost"}`, false},
-		{"delivery.inspect", `{"delivery":"dlv_AbCd"}`, true}, {"delivery.inspect", `{"delivery":"tsk_wrong"}`, false},
+		{"delivery.inspect", `{"delivery":"dlv_AbCd"}`, true}, {"delivery.inspect", `{"delivery":"invalid!"}`, false},
 		{"delivery.requeue", `{"delivery":"dlv_AbCd","reason":"explicit operator recovery"}`, true},
 	}
 	for _, tc := range cases {

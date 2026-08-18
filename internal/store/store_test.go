@@ -82,7 +82,7 @@ func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=6 WHERE version=2"); err != nil {
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=7 WHERE version=2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -171,20 +171,54 @@ func TestListPaginationUsesStableCursor(t *testing.T) {
 	}
 }
 
+func TestLegacyPrefixedTaskIDsRemainResolvableAndPageable(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const legacyID = "tsk_abcdefghijklmnopqrstuv"
+	if _, err := s.DB().ExecContext(ctx, "INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at) VALUES(?,1,'open','preserved','slack',1,1)", legacyID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, legacyID)
+	if err != nil || got.ID != legacyID {
+		t.Fatalf("Get legacy task = %#v, %v", got, err)
+	}
+	if _, _, err := s.List(ctx, nil, true, 1, legacyID); err != nil {
+		t.Fatalf("List with legacy cursor: %v", err)
+	}
+}
+
 func TestListCursorExpiredAndTrustCursorSurvivesRemoval(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	created, err := s.Create(ctx, "cursor-expired", "task")
-	if err != nil { t.Fatal(err) }
-	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); err != nil { t.Fatalf("present cursor: %v", err) }
-	if _, err := s.DB().Exec("DELETE FROM tasks WHERE task_id=?", created.TaskID); err != nil { t.Fatal(err) }
-	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); !errors.Is(err, ErrCursorExpired) { t.Fatalf("expired cursor = %v", err) }
-	for _, id := range []string{"U00000001", "U00000002", "U00000003"} { if _, err := s.AddTrustedUser(ctx, "trust-"+id, id); err != nil { t.Fatal(err) } }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); err != nil {
+		t.Fatalf("present cursor: %v", err)
+	}
+	if _, err := s.DB().Exec("DELETE FROM tasks WHERE task_id=?", created.TaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); !errors.Is(err, ErrCursorExpired) {
+		t.Fatalf("expired cursor = %v", err)
+	}
+	for _, id := range []string{"U00000001", "U00000002", "U00000003"} {
+		if _, err := s.AddTrustedUser(ctx, "trust-"+id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	users, next, err := s.ListTrustedUsersPage(ctx, 2, "")
-	if err != nil || len(users) != 2 || next == "" { t.Fatalf("trust first = %#v %q %v", users, next, err) }
-	if _, err := s.RemoveTrustedUser(ctx, "remove-anchor", next); err != nil { t.Fatal(err) }
+	if err != nil || len(users) != 2 || next == "" {
+		t.Fatalf("trust first = %#v %q %v", users, next, err)
+	}
+	if _, err := s.RemoveTrustedUser(ctx, "remove-anchor", next); err != nil {
+		t.Fatal(err)
+	}
 	users, next, err = s.ListTrustedUsersPage(ctx, 2, next)
-	if err != nil || len(users) != 1 || next != "" { t.Fatalf("trust resume = %#v %q %v", users, next, err) }
+	if err != nil || len(users) != 1 || next != "" {
+		t.Fatalf("trust resume = %#v %q %v", users, next, err)
+	}
 }
 
 func TestTransitionsAndRestart(t *testing.T) {
@@ -442,7 +476,7 @@ func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('slack_task_sources','slack_source_events','slack_effects','files')").Scan(&slackTables); err != nil {
 		t.Fatal(err)
 	}
-	if version != SchemaVersion || migrations != 5 || requests != 1 || slackTables != 4 {
+	if version != SchemaVersion || migrations != 6 || requests != 1 || slackTables != 4 {
 		t.Fatalf("upgrade state version=%d migrations=%d requests=%d Slack tables=%d", version, migrations, requests, slackTables)
 	}
 	tasks, _, err := s.List(ctx, nil, true, 10, "")
@@ -522,7 +556,7 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.DB().Exec("PRAGMA user_version=6"); err != nil {
+		if _, err := s.DB().Exec("PRAGMA user_version=7"); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {

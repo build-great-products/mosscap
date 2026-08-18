@@ -289,6 +289,25 @@ func TestSocketOpenRequiresHelloReadinessAndSecureProductionURL(t *testing.T) {
 	}
 }
 
+func TestSocketOpenReportsSocketConnectionLimit(t *testing.T) {
+	t.Parallel()
+	websocketServer := newWebSocketServer(t, func(connection *websocket.Conn) {
+		_ = connection.WriteJSON(map[string]any{"type": "disconnect", "reason": "too_many_websockets"})
+	})
+	defer websocketServer.Close()
+	apiServer := newSocketOpenServer(t, websocketURL(websocketServer.URL))
+	defer apiServer.Close()
+
+	stream, err := NewSocket("xapp-test", SocketAPIURL(apiServer.URL), SocketAllowInsecureWebSocket()).Open(context.Background())
+	if err == nil || stream != nil {
+		t.Fatalf("Open = %T, %v", stream, err)
+	}
+	failure := slackapi.Classify(err, slackapi.FailureSocket)
+	if failure.Class != slackapi.FailureUnavailable || failure.Diagnostic != slackapi.DiagnosticSocketConnectionLimit {
+		t.Fatalf("classification = %#v (%v)", failure, err)
+	}
+}
+
 func TestSocketLivenessPingsAndBoundsSilentRead(t *testing.T) {
 	t.Parallel()
 	pingSeen := make(chan struct{}, 1)

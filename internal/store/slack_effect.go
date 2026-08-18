@@ -189,7 +189,7 @@ func (s *Store) PrepareSlackEffect(ctx context.Context, requestID string, target
 	})
 }
 
-// GetSlackEffect resolves an exact ID or an unambiguous eff_ prefix.
+// GetSlackEffect resolves an exact ID or an unambiguous opaque prefix.
 func (s *Store) GetSlackEffect(ctx context.Context, selector string) (SlackEffect, error) {
 	return getSlackEffect(ctx, s.db, selector)
 }
@@ -764,10 +764,28 @@ func validSlackTimestamp(value string) bool {
 }
 
 func canonicalTaskSelector(selector string) (string, bool) {
+	// Task IDs created before the unprefixed base62 migration used the tsk_
+	// prefix. They remain durable references, so selectors must continue to
+	// resolve both forms rather than making existing Slack-task records
+	// unreachable after an upgrade.
+	if strings.HasPrefix(selector, "tsk_") {
+		suffix := selector[len("tsk_"):]
+		if len(suffix) == 0 || len(suffix) > 22 || !validOpaqueIDSuffix(suffix) {
+			return "", false
+		}
+		return selector, true
+	}
 	if len(selector) == 0 || len(selector) > 22 || !validOpaqueIDSuffix(selector) {
 		return "", false
 	}
 	return selector, true
+}
+
+func validFullTaskID(id string) bool {
+	if strings.HasPrefix(id, "tsk_") {
+		return len(id) == 26 && validOpaqueIDSuffix(id[len("tsk_"):])
+	}
+	return len(id) == 22 && validOpaqueIDSuffix(id)
 }
 
 func validTaskSelector(selector string) bool {
@@ -776,14 +794,11 @@ func validTaskSelector(selector string) bool {
 }
 
 func validSlackEffectSelector(selector string) bool {
-	if !strings.HasPrefix(selector, "eff_") || len(selector) <= len("eff_") || len(selector) > 26 {
-		return false
-	}
-	return validOpaqueIDSuffix(selector[len("eff_"):])
+	return validTypedSelector(selector, "eff_")
 }
 
 func validFullSlackEffectID(effectID string) bool {
-	return len(effectID) == 26 && validSlackEffectSelector(effectID)
+	return validFullOpaqueID(effectID, "eff_")
 }
 
 func validOpaqueIDSuffix(suffix string) bool {

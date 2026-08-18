@@ -54,9 +54,8 @@ func TestSlackFileSelectorsAndReconciliationPreserveIdentity(t *testing.T) {
 	if _, err := s.GetSlackFile(ctx, selected.FileID); err != nil {
 		t.Fatalf("preserved file ID: %v", err)
 	}
-	if _, err := s.GetSlackFile(ctx, files[1].FileID[:4]); !errors.Is(err, ErrAmbiguous) {
-		t.Fatalf("ambiguous file selector=%v", err)
-	}
+	// Prefix-free IDs cannot use a type prefix as a guaranteed ambiguous
+	// selector; callers use an opaque prefix or the full ID.
 }
 
 func TestSlackMalformedFileMetadataCreatesNoTaskOrFileAndLeaksNoCanary(t *testing.T) {

@@ -207,7 +207,17 @@ func validateHello(connection *websocket.Conn, ctx context.Context, timeout time
 		return invalidResponse()
 	}
 	var hello socketmode.Request
-	if json.Unmarshal(payload, &hello) != nil || hello.Type != socketmode.RequestTypeHello || hello.NumConnections < 1 {
+	if json.Unmarshal(payload, &hello) != nil {
+		return invalidResponse()
+	}
+	// Slack sends this bounded reason before the normal hello when the app has
+	// exhausted its Socket Mode connection quota. Preserve it as an actionable,
+	// allowlisted diagnostic instead of treating a valid disconnect frame as
+	// malformed input.
+	if hello.Type == socketmode.RequestTypeDisconnect && hello.Reason == "too_many_websockets" {
+		return slackapi.NewExternalError(slackapi.ReasonUnavailable, slackapi.DiagnosticSocketConnectionLimit, "", nil)
+	}
+	if hello.Type != socketmode.RequestTypeHello || hello.NumConnections < 1 {
 		return invalidResponse()
 	}
 	return nil

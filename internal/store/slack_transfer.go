@@ -62,7 +62,7 @@ func validSHA256(value string) bool {
 }
 
 func validFullFileID(fileID string) bool {
-	return len(fileID) == 26 && validTypedSelector(fileID, "fil_")
+	return validFullOpaqueID(fileID, "fil_")
 }
 
 func canonicalSlackFileUpload(target SlackEffectTarget, intent SlackFileUploadIntent) error {
@@ -374,7 +374,7 @@ func (s *Store) InsertFileTemporaryTransfer(ctx context.Context, transfer FileTe
 }
 
 func validTemporaryTransfer(transfer FileTemporaryTransfer) bool {
-	return len(transfer.TransferID) == 26 && validTypedSelector(transfer.TransferID, "xfr_") && validFullFileID(transfer.FileID) && validTemporaryGeneratedName(transfer.GeneratedName) && transfer.SizeBytes >= 0 && validSHA256(transfer.SHA256) && !transfer.CreatedAt.IsZero() && !transfer.ExpiresAt.Before(transfer.CreatedAt)
+	return validFullOpaqueID(transfer.TransferID, "xfr_") && validFullFileID(transfer.FileID) && validTemporaryGeneratedName(transfer.GeneratedName) && transfer.SizeBytes >= 0 && validSHA256(transfer.SHA256) && !transfer.CreatedAt.IsZero() && !transfer.ExpiresAt.Before(transfer.CreatedAt)
 }
 
 // validTemporaryGeneratedName accepts only the basename created by fileio.TempDir:
@@ -392,7 +392,7 @@ func validTemporaryGeneratedName(name string) bool {
 }
 
 func (s *Store) GetFileTemporaryTransfer(ctx context.Context, transferID string) (FileTemporaryTransfer, error) {
-	if len(transferID) != 26 || !validTypedSelector(transferID, "xfr_") {
+	if !validFullOpaqueID(transferID, "xfr_") {
 		return FileTemporaryTransfer{}, ErrFileTransferNotFound
 	}
 	var transfer FileTemporaryTransfer
@@ -521,7 +521,7 @@ func (s *Store) RecordIncomingFileFailure(ctx context.Context, fileID, code stri
 // DeleteFileTemporaryTransfer removes only the row; lifecycle code must unlink
 // the verified generated file first.
 func (s *Store) DeleteFileTemporaryTransfer(ctx context.Context, transferID string) error {
-	if len(transferID) != 26 || !validTypedSelector(transferID, "xfr_") {
+	if !validFullOpaqueID(transferID, "xfr_") {
 		return ErrFileTransferNotFound
 	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM file_temporary_transfers WHERE transfer_id=?`, transferID)
