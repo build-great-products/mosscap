@@ -221,9 +221,13 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 	}
 	// Required combinations are validated by the request handlers so their
 	// established, command-specific diagnostics remain intact.
-	for _, pair := range [][2]string{{"text", "text-file"}, {"state", "all"}, {"dry-run", "confirm"}} {
-		if cmd.Flags().Lookup(pair[0]) != nil && cmd.Flags().Lookup(pair[1]) != nil {
-			cmd.MarkFlagsMutuallyExclusive(pair[0], pair[1])
+	for _, group := range [][]string{{"text", "text-file", "stdin"}, {"state", "all"}, {"dry-run", "confirm"}} {
+		present := true
+		for _, name := range group {
+			present = present && cmd.Flags().Lookup(name) != nil
+		}
+		if present {
+			cmd.MarkFlagsMutuallyExclusive(group...)
 		}
 	}
 	return cmd
@@ -235,7 +239,7 @@ func leafDescription(short, handler string) string {
 	description := short
 	switch handler {
 	case "task.create", "task.update", "task.reply", "slack.send", "slack.edit":
-		description += "\n\nProvide exactly one of --text or --text-file."
+		description += "\n\nProvide exactly one of --text, --text-file, or --stdin."
 	case "task.list":
 		description += "\n\nUse either --state (open, working, or done) or --all."
 	case "purge":
@@ -337,25 +341,26 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 	case "task.create", "task.update", "task.reply":
 		text, _ := cmd.Flags().GetString("text")
 		textFile, _ := cmd.Flags().GetString("text-file")
+		stdin, _ := cmd.Flags().GetBool("stdin")
 		requestID, _ := cmd.Flags().GetString("request-id")
 		done, _ := cmd.Flags().GetBool("done")
 		selector := ""
 		if len(args) != 0 {
 			selector = args[0]
 		}
-		return a.taskTyped(strings.TrimPrefix(handler, "task."), selector, text, textFile, "", false, 0, "", done, requestID, "", jsonOut)
+		return a.taskTyped(strings.TrimPrefix(handler, "task."), selector, text, textFile, cmd.Flags().Changed("text"), cmd.Flags().Changed("text-file"), stdin, "", false, 0, "", done, requestID, "", jsonOut)
 	case "task.list":
 		state, _ := cmd.Flags().GetString("state")
 		all, _ := cmd.Flags().GetBool("all")
 		limit, _ := cmd.Flags().GetInt("limit")
 		cursor, _ := cmd.Flags().GetString("cursor")
-		return a.taskTyped("list", "", "", "", state, all, limit, "", false, "", cursor, jsonOut)
+		return a.taskTyped("list", "", "", "", false, false, false, state, all, limit, "", false, "", cursor, jsonOut)
 	case "task.show":
-		return a.taskTyped("show", args[0], "", "", "", false, 0, "", false, "", "", jsonOut)
+		return a.taskTyped("show", args[0], "", "", false, false, false, "", false, 0, "", false, "", "", jsonOut)
 	case "task.open", "task.working", "task.done":
 		note, _ := cmd.Flags().GetString("note")
 		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.taskTyped(strings.TrimPrefix(handler, "task."), args[0], "", "", "", false, 0, note, false, requestID, "", jsonOut)
+		return a.taskTyped(strings.TrimPrefix(handler, "task."), args[0], "", "", false, false, false, "", false, 0, note, false, requestID, "", jsonOut)
 	case "effect.list":
 		state, _ := cmd.Flags().GetString("state")
 		task, _ := cmd.Flags().GetString("task")
@@ -470,19 +475,19 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"trust", "list"}, "List trusted Slack users.", "mosscap trust list [--limit N] [--cursor SLACK_USER_ID] [--json]", true, "trusted_users", "trust.list", []flagSpec{intFlag("limit", "Maximum number of users."), stringFlag("cursor", "Resume after this Slack user ID."), boolFlag("json", "Render the list as JSON.")}, nil},
 	{[]string{"trust", "add"}, "Add a trusted Slack user.", "mosscap trust add SLACK_USER_ID [--request-id ID] [--json]", false, "trusted_users", "trust.add", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
 	{[]string{"trust", "remove"}, "Remove a trusted Slack user.", "mosscap trust remove SLACK_USER_ID [--request-id ID] [--json]", false, "trusted_users", "trust.remove", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
-	{[]string{"task", "create"}, "Create a local task.", "mosscap task create (--text TEXT|--text-file PATH) [--request-id ID] [--json]", false, "local_tasks", "task.create", textFlags(), nil},
+	{[]string{"task", "create"}, "Create a local task.", "mosscap task create (--text TEXT|--text-file PATH|--stdin) [--request-id ID] [--json]", false, "local_tasks", "task.create", textFlags(), nil},
 	{[]string{"task", "list"}, "List durable tasks.", "mosscap task list [--state open|working|done|--all] [--limit N] [--cursor TASK_ID] [--json]", true, "local_tasks", "task.list", []flagSpec{stringFlag("state", "Filter by open, working, or done state."), boolFlag("all", "Include completed tasks."), intFlag("limit", "Maximum number of tasks."), stringFlag("cursor", "Resume after this task ID."), boolFlag("json", "Render the list as JSON.")}, nil},
 	{[]string{"task", "show"}, "Show current durable task state.", "mosscap task show TASK [--json]", true, "local_tasks", "task.show", []flagSpec{boolFlag("json", "Render the task as JSON.")}, nil},
-	{[]string{"task", "update"}, "Replace a task's text.", "mosscap task update TASK (--text TEXT|--text-file PATH) [--request-id ID] [--json]", false, "local_tasks", "task.update", textFlags(), nil},
+	{[]string{"task", "update"}, "Replace a task's text.", "mosscap task update TASK (--text TEXT|--text-file PATH|--stdin) [--request-id ID] [--json]", false, "local_tasks", "task.update", textFlags(), nil},
 	{[]string{"task", "open"}, "Move a task to open.", "mosscap task open TASK [--note TEXT] [--request-id ID] [--json]", false, "local_tasks", "task.open", transitionFlags(), nil},
 	{[]string{"task", "working"}, "Move a task to working.", "mosscap task working TASK [--note TEXT] [--request-id ID] [--json]", false, "local_tasks", "task.working", transitionFlags(), nil},
 	{[]string{"task", "done"}, "Move a task to done.", "mosscap task done TASK [--note TEXT] [--request-id ID] [--json]", false, "local_tasks", "task.done", transitionFlags(), nil},
-	{[]string{"task", "reply"}, "Reply to a Slack task, optionally completing it after confirmation.", "mosscap task reply TASK (--text TEXT|--text-file PATH) [--done] [--request-id ID] [--json]", false, protocol.CapabilityTaskReply, "task.reply", append(textFlags(), boolFlag("done", "Complete only after Slack confirms the reply.")), nil},
+	{[]string{"task", "reply"}, "Reply to a Slack task, optionally completing it after confirmation.", "mosscap task reply TASK (--text TEXT|--text-file PATH|--stdin) [--done] [--request-id ID] [--json]", false, protocol.CapabilityTaskReply, "task.reply", append(textFlags(), boolFlag("done", "Complete only after Slack confirms the reply.")), nil},
 	{[]string{"slack", "history"}, "Read a page of recent messages from the configured Slack channel.", "mosscap slack history [--limit N] [--cursor CURSOR] [--json]", true, protocol.CapabilitySlackPagination, "slack.history", []flagSpec{intFlag("limit", "Maximum messages to return (default and maximum: 50)."), stringFlag("cursor", "Opaque Slack cursor from the prior page."), boolFlag("json", "Render messages as JSON.")}, nil},
 	{[]string{"slack", "thread"}, "Read a page of a Slack message thread.", "mosscap slack thread THREAD_TS [--limit N] [--cursor CURSOR] [--json]", true, protocol.CapabilitySlackPagination, "slack.thread", []flagSpec{intFlag("limit", "Maximum messages to return (default and maximum: 50)."), stringFlag("cursor", "Opaque Slack cursor from the prior page."), boolFlag("json", "Render messages as JSON.")}, nil},
-	{[]string{"slack", "send"}, "Send a Slack message or threaded reply.", "mosscap slack send [--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.send", append(textFlags(), stringFlag("thread", "Reply thread timestamp."), stringFlag("task", "Related durable task."), repeatStringFlag("file", "Regular file to upload; repeatable.")), nil},
+	{[]string{"slack", "send"}, "Send a Slack message or threaded reply.", "mosscap slack send [--thread THREAD_TS] (--text TEXT|--text-file PATH|--stdin) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.send", append(textFlags(), stringFlag("thread", "Reply thread timestamp."), stringFlag("task", "Related durable task."), repeatStringFlag("file", "Regular file to upload; repeatable.")), nil},
 	{[]string{"slack", "file"}, "Upload a file to the configured Slack channel.", "mosscap slack file [--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK] [--request-id ID] [--json]", false, protocol.CapabilityFileTransfer, "slack.file", []flagSpec{stringFlag("thread", "Reply thread timestamp."), repeatStringFlag("file", "Regular file to upload."), stringFlag("comment", "Optional file comment."), stringFlag("task", "Related durable task."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"file"}},
-	{[]string{"slack", "edit"}, "Replace a Slack message's text.", "mosscap slack edit MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.edit", append(textFlags(), stringFlag("task", "Related durable task.")), nil},
+	{[]string{"slack", "edit"}, "Replace a Slack message's text.", "mosscap slack edit MESSAGE_TS (--text TEXT|--text-file PATH|--stdin) [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.edit", append(textFlags(), stringFlag("task", "Related durable task.")), nil},
 	{[]string{"slack", "delete"}, "Delete a Slack message with an audit reason.", "mosscap slack delete MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.delete", []flagSpec{stringFlag("reason", "Required audit reason."), stringFlag("task", "Related durable task."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 	{[]string{"slack", "react"}, "Add a reaction to a Slack message.", "mosscap slack react MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.react", taskMutationFlags(), nil},
 	{[]string{"slack", "unreact"}, "Remove a reaction from a Slack message.", "mosscap slack unreact MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.unreact", taskMutationFlags(), nil},
@@ -497,7 +502,7 @@ var cobraLeafSpecs = []cobraLeafSpec{
 }
 
 func textFlags() []flagSpec {
-	return []flagSpec{stringFlag("text", "Literal message text."), stringFlag("text-file", "Regular file containing message text."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}
+	return []flagSpec{stringFlag("text", "Literal message text."), stringFlag("text-file", "Regular file containing message text."), boolFlag("stdin", "Read the complete message text from standard input."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}
 }
 func transitionFlags() []flagSpec {
 	return []flagSpec{stringFlag("note", "Transition audit note."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}

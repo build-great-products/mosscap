@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/identity"
@@ -273,22 +274,61 @@ func (a App) file(args []string) error {
 	return a.renderSlackCommand(out, *jsonOut, false)
 }
 
+// readCommandText retains the compatibility parser's value-based source
+// selection. Cobra callers use readCommandTextSource so an explicit empty
+// --text remains a selected (but rejected) source.
 func (a App) readCommandText(text, path string) (string, error) {
-	if (text == "") == (path == "") {
-		return "", usage("exactly one of --text or --text-file is required")
+	return a.readCommandTextSource(text, path, text != "", path != "", false)
+}
+
+// readCommandTextSource reads one complete message body before any gateway
+// interaction. stdin is deliberately not subject to config secret's non-TTY
+// rule: users may explicitly type a multiline body at a terminal.
+func (a App) readCommandTextSource(text, path string, textSet, pathSet, stdin bool) (string, error) {
+	sources := 0
+	for _, set := range []bool{textSet, pathSet, stdin} {
+		if set {
+			sources++
+		}
 	}
-	if path == "" {
-		return text, nil
+	if sources != 1 {
+		return "", usage("exactly one of --text, --text-file, or --stdin is required")
+	}
+	if textSet {
+		return validateCommandText(text)
 	}
 	c, err := loadCommandConfig()
 	if err != nil {
 		return "", err
 	}
+	if stdin {
+		b, err := io.ReadAll(io.LimitReader(a.In, int64(c.LocalProtocolMaximumFrame)+1))
+		if err != nil {
+			return "", fmt.Errorf("--stdin: could not read message text: %w", err)
+		}
+		if len(b) > c.LocalProtocolMaximumFrame {
+			return "", usage("--stdin exceeds the protocol frame limit")
+		}
+		return validateCommandText(string(b))
+	}
 	b, err := securepath.ReadRegularFile(path, int64(c.LocalProtocolMaximumFrame))
 	if err != nil {
 		return "", fmt.Errorf("--text-file: %w", err)
 	}
-	return string(b), nil
+	return validateCommandText(string(b))
+}
+
+func validateCommandText(text string) (string, error) {
+	if text == "" {
+		return "", usage("message text must not be empty")
+	}
+	if strings.IndexByte(text, 0) >= 0 {
+		return "", usage("message text must not contain NUL")
+	}
+	if !utf8.ValidString(text) {
+		return "", usage("message text must be valid UTF-8")
+	}
+	return text, nil
 }
 func loadCommandConfig() (config.Config, error) {
 	loc, err := config.DefaultLocation()

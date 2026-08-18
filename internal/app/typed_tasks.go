@@ -12,19 +12,19 @@ import (
 // taskTyped binds Cobra's already-parsed task leaves directly to protocol DTOs.
 // It intentionally retains the legacy task request IDs, text-file safety, and
 // mutation JSON envelope while avoiding a second flag.FlagSet parse.
-func (a App) taskTyped(command, selector, text, textFile, state string, all bool, limit int, note string, done bool, requestID, cursor string, jsonOut bool) error {
+func (a App) taskTyped(command, selector, text, textFile string, textSet, textFileSet, stdin bool, state string, all bool, limit int, note string, done bool, requestID, cursor string, jsonOut bool) error {
 	mutation := command == "create" || command == "update" || command == "open" || command == "working" || command == "done" || command == "reply"
 	var params any
 
 	switch command {
 	case "create":
-		body, err := a.readCommandText(text, textFile)
+		body, err := a.readCommandTextSource(text, textFile, textSet, textFileSet, stdin)
 		if err != nil {
 			return err
 		}
 		params = protocol.TaskCreateParams{Text: body}
 	case "update":
-		body, err := a.readCommandText(text, textFile)
+		body, err := a.readCommandTextSource(text, textFile, textSet, textFileSet, stdin)
 		if err != nil {
 			return err
 		}
@@ -48,7 +48,7 @@ func (a App) taskTyped(command, selector, text, textFile, state string, all bool
 		// an omitted --note; retain that precise wire DTO shape.
 		params = protocol.TaskTransitionParams{Task: selector, State: command, Note: &note}
 	case "reply":
-		body, err := a.readCommandText(text, textFile)
+		body, err := a.readCommandTextSource(text, textFile, textSet, textFileSet, stdin)
 		if err != nil {
 			return err
 		}
@@ -75,7 +75,7 @@ func (a App) taskTyped(command, selector, text, textFile, state string, all bool
 	if err != nil {
 		return err
 	}
-	if err := checkTaskFrame(c, command, requestID, params, textFile != "", a.Version); err != nil {
+	if err := checkTaskFrame(c, command, requestID, params, textFileSet, stdin, a.Version); err != nil {
 		return err
 	}
 	capability := protocol.CapabilityLocalTasks
@@ -95,8 +95,8 @@ func (a App) taskTyped(command, selector, text, textFile, state string, all bool
 // checkTaskFrame preserves the legacy text-file diagnostic for ordinary task
 // mutations. Reply historically guarded every text source, so it must preflight
 // literal text too before a client handshake can misclassify it as unavailable.
-func checkTaskFrame(c config.Config, command, requestID string, params any, textFile bool, version string) error {
-	if command != "reply" && !textFile {
+func checkTaskFrame(c config.Config, command, requestID string, params any, textFile, stdin bool, version string) error {
+	if command != "reply" && !textFile && !stdin {
 		return nil
 	}
 	request := protocol.Request{ProtocolVersion: protocol.Version, RequestID: requestID, ClientKind: "cli", ClientVersion: version, Command: taskProtocolCommand(command), Params: mustJSON(params)}
@@ -107,7 +107,7 @@ func checkTaskFrame(c config.Config, command, requestID string, params any, text
 	if len(encoded) <= c.LocalProtocolMaximumFrame {
 		return nil
 	}
-	if command == "reply" {
+	if command == "reply" || stdin {
 		return usage("request exceeds the protocol frame limit")
 	}
 	return usage("--text-file exceeds the protocol frame limit")

@@ -108,5 +108,6 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 func (a App) slackTypedText(cmd *cobra.Command) (string, error) {
 	text, _ := cmd.Flags().GetString("text")
 	textFile, _ := cmd.Flags().GetString("text-file")
-	return a.readCommandText(text, textFile)
+	stdin, _ := cmd.Flags().GetBool("stdin")
+	return a.readCommandTextSource(text, textFile, cmd.Flags().Changed("text"), cmd.Flags().Changed("text-file"), stdin)
 }

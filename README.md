@@ -91,6 +91,8 @@ mosscap task reply AbCdEfGh --text "I found the problem." --done
 
 `task reply --done` is a resumable composition: it completes the task only after Slack confirms the reply. A plain Slack send never changes task state, and marking a task done never posts to Slack.
 
+For multiline or piped bodies, `task create`, `task update`, `task reply`, `slack send`, and `slack edit` also accept `--stdin`. Provide exactly one of `--text`, `--text-file`, or `--stdin`; stdin is read completely (including trailing newlines) before contacting the gateway.
+
 Default output is compact human-readable cards, rows, and labelled details; use `--json` for the unchanged command DTOs. Message cards preserve full multiline Unicode text and visibly escape terminal control bytes. Colors require a TTY and are disabled by `NO_COLOR`.
 
 ## Files and exceptional outcomes
