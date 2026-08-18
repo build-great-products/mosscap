@@ -169,8 +169,8 @@ func TestFrameRejectsBadLengthsAndUTF8(t *testing.T) {
 // shapes and rejects unknown, unsafe, or out-of-range request fields.
 func TestSlackParamsStrictAndRoundTrip(t *testing.T) {
 	cases := []struct{ command, params string }{
-		{"slack.history", `{"limit":100}`},
-		{"slack.thread", `{"thread_ts":"1712345678.000001"}`},
+		{"slack.history", `{"limit":50,"cursor":"history-cursor"}`},
+		{"slack.thread", `{"thread_ts":"1712345678.000001","limit":50,"cursor":"thread-cursor"}`},
 		{"slack.send", `{"thread_ts":"1712345678.000001","text":"hello","task":"abc"}`},
 		{"slack.edit", `{"message_ts":"1712345678.000001","text":"hello"}`},
 		{"slack.delete", `{"message_ts":"1712345678.000001","reason":"operator request"}`},
@@ -198,7 +198,7 @@ func TestSlackParamsStrictAndRoundTrip(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct{ command, params string }{
-		{"slack.history", `{"limit":101}`}, {"slack.thread", `{"thread_ts":"bad"}`},
+		{"slack.history", `{"limit":51}`}, {"slack.history", `{"cursor":"has space"}`}, {"slack.history", `{"cursor":"\u0001"}`}, {"slack.thread", `{"thread_ts":"bad"}`}, {"slack.thread", `{"thread_ts":"1712345678.000001","limit":51}`},
 		{"slack.send", `{"text":"","extra":true}`}, {"slack.edit", `{"message_ts":"1.000001","text":"x","thread_ts":"1.000001"}`},
 		{"slack.delete", `{"message_ts":"1.000001","reason":""}`}, {"slack.react", `{"message_ts":"1.000001","emoji":"bad emoji"}`},
 		{"effect.list", `{"state":"unknown"}`}, {"effect.inspect", `{"effect":"tsk_abc"}`},

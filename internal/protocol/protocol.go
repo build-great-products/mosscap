@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stayradiated/mosscap/internal/identity"
@@ -30,6 +31,7 @@ const (
 	CapabilityConfigReload        = "config_reload"
 	CapabilitySlackRuntime        = "slack_runtime"
 	CapabilitySlackReads          = "slack_reads"
+	CapabilitySlackPagination     = "slack_pagination_v1"
 	CapabilitySlackEffects        = "slack_effects"
 	CapabilitySlackSourceMetadata = "slack_source_metadata"
 	CapabilityFileTransfer        = "file_transfer_v1"
@@ -41,7 +43,7 @@ const (
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -173,10 +175,13 @@ type TaskListParams struct {
 // SlackHistoryParams and SlackThreadParams deliberately contain no workspace
 // or channel selector: every operation is pinned to the active runtime.
 type SlackHistoryParams struct {
-	Limit int `json:"limit,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
 }
 type SlackThreadParams struct {
 	ThreadTS string `json:"thread_ts"`
+	Limit    int    `json:"limit,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
 }
 type SlackSendParams struct {
 	ThreadTS  string   `json:"thread_ts,omitempty"`
@@ -740,12 +745,12 @@ func ValidateParams(command string, raw json.RawMessage) error {
 			return errors.New("invalid task list")
 		}
 	case *SlackHistoryParams:
-		if p.Limit < 0 || p.Limit > slackapi.MaxReadLimit {
-			return errors.New("invalid Slack history limit")
+		if p.Limit < 0 || p.Limit > slackapi.MaxReadLimit || !validSlackCursor(p.Cursor) {
+			return errors.New("invalid Slack history parameters")
 		}
 	case *SlackThreadParams:
-		if !validTimestamp(p.ThreadTS) {
-			return errors.New("invalid Slack thread timestamp")
+		if !validTimestamp(p.ThreadTS) || p.Limit < 0 || p.Limit > slackapi.MaxReadLimit || !validSlackCursor(p.Cursor) {
+			return errors.New("invalid Slack thread parameters")
 		}
 	case *SlackSendParams:
 		if (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validText(p.Text, true) || !validTask(p.Task) || !validPaths(p.FilePaths) {
@@ -909,6 +914,20 @@ func ParsePurgeCutoff(value string) (time.Time, error) {
 func validTimestamp(value string) bool {
 	_, err := slackapi.ParseTimestamp(value)
 	return err == nil
+}
+func validSlackCursor(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > slackapi.MaxCursorBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 func validText(value string, required bool) bool {
 	return (!required || value != "") && len(value) <= slackapi.MaxTextBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0)

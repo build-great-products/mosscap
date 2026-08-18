@@ -89,7 +89,7 @@ func TestSlackVerticalSlice(t *testing.T) {
 		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
 		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
 		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
-		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 50}},
+		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 17, Cursor: "history-cursor"}, Result: slackapi.MessagePage{NextCursor: "next-history-cursor"}},
 		fake.Step{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: "C012ABC", MessageTS: "1700000009.000001"}},
 		fake.Step{Operation: fake.PostMessage, PostCall: fake.CallScript{Fault: fake.Timeout}},
 	)
@@ -196,7 +196,7 @@ func TestSlackVerticalSlice(t *testing.T) {
 		}
 		return out
 	}
-	if out := run("slack", "history", "--json"); !json.Valid(out) {
+	if out := run("slack", "history", "--limit", "17", "--cursor", "history-cursor", "--json"); !json.Valid(out) || !strings.Contains(string(out), `"next_cursor":"next-history-cursor"`) {
 		t.Fatalf("history=%s", out)
 	}
 	if out := run("slack", "send", "--text", "confirmed", "--request-id", "confirmed", "--json"); !json.Valid(out) {

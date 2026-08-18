@@ -41,16 +41,24 @@ func testService(t *testing.T, web slackapi.Web) (*Service, *store.Store) {
 func TestReadsUseConfiguredChannelAndBounds(t *testing.T) {
 	web := fake.NewWeb(
 		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: testTarget.ChannelID, Limit: 50}},
-		fake.Step{Operation: fake.Replies, Request: slackapi.RepliesRequest{ChannelID: testTarget.ChannelID, ThreadTS: "1700000000.000001", Limit: 100}},
+		fake.Step{Operation: fake.Replies, Request: slackapi.RepliesRequest{ChannelID: testTarget.ChannelID, ThreadTS: "1700000000.000001", Limit: 50}},
+		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: testTarget.ChannelID, Limit: 7, Cursor: "history-next"}},
+		fake.Step{Operation: fake.Replies, Request: slackapi.RepliesRequest{ChannelID: testTarget.ChannelID, ThreadTS: "1700000000.000001", Limit: 8, Cursor: "thread-next"}},
 	)
 	svc, _ := testService(t, web)
-	if _, err := svc.History(context.Background(), 0); err != nil {
+	if _, err := svc.History(context.Background(), 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Thread(context.Background(), "1700000000.000001"); err != nil {
+	if _, err := svc.Thread(context.Background(), "1700000000.000001", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.History(context.Background(), 101); err == nil {
+	if _, err := svc.History(context.Background(), 7, "history-next"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Thread(context.Background(), "1700000000.000001", 8, "thread-next"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.History(context.Background(), 51, ""); err == nil {
 		t.Fatal("accepted oversized limit")
 	}
 	if err := web.AssertDone(); err != nil {

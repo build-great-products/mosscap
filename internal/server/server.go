@@ -738,8 +738,8 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		}
 	case "slack.history", "slack.thread":
 		var op interface {
-			History(context.Context, int) (slackapi.MessagePage, error)
-			Thread(context.Context, string) (slackapi.MessagePage, error)
+			History(context.Context, int, string) (slackapi.MessagePage, error)
+			Thread(context.Context, string, int, string) (slackapi.MessagePage, error)
 		}
 		var release func()
 		op, release, err = s.ops()
@@ -750,12 +750,12 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		if err == nil && r.Command == "slack.history" {
 			var p protocol.SlackHistoryParams
 			_ = json.Unmarshal(r.Params, &p)
-			result, err = op.History(ctx, p.Limit)
+			result, err = op.History(ctx, p.Limit, p.Cursor)
 		}
 		if err == nil && r.Command == "slack.thread" {
 			var p protocol.SlackThreadParams
 			_ = json.Unmarshal(r.Params, &p)
-			result, err = op.Thread(ctx, p.ThreadTS)
+			result, err = op.Thread(ctx, p.ThreadTS, p.Limit, p.Cursor)
 		}
 	case "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
 		var op *slackops.Service

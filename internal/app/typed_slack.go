@@ -26,7 +26,7 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 	}
 
 	var params any
-	capability := protocol.CapabilitySlackReads
+	capability := protocol.CapabilitySlackPagination
 	switch command {
 	case "history":
 		limit, _ := cmd.Flags().GetInt("limit")
@@ -34,9 +34,15 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 		if !cmd.Flags().Changed("limit") {
 			limit = 50
 		}
-		params = protocol.SlackHistoryParams{Limit: limit}
+		cursor, _ := cmd.Flags().GetString("cursor")
+		params = protocol.SlackHistoryParams{Limit: limit, Cursor: cursor}
 	case "thread":
-		params = protocol.SlackThreadParams{ThreadTS: args[0]}
+		limit, _ := cmd.Flags().GetInt("limit")
+		if !cmd.Flags().Changed("limit") {
+			limit = 50
+		}
+		cursor, _ := cmd.Flags().GetString("cursor")
+		params = protocol.SlackThreadParams{ThreadTS: args[0], Limit: limit, Cursor: cursor}
 	case "send":
 		text, err := a.slackTypedText(cmd)
 		if err != nil {

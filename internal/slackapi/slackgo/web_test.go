@@ -15,6 +15,17 @@ import (
 	"github.com/stayradiated/mosscap/internal/slackapi"
 )
 
+func TestValidateCursorRejectsWhitespaceAndControls(t *testing.T) {
+	for _, cursor := range []string{"has space", "has\u00a0nonbreaking-space", "has\u0001control"} {
+		if err := validateCursor(cursor); err == nil {
+			t.Fatalf("validateCursor(%q) accepted unsafe cursor", cursor)
+		}
+	}
+	if err := validateCursor("opaque-cursor"); err != nil {
+		t.Fatalf("validateCursor: %v", err)
+	}
+}
+
 func TestWebAdapterTranslationAndContextOperations(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
@@ -46,6 +57,11 @@ func TestWebAdapterTranslationAndContextOperations(t *testing.T) {
 		case "/conversations.history", "/conversations.replies":
 			requireForm(t, request.Form, "channel", "C012ABC")
 			requireForm(t, request.Form, "limit", "2")
+			if request.URL.Path == "/conversations.history" {
+				requireForm(t, request.Form, "cursor", "history-cursor")
+			} else {
+				requireForm(t, request.Form, "cursor", "thread-cursor")
+			}
 			file := map[string]any{"id": "F012ABC", "name": "note.txt", "mimetype": "text/plain", "permalink": "https://example.slack.com/files/F012ABC", "size": 12}
 			message := map[string]any{"ts": "1700000000.000001", "thread_ts": "1700000000.000001", "user": "U012USR", "text": "bounded text", "files": []any{file}, "reactions": []any{map[string]any{"name": "eyes", "count": 1, "users": []string{"U012BOT"}}}}
 			writeJSON(t, writer, map[string]any{"ok": true, "messages": []any{message}, "response_metadata": map[string]any{"next_cursor": "cursor-2"}})
@@ -97,12 +113,12 @@ func TestWebAdapterTranslationAndContextOperations(t *testing.T) {
 	if err != nil || !strings.HasPrefix(permalink, "https://") {
 		t.Fatalf("Permalink = %q, %v", permalink, err)
 	}
-	history, err := web.History(ctx, slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 2})
+	history, err := web.History(ctx, slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 2, Cursor: "history-cursor"})
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}
 	assertPage(t, history)
-	replies, err := web.Replies(ctx, slackapi.RepliesRequest{ChannelID: "C012ABC", ThreadTS: "1700000000.000001", Limit: 2})
+	replies, err := web.Replies(ctx, slackapi.RepliesRequest{ChannelID: "C012ABC", ThreadTS: "1700000000.000001", Limit: 2, Cursor: "thread-cursor"})
 	if err != nil {
 		t.Fatalf("Replies: %v", err)
 	}

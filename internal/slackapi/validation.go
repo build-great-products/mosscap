@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -16,7 +17,7 @@ const (
 	MaxMIMETypeBytes  = 255
 	MaxPermalinkBytes = 4096
 	MaxFiles          = 1000
-	MaxReadLimit      = 100
+	MaxReadLimit      = 50
 	MaxEmojiBytes     = 100
 	MaxUserNameBytes  = 128
 )
@@ -60,7 +61,7 @@ func validatePrefixedID(value, prefixes string) error {
 // ValidateReadLimit applies the adapter-wide bound for one API page.
 func ValidateReadLimit(limit int) error {
 	if limit < 1 || limit > MaxReadLimit {
-		return errors.New("Slack read limit must be between 1 and 100")
+		return errors.New("Slack read limit must be between 1 and 50")
 	}
 	return nil
 }
@@ -199,7 +200,7 @@ func validateOpaque(name, value string, maximum int, required bool) error {
 	if required && value == "" {
 		return errors.New(name + " is required")
 	}
-	if len(value) > maximum || strings.IndexFunc(value, func(r rune) bool { return r <= 0x20 || r == 0x7f }) >= 0 {
+	if len(value) > maximum || !utf8.ValidString(value) || strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) }) >= 0 {
 		return errors.New(name + " is invalid or exceeds its limit")
 	}
 	return nil

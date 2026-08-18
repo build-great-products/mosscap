@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/slack-go/slack"
@@ -518,7 +519,7 @@ func cloneIdentity(identity slackapi.AuthIdentity) slackapi.AuthIdentity {
 }
 
 func validateCursor(value string) error {
-	if len(value) > slackapi.MaxCursorBytes || !utf8.ValidString(value) || strings.IndexFunc(value, func(r rune) bool { return r <= 0x20 || r == 0x7f }) >= 0 {
+	if len(value) > slackapi.MaxCursorBytes || !utf8.ValidString(value) || strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) }) >= 0 {
 		return errors.New("invalid cursor")
 	}
 	return nil

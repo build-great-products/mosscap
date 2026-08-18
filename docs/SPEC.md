@@ -158,7 +158,7 @@ mosscap purge
 
 Pi provides `/mosscap`, `/mosscap status`, and `/mosscap off`.
 
-SQLite-backed `task list`, `effect list`, `delivery list`, and `trust list` accept bounded `--limit`/`--cursor` pages (effects and deliveries also accept composable `--task`). Tasks are oldest-created-first; effects and deliveries newest-created-first; trust is lexical. Resource cursors are full IDs and a purged anchor returns typed `cursor_expired` conflict guidance to restart without `--cursor`; trust cursors remain valid after removal.
+SQLite-backed `task list`, `effect list`, `delivery list`, and `trust list` accept bounded `--limit`/`--cursor` pages (effects and deliveries also accept composable `--task`). Tasks are oldest-created-first; effects and deliveries newest-created-first; trust is lexical. Resource cursors are full IDs and a purged anchor returns typed `cursor_expired` conflict guidance to restart without `--cursor`; trust cursors remain valid after removal. `slack history` and `slack thread` likewise accept `--limit` and `--cursor`; both default to and cap at 50 messages, preserve Slack's native order, and pass the opaque Slack cursor unchanged.
 
 The private Unix-socket protocol uses bounded 32-bit-length-prefixed JSON frames, a versioned handshake, typed command/results, and capability negotiation. Unknown incompatible envelopes or enum values must fail safe. Slow clients must be disconnected without discarding durable work. Same-user authentication is not protection from compromise of that OS account.
 

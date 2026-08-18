@@ -39,6 +39,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 	var files stringList
 	fs.Var(&files, "file", "")
 	limit := fs.Int("limit", 50, "")
+	cursor := fs.String("cursor", "", "")
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -49,7 +50,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 		return nil
 	}
 	allowed := map[string][]string{
-		"history": {"json", "limit"}, "thread": {"json"},
+		"history": {"json", "limit", "cursor"}, "thread": {"json", "limit", "cursor"},
 		"send":   {"json", "text", "text-file", "thread", "task", "request-id", "file"},
 		"file":   {"json", "file", "thread", "comment", "task", "request-id"},
 		"edit":   {"json", "text", "text-file", "task", "request-id"},
@@ -67,12 +68,12 @@ func (a App) slackCommand(cmd string, args []string) error {
 		if fs.NArg() != 0 || *requestID != "" {
 			return usage("slack history accepts no arguments and no --request-id")
 		}
-		params = protocol.SlackHistoryParams{Limit: *limit}
+		params = protocol.SlackHistoryParams{Limit: *limit, Cursor: *cursor}
 	case "thread":
 		if fs.NArg() != 1 || *requestID != "" {
 			return usage("slack thread requires THREAD_TS and no --request-id")
 		}
-		params = protocol.SlackThreadParams{ThreadTS: fs.Arg(0)}
+		params = protocol.SlackThreadParams{ThreadTS: fs.Arg(0), Limit: *limit, Cursor: *cursor}
 	case "send":
 		t, err := a.readCommandText(*text, *textFile)
 		if err != nil {
@@ -135,7 +136,7 @@ func (a App) slackCommand(cmd string, args []string) error {
 	if err := checkSlackTextFrame(c, *textFile, params, cmd, *requestID, a.Version); err != nil {
 		return err
 	}
-	capability := protocol.CapabilitySlackReads
+	capability := protocol.CapabilitySlackPagination
 	if mutation {
 		capability = protocol.CapabilitySlackEffects
 	}
@@ -375,7 +376,7 @@ func newCommandFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 func (a App) printSlackHelp(cmd string) {
-	usages := map[string]string{"history": "[--limit N] [--json]", "thread": "THREAD_TS [--json]", "send": "[--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", "file": "[--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK] [--request-id ID] [--json]", "edit": "MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", "delete": "MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", "react": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", "unreact": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]"}
+	usages := map[string]string{"history": "[--limit N] [--cursor CURSOR] [--json]", "thread": "THREAD_TS [--limit N] [--cursor CURSOR] [--json]", "send": "[--thread THREAD_TS] (--text TEXT|--text-file PATH) [--file PATH ...] [--task TASK] [--request-id ID] [--json]", "file": "[--thread THREAD_TS] --file PATH [--comment TEXT] [--task TASK] [--request-id ID] [--json]", "edit": "MESSAGE_TS (--text TEXT|--text-file PATH) [--task TASK] [--request-id ID] [--json]", "delete": "MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", "react": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", "unreact": "MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]"}
 	fmt.Fprintf(a.Out, "Usage: mosscap slack %s %s\n", cmd, usages[cmd])
 }
 func (a App) printEffectHelp(cmd string) {

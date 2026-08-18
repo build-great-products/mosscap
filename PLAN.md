@@ -333,7 +333,7 @@ Several lists expose only their first bounded page:
 
 - `task list` returns `next_cursor`, and the protocol/store accept a cursor, but the CLI cannot send one;
 - effect and delivery lists cap their results without cursors;
-- Slack history/thread reads can return a cursor but cannot continue from it; and
+- Slack history/thread reads require opaque cursor passthrough; and
 - the trusted-user set is an unbounded SQLite collection with no paging.
 
 Older durable records can become unreachable through supported commands.
@@ -398,8 +398,8 @@ Changing a task no longer moves it within task-list pagination.
 | Effects | 50 | 100 |
 | Deliveries | 50 | 100 |
 | Trusted users | 50 | 100 |
-| Slack history | 50 | 100 |
-| Slack thread | 50 | 100 |
+| Slack history | 50 | 50 |
+| Slack thread | 50 | 50 |
 | Thread within `task context` | 20 | 100 |
 
 Treat `--limit` as a maximum. The server may return fewer task records with `next_cursor` when needed to stay within the configured protocol frame budget. Never silently cut text within a returned task. If one record cannot fit by itself, return a typed bounded-result error.

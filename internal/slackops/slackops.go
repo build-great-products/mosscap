@@ -110,7 +110,7 @@ func NewWithFileTransfer(s EffectStore, web slackapi.Web, files slackapi.FileTra
 }
 
 // History returns one configured-channel page. A zero limit defaults to 50.
-func (s *Service) History(ctx context.Context, limit int) (slackapi.MessagePage, error) {
+func (s *Service) History(ctx context.Context, limit int, cursor string) (slackapi.MessagePage, error) {
 	if limit == 0 {
 		limit = 50
 	}
@@ -120,23 +120,29 @@ func (s *Service) History(ctx context.Context, limit int) (slackapi.MessagePage,
 	if err := s.ready(); err != nil {
 		return slackapi.MessagePage{}, err
 	}
-	page, err := s.web.History(ctx, slackapi.HistoryRequest{ChannelID: s.target.ChannelID, Limit: limit})
+	page, err := s.web.History(ctx, slackapi.HistoryRequest{ChannelID: s.target.ChannelID, Limit: limit, Cursor: cursor})
 	if err != nil {
 		return slackapi.MessagePage{}, readError(err)
 	}
 	return page, nil
 }
 
-// Thread returns one configured-channel replies page of at most 100 messages.
-func (s *Service) Thread(ctx context.Context, threadTS string) (slackapi.MessagePage, error) {
+// Thread returns one configured-channel replies page. A zero limit defaults to 50.
+func (s *Service) Thread(ctx context.Context, threadTS string, limit int, cursor string) (slackapi.MessagePage, error) {
 	ts, err := slackapi.ParseTimestamp(threadTS)
 	if err != nil {
+		return slackapi.MessagePage{}, err
+	}
+	if limit == 0 {
+		limit = 50
+	}
+	if err := slackapi.ValidateReadLimit(limit); err != nil {
 		return slackapi.MessagePage{}, err
 	}
 	if err := s.ready(); err != nil {
 		return slackapi.MessagePage{}, err
 	}
-	page, err := s.web.Replies(ctx, slackapi.RepliesRequest{ChannelID: s.target.ChannelID, ThreadTS: ts, Limit: slackapi.MaxReadLimit})
+	page, err := s.web.Replies(ctx, slackapi.RepliesRequest{ChannelID: s.target.ChannelID, ThreadTS: ts, Limit: limit, Cursor: cursor})
 	if err != nil {
 		return slackapi.MessagePage{}, readError(err)
 	}
