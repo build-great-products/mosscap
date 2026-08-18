@@ -188,7 +188,7 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // adapters in runCobraHandler.
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove":
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "effect.list", "effect.inspect", "effect.retry", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	default:
 		return false
@@ -227,6 +227,25 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 	case "trust.add", "trust.remove":
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.trustTyped(strings.TrimPrefix(handler, "trust."), args[0], requestID, jsonOut)
+	case "effect.list":
+		state, _ := cmd.Flags().GetString("state")
+		return a.effectTyped("list", "", state, "", false, "", jsonOut)
+	case "effect.inspect":
+		return a.effectTyped("inspect", args[0], "", "", false, "", jsonOut)
+	case "effect.retry":
+		reason, _ := cmd.Flags().GetString("reason")
+		confirm, _ := cmd.Flags().GetBool("confirm-duplicate-risk")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.effectTyped("retry", args[0], "", reason, confirm, requestID, jsonOut)
+	case "delivery.list":
+		state, _ := cmd.Flags().GetString("state")
+		return a.deliveryTyped("list", "", state, "", "", jsonOut)
+	case "delivery.inspect":
+		return a.deliveryTyped("inspect", args[0], "", "", "", jsonOut)
+	case "delivery.requeue":
+		reason, _ := cmd.Flags().GetString("reason")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.deliveryTyped("requeue", args[0], "", reason, requestID, jsonOut)
 	default:
 		return fmt.Errorf("unbound typed Cobra handler %q", handler)
 	}

@@ -84,6 +84,8 @@ func TestTypedFoundationLeavesBypassLegacyParserBridge(t *testing.T) {
 		"setup", "config show", "config set", "config secret set",
 		"gateway run", "gateway reload", "gateway status", "doctor",
 		"trust list", "trust add", "trust remove", "purge",
+		"effect list", "effect inspect", "effect retry",
+		"delivery list", "delivery inspect", "delivery requeue",
 	} {
 		cmd := commandAt(tree, strings.Fields(path))
 		if cmd == nil {
@@ -93,7 +95,7 @@ func TestTypedFoundationLeavesBypassLegacyParserBridge(t *testing.T) {
 			t.Errorf("%s is still bound to the legacy parser bridge", path)
 		}
 	}
-	for _, handler := range []string{"task.list", "slack.send", "effect.list"} {
+	for _, handler := range []string{"task.list", "slack.send", "file.show"} {
 		if isTypedCobraHandler(handler) {
 			t.Errorf("%s unexpectedly left the compatibility bridge", handler)
 		}
