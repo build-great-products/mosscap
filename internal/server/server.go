@@ -1581,6 +1581,9 @@ func messagePageDTO(p slackapi.MessagePage) protocol.SlackMessagePageDTO {
 		for _, r := range m.Reactions {
 			d.Reactions = append(d.Reactions, protocol.SlackReactionDTO{Name: r.Name, Count: r.Count, Mine: r.Mine})
 		}
+		for _, forwarded := range m.Forwarded {
+			d.Forwarded = append(d.Forwarded, protocol.SlackForwardedMessageDTO{Text: forwarded.Text, ChannelID: forwarded.ChannelID, MessageTS: string(forwarded.MessageTS)})
+		}
 		out.Messages[i] = d
 	}
 	return out

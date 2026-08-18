@@ -474,6 +474,7 @@ func normalizeMessage(message *slack.Message, botUserID string, maxFiles int) (s
 		Text:      message.Text,
 		Reactions: reactions,
 		Files:     files,
+		Forwarded: normalizeForwardedAttachments(message.Attachments),
 	}, nil
 }
 

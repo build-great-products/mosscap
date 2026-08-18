@@ -158,9 +158,28 @@ func normalize(e slackapi.Envelope, receivedAt time.Time) store.SlackSourceEvent
 	return store.SlackSourceEvent{
 		SourceEventID: sourceEventID(e), EnvelopeID: e.EnvelopeID, EventKind: store.SlackSourceEventKind(e.Kind),
 		TeamID: e.TeamID, ChannelID: e.ChannelID, UserID: e.UserID, BotID: e.BotID, Subtype: e.Subtype,
-		MessageTS: string(e.MessageTS), ThreadTS: string(e.ThreadIdentity()), Text: e.Text, Permalink: e.Permalink,
+		MessageTS: string(e.MessageTS), ThreadTS: string(e.ThreadIdentity()), Text: taskText(e), Permalink: e.Permalink,
 		SlackEventAtUS: eventMicroseconds(e.EventTS), ReceivedAt: receivedAt, Files: files,
 	}
+}
+
+// taskText keeps forwarded content in the durable task body, the same field
+// delivered to Pi and returned by task context. Identifiers are rendered only
+// as opaque provenance, never as URLs.
+func taskText(e slackapi.Envelope) string {
+	text := e.Text
+	for _, forwarded := range e.Forwarded {
+		provenance := "message " + string(forwarded.MessageTS)
+		if forwarded.ChannelID != "" {
+			provenance = "channel " + forwarded.ChannelID + ", " + provenance
+		}
+		addition := "\n\nForwarded message (" + provenance + "):\n" + forwarded.Text
+		if len(text)+len(addition) > slackapi.MaxTextBytes {
+			break
+		}
+		text += addition
+	}
+	return text
 }
 
 func sourceEventID(e slackapi.Envelope) string {
@@ -177,6 +196,12 @@ func sourceEventID(e slackapi.Envelope) string {
 	for _, value := range []string{e.TeamID, string(e.Kind), e.ChannelID, string(e.MessageTS), string(e.EventTS), e.UserID, e.BotID, e.Subtype, string(e.ThreadTS), e.Text, e.Permalink} {
 		_, _ = h.Write([]byte(value))
 		_, _ = h.Write([]byte{0})
+	}
+	for _, forwarded := range e.Forwarded {
+		for _, value := range []string{forwarded.Text, forwarded.ChannelID, string(forwarded.MessageTS)} {
+			_, _ = h.Write([]byte(value))
+			_, _ = h.Write([]byte{0})
+		}
 	}
 	for _, file := range e.Files {
 		for _, value := range []string{file.ID, file.Name, file.MIMEType, file.Permalink} {

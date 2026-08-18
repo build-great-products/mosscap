@@ -341,6 +341,7 @@ func (stream *envelopeStream) normalize(request socketmode.Request) (envelope sl
 		envelope.EventTS = slackapi.Timestamp(firstNonEmpty(inner.EventTimeStamp, fallbackEventTS))
 		envelope.Text = inner.Text
 		envelope.Files, err = normalizeFiles(inner.Files, stream.maxFiles)
+		envelope.Forwarded = normalizeForwardedAttachments(inner.Attachments)
 	case *slackevents.MessageEvent:
 		if inner == nil {
 			return slackapi.Envelope{}, invalidResponse()
@@ -390,6 +391,7 @@ func normalizeMessageEvent(envelope *slackapi.Envelope, event *slackevents.Messa
 			return err
 		}
 		envelope.Files = files
+		envelope.Forwarded = normalizeForwardedAttachments(current.Attachments)
 	case slack.MsgSubTypeMessageDeleted:
 		previous := event.PreviousMessage
 		envelope.Kind = slackapi.EventMessageDelete
@@ -421,8 +423,20 @@ func normalizeMessageEvent(envelope *slackapi.Envelope, event *slackevents.Messa
 			return err
 		}
 		envelope.Files = files
+		envelope.Forwarded = normalizeForwardedAttachments(current.Attachments)
 	}
 	return nil
+}
+
+func normalizeForwardedAttachments(attachments []slack.Attachment) []slackapi.ForwardedMessage {
+	out := make([]slackapi.ForwardedMessage, 0, len(attachments))
+	for _, attachment := range attachments {
+		source := firstNonEmpty(attachment.FromURL, attachment.OriginalURL, attachment.TitleLink)
+		if forwarded, ok := slackapi.ForwardedFromAttachment(attachment.Text, source, string(attachment.Ts)); ok {
+			out = append(out, forwarded)
+		}
+	}
+	return out
 }
 
 func (stream *envelopeStream) malformedEnvelope(request socketmode.Request) (slackapi.Envelope, bool) {
@@ -530,6 +544,12 @@ func deriveEventID(envelope slackapi.Envelope) string {
 	} {
 		_, _ = hash.Write([]byte(value))
 		_, _ = hash.Write([]byte{0})
+	}
+	for _, forwarded := range envelope.Forwarded {
+		for _, value := range []string{forwarded.Text, forwarded.ChannelID, string(forwarded.MessageTS)} {
+			_, _ = hash.Write([]byte(value))
+			_, _ = hash.Write([]byte{0})
+		}
 	}
 	for _, file := range envelope.Files {
 		for _, value := range []string{file.ID, file.Name, file.MIMEType, file.Permalink} {

@@ -23,21 +23,22 @@ func (k EventKind) Valid() bool {
 // EventTS orders edits and deletions. MessageTS remains the opaque source
 // identity used by subsequent Slack operations.
 type Envelope struct {
-	EnvelopeID string           `json:"envelope_id"`
-	EventID    string           `json:"event_id"`
-	Kind       EventKind        `json:"event_kind"`
-	TeamID     string           `json:"team_id"`
-	ChannelID  string           `json:"channel_id"`
-	UserID     string           `json:"user_id,omitempty"`
-	BotID      string           `json:"bot_id,omitempty"`
-	Subtype    string           `json:"subtype,omitempty"`
-	MessageTS  Timestamp        `json:"message_ts"`
-	ThreadTS   Timestamp        `json:"thread_ts,omitempty"`
-	EventTS    Timestamp        `json:"event_ts"`
-	Text       string           `json:"text,omitempty"`
-	Permalink  string           `json:"permalink,omitempty"`
-	Files      []File           `json:"files,omitempty"`
-	Ack        *Acknowledgement `json:"-"`
+	EnvelopeID string             `json:"envelope_id"`
+	EventID    string             `json:"event_id"`
+	Kind       EventKind          `json:"event_kind"`
+	TeamID     string             `json:"team_id"`
+	ChannelID  string             `json:"channel_id"`
+	UserID     string             `json:"user_id,omitempty"`
+	BotID      string             `json:"bot_id,omitempty"`
+	Subtype    string             `json:"subtype,omitempty"`
+	MessageTS  Timestamp          `json:"message_ts"`
+	ThreadTS   Timestamp          `json:"thread_ts,omitempty"`
+	EventTS    Timestamp          `json:"event_ts"`
+	Text       string             `json:"text,omitempty"`
+	Permalink  string             `json:"permalink,omitempty"`
+	Files      []File             `json:"files,omitempty"`
+	Forwarded  []ForwardedMessage `json:"forwarded_messages,omitempty"`
+	Ack        *Acknowledgement   `json:"-"`
 }
 
 // ThreadIdentity returns ThreadTS when present and MessageTS otherwise.
@@ -66,13 +67,23 @@ type Reaction struct {
 }
 
 // Message is a bounded Slack read result.
+// ForwardedMessage is a text-only projection of a Slack forwarded-message
+// attachment. Provenance is limited to opaque Slack identifiers; it never
+// includes links, user names, or attachment metadata.
+type ForwardedMessage struct {
+	Text      string    `json:"text"`
+	ChannelID string    `json:"channel_id,omitempty"`
+	MessageTS Timestamp `json:"message_ts,omitempty"`
+}
+
 type Message struct {
-	MessageTS Timestamp  `json:"message_ts"`
-	ThreadTS  Timestamp  `json:"thread_ts"`
-	AuthorID  string     `json:"author_user_id"`
-	Text      string     `json:"text"`
-	Reactions []Reaction `json:"reactions,omitempty"`
-	Files     []File     `json:"files,omitempty"`
+	MessageTS Timestamp          `json:"message_ts"`
+	ThreadTS  Timestamp          `json:"thread_ts"`
+	AuthorID  string             `json:"author_user_id"`
+	Text      string             `json:"text"`
+	Reactions []Reaction         `json:"reactions,omitempty"`
+	Files     []File             `json:"files,omitempty"`
+	Forwarded []ForwardedMessage `json:"forwarded_messages,omitempty"`
 }
 
 // MessagePage is one bounded history or replies page. NextCursor is opaque.

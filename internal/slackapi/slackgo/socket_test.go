@@ -10,8 +10,17 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/slack-go/slack"
 	"github.com/stayradiated/mosscap/internal/slackapi"
 )
+
+func TestNormalizeForwardedAttachments(t *testing.T) {
+	attachments := []slack.Attachment{{Text: "forwarded text", FromURL: "https://workspace.slack.com/archives/C012ABC/p1700000000000001"}, {Text: "unfurl", FromURL: "https://example.invalid/post"}}
+	got := normalizeForwardedAttachments(attachments)
+	if len(got) != 1 || got[0].Text != "forwarded text" || got[0].ChannelID != "C012ABC" || got[0].MessageTS != "1700000000.000001" {
+		t.Fatalf("normalizeForwardedAttachments = %#v", got)
+	}
+}
 
 func TestSocketOwnsDialNormalizeAcknowledgeAndClose(t *testing.T) {
 	t.Parallel()

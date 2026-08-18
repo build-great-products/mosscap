@@ -76,6 +76,16 @@ func TestHandleCommitsBeforeOneShotAcknowledgementAndNormalizes(t *testing.T) {
 	}
 }
 
+func TestNormalizeIncludesForwardedMessageInTaskText(t *testing.T) {
+	e, _ := envelope("forwarded")
+	e.Forwarded = []slackapi.ForwardedMessage{{Text: "please investigate", ChannelID: "C012ABC", MessageTS: "1700000000.000002"}}
+	event := normalize(e, time.Unix(1700000000, 0).UTC())
+	want := "do this <@U99999999>\n\nForwarded message (channel C012ABC, message 1700000000.000002):\nplease investigate"
+	if event.Text != want {
+		t.Fatalf("Text = %q, want %q", event.Text, want)
+	}
+}
+
 func TestHandleAcknowledgesEveryCommittedAdmissionResult(t *testing.T) {
 	results := []store.SlackAdmissionResult{store.SlackAdmitted, store.SlackUpdated, store.SlackDeleted, store.SlackDuplicate, store.SlackIgnoredWorkspace, store.SlackIgnoredChannel, store.SlackIgnoredUntrusted, store.SlackIgnoredUnmentioned, store.SlackIgnoredBot, store.SlackIgnoredStale, store.SlackIgnoredUntracked, store.SlackMalformed}
 	for _, want := range results {

@@ -452,13 +452,19 @@ type SlackReactionDTO struct {
 	Count int    `json:"count"`
 	Mine  bool   `json:"mine"`
 }
+type SlackForwardedMessageDTO struct {
+	Text      string `json:"text"`
+	ChannelID string `json:"channel_id,omitempty"`
+	MessageTS string `json:"message_ts"`
+}
 type SlackMessageDTO struct {
-	MessageTS    string             `json:"message_ts"`
-	ThreadTS     string             `json:"thread_ts"`
-	AuthorUserID string             `json:"author_user_id"`
-	Text         string             `json:"text"`
-	Reactions    []SlackReactionDTO `json:"reactions,omitempty"`
-	Files        []SlackFileDTO     `json:"files,omitempty"`
+	MessageTS    string                     `json:"message_ts"`
+	ThreadTS     string                     `json:"thread_ts"`
+	AuthorUserID string                     `json:"author_user_id"`
+	Text         string                     `json:"text"`
+	Reactions    []SlackReactionDTO         `json:"reactions,omitempty"`
+	Files        []SlackFileDTO             `json:"files,omitempty"`
+	Forwarded    []SlackForwardedMessageDTO `json:"forwarded_messages,omitempty"`
 }
 type SlackMessagePageDTO struct {
 	Messages   []SlackMessageDTO `json:"messages"`
