@@ -195,11 +195,11 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 		// Keep migrated leaves structurally separate from the compatibility
 		// bridge: their execution can never reach a legacy flag.FlagSet parser.
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			return a.runTypedCobraHandler(handler, cmd, args)
+			return a.runtimeJSONError(cmd, a.runTypedCobraHandler(handler, cmd, args))
 		}
 	} else {
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			return a.runCobraHandler(handler, canonicalArgs(cmd, args))
+			return a.runtimeJSONError(cmd, a.runCobraHandler(handler, canonicalArgs(cmd, args)))
 		}
 	}
 	for _, f := range flags {

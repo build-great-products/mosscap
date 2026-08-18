@@ -151,10 +151,12 @@ func (a App) doctorTyped(jsonOut bool) error {
 	if remoteErr != nil {
 		checks = append(checks, doctor.Check{Name: "gateway_diagnostics", Status: doctor.Skipped, Message: "gateway diagnostics unavailable", Action: "start mosscap gateway run"})
 		report := doctor.Report{Overall: doctor.Overall(checks), Checks: checks}
-		if err := a.renderDoctor(report, jsonOut); err != nil {
-			return err
+		if !jsonOut {
+			if err := a.renderDoctor(report, false); err != nil {
+				return err
+			}
 		}
-		return &commandError{code: ExitUnavailable, message: "gateway diagnostics unavailable"}
+		return &doctorPartialError{err: &commandError{code: ExitUnavailable, message: "gateway diagnostics unavailable"}, report: report}
 	}
 	b, _ := json.Marshal(remoteResult)
 	var remote doctor.Report

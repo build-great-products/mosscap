@@ -51,6 +51,11 @@ type App struct {
 
 func (a App) Run(ctx context.Context, args []string) int {
 	if err := a.Execute(ctx, args); err != nil {
+		var re *jsonRuntimeError
+		if errors.As(err, &re) {
+			a.renderRuntimeError(re)
+			return exitCode(re.err)
+		}
 		var je *jsonMutationError
 		if errors.As(err, &je) {
 			a.renderMutationError(je)
@@ -87,6 +92,10 @@ func (a App) Execute(_ context.Context, args []string) error {
 	root.SetOut(a.Out)
 	root.SetErr(a.Err)
 	if err := root.Execute(); err != nil {
+		var re *jsonRuntimeError
+		if errors.As(err, &re) {
+			return re
+		}
 		var ce *commandError
 		if errors.As(err, &ce) && ce.code != ExitUsage {
 			return ce
@@ -1141,6 +1150,52 @@ type commandError struct {
 
 func (e *commandError) Error() string { return e.message }
 
+// jsonRuntimeError marks an error from a successfully parsed --json leaf.
+// It is deliberately created from Cobra flag state, never from argv.
+type jsonRuntimeError struct {
+	err       error
+	requestID string
+	partial   any
+}
+
+func (e *jsonRuntimeError) Error() string { return e.err.Error() }
+func (e *jsonRuntimeError) Unwrap() error { return e.err }
+
+type doctorPartialError struct {
+	err    error
+	report doctor.Report
+}
+
+func (e *doctorPartialError) Error() string { return e.err.Error() }
+func (e *doctorPartialError) Unwrap() error { return e.err }
+
+// runtimeJSONError makes the process contract apply to every runtime failure
+// after Cobra has parsed a leaf's --json flag. Usage failures are intentionally
+// left alone so they remain text on stderr with exit 2.
+func (a App) runtimeJSONError(cmd *cobra.Command, err error) error {
+	if err == nil {
+		return nil
+	}
+	var ce *commandError
+	if errors.As(err, &ce) && ce.code == ExitUsage {
+		return err
+	}
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	if !jsonOut {
+		return err
+	}
+	requestID, _ := cmd.Flags().GetString("request-id")
+	var mutation *jsonMutationError
+	if errors.As(err, &mutation) && mutation.requestID != "" {
+		requestID = mutation.requestID
+	}
+	var partial *doctorPartialError
+	if errors.As(err, &partial) {
+		return &jsonRuntimeError{err: partial.err, requestID: requestID, partial: partial.report}
+	}
+	return &jsonRuntimeError{err: err, requestID: requestID}
+}
+
 type jsonMutationError struct {
 	err       error
 	requestID string
@@ -1168,19 +1223,63 @@ func exitCode(err error) int {
 	return ExitUnsafe
 }
 
-type mutationErrorJSON struct {
-	Code      string                     `json:"code"`
-	Category  string                     `json:"category"`
-	Message   string                     `json:"message"`
-	Retriable bool                       `json:"retriable"`
-	Details   map[string]string          `json:"details,omitempty"`
-	Progress  *protocol.PurgeProgressDTO `json:"progress,omitempty"`
-	RequestID string                     `json:"request_id,omitempty"`
-	Guidance  string                     `json:"guidance,omitempty"`
+type runtimeErrorJSON struct {
+	Code          string                     `json:"code"`
+	Category      string                     `json:"category"`
+	Message       string                     `json:"message"`
+	Retriable     bool                       `json:"retriable"`
+	Details       map[string]string          `json:"details,omitempty"`
+	Progress      *protocol.PurgeProgressDTO `json:"progress,omitempty"`
+	PartialResult any                        `json:"partial_result,omitempty"`
+	RequestID     string                     `json:"request_id,omitempty"`
+	Guidance      string                     `json:"guidance,omitempty"`
+}
+
+type mutationErrorJSON = runtimeErrorJSON
+
+func runtimeErrorDTO(err error, requestID string, partial any) runtimeErrorJSON {
+	out := runtimeErrorJSON{Code: "local_error", Category: "local", Message: err.Error(), RequestID: requestID, PartialResult: partial}
+	var ce *commandError
+	if errors.As(err, &ce) && ce.protocolError != nil {
+		out.Code, out.Category, out.Message = ce.protocolError.Code, ce.protocolError.Category, ce.protocolError.Message
+		out.Retriable, out.Details, out.Progress = ce.protocolError.Retriable, ce.protocolError.Details, ce.protocolError.Progress
+	} else {
+		switch exitCode(err) {
+		case ExitNotFound:
+			out.Code, out.Category = "not_found", "not_found"
+		case ExitConflict:
+			out.Code, out.Category = "conflict", "conflict"
+		case ExitUnavailable:
+			out.Code, out.Category, out.Retriable = "unavailable", "unavailable", true
+		case ExitExternalFailed:
+			out.Code, out.Category = "external_failed", "external_failed"
+		case ExitAmbiguous:
+			out.Code, out.Category = "ambiguous", "ambiguous"
+		case ExitUnsupported:
+			out.Code, out.Category = "unsupported", "unsupported"
+		}
+	}
+	switch {
+	case out.Code == "request_id_conflict":
+		out.Guidance = "This request ID is bound to another input; do not retry changed input with it."
+	case out.Category == "unavailable":
+		out.Guidance = "Replay the exact mutation with the same request ID."
+	case out.Category == "ambiguous":
+		out.Guidance = "Inspect the durable effect; never automatically resend this mutation."
+	case out.Category == "external_failed":
+		out.Guidance = "Inspect and revise the external failure; do not replay it as if uncertain."
+	}
+	return out
+}
+
+func (a App) renderRuntimeError(wrapped *jsonRuntimeError) {
+	_ = json.NewEncoder(a.Out).Encode(runtimeErrorDTO(wrapped.err, wrapped.requestID, wrapped.partial))
 }
 
 func (a App) renderMutationError(wrapped *jsonMutationError) {
-	out := mutationErrorJSON{Code: "local_error", Category: "local", Message: wrapped.err.Error()}
+	// Compatibility renderer for callers that still opt in per mutation.
+	// Parsed Cobra --json leaves use renderRuntimeError instead.
+	out := runtimeErrorJSON{Code: "local_error", Category: "local", Message: wrapped.err.Error()}
 	var ce *commandError
 	if errors.As(wrapped.err, &ce) && ce.protocolError != nil {
 		out.Code, out.Category, out.Message = ce.protocolError.Code, ce.protocolError.Category, ce.protocolError.Message

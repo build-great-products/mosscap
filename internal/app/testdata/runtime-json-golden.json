@@ -1,0 +1,15 @@
+[
+  {
+    "name": "setup configuration failure",
+    "args": ["setup", "--json"],
+    "env": "XDG_CONFIG_HOME",
+    "env_value": "relative",
+    "exit": 5,
+    "want": {"code":"local_error","category":"local"}
+  },
+  {
+    "name": "doctor partial gateway failure",
+    "exit": 6,
+    "want": {"code":"unavailable","category":"unavailable","retriable":true,"partial_result":true}
+  }
+]
