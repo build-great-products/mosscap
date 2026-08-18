@@ -78,13 +78,14 @@ func commandAt(root *cobra.Command, path []string) *cobra.Command {
 	return command
 }
 
-func TestTypedFoundationLeavesBypassLegacyParserBridge(t *testing.T) {
+func TestTypedLeavesBypassLegacyParserBridge(t *testing.T) {
 	tree := (App{}).NewCommandTree()
 	for _, path := range []string{
 		"setup", "config show", "config set", "config secret set",
 		"gateway run", "gateway reload", "gateway status", "doctor",
 		"trust list", "trust add", "trust remove", "purge",
 		"effect list", "effect inspect", "effect retry",
+		"file show", "file get", "slack file",
 		"delivery list", "delivery inspect", "delivery requeue",
 	} {
 		cmd := commandAt(tree, strings.Fields(path))
@@ -95,7 +96,7 @@ func TestTypedFoundationLeavesBypassLegacyParserBridge(t *testing.T) {
 			t.Errorf("%s is still bound to the legacy parser bridge", path)
 		}
 	}
-	for _, handler := range []string{"task.list", "slack.send", "file.show"} {
+	for _, handler := range []string{"task.list", "slack.send", "task.reply"} {
 		if isTypedCobraHandler(handler) {
 			t.Errorf("%s unexpectedly left the compatibility bridge", handler)
 		}

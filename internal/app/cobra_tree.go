@@ -188,7 +188,7 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // adapters in runCobraHandler.
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "effect.list", "effect.inspect", "effect.retry", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.file", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	default:
 		return false
@@ -237,6 +237,20 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		confirm, _ := cmd.Flags().GetBool("confirm-duplicate-risk")
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.effectTyped("retry", args[0], "", reason, confirm, requestID, jsonOut)
+	case "file.show":
+		return a.fileShowTyped(args[0], jsonOut)
+	case "file.get":
+		output, _ := cmd.Flags().GetString("output")
+		force, _ := cmd.Flags().GetBool("force")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.fileGetTyped(args[0], output, force, requestID, jsonOut)
+	case "slack.file":
+		thread, _ := cmd.Flags().GetString("thread")
+		files, _ := cmd.Flags().GetStringArray("file")
+		comment, _ := cmd.Flags().GetString("comment")
+		task, _ := cmd.Flags().GetString("task")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.slackFileTyped(thread, files, comment, task, requestID, jsonOut)
 	case "delivery.list":
 		state, _ := cmd.Flags().GetString("state")
 		return a.deliveryTyped("list", "", state, "", "", jsonOut)

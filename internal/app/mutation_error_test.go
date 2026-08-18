@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stayradiated/mosscap/internal/fileio"
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
@@ -33,6 +34,26 @@ func TestJSONMutationErrorPreservesProtocolFields(t *testing.T) {
 	}
 	if exitCode(err) != ExitUnavailable {
 		t.Fatalf("exit code = %d", exitCode(err))
+	}
+}
+
+func TestFileGetPlacementJSONErrorRetainsRequestID(t *testing.T) {
+	var stderr bytes.Buffer
+	a := App{Err: &stderr}
+	wrapped, ok := mutationJSONError(outputError(fileio.ErrDestinationExists), true, true, "req_file_get_placement").(*jsonMutationError)
+	if !ok {
+		t.Fatal("file get placement error was not wrapped")
+	}
+	a.renderMutationError(wrapped)
+	var got mutationErrorJSON
+	if err := json.Unmarshal(stderr.Bytes(), &got); err != nil {
+		t.Fatalf("stderr is not JSON: %v: %q", err, stderr.String())
+	}
+	if got.Code != "local_error" || got.Category != "local" || got.RequestID != "req_file_get_placement" {
+		t.Fatalf("placement error = %+v", got)
+	}
+	if exitCode(wrapped) != ExitConflict {
+		t.Fatalf("exit code = %d, want %d", exitCode(wrapped), ExitConflict)
 	}
 }
 
