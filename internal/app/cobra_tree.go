@@ -191,7 +191,7 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 	if len(path) > 1 {
 		commandUse = strings.TrimPrefix(commandUse, strings.Join(path[:len(path)-1], " ")+" ")
 	}
-	cmd := &cobra.Command{Use: commandUse, Short: short, Long: leafDescription(short, handler), Example: "  " + use, Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
+	cmd := &cobra.Command{Use: commandUse, Short: short, Long: leafDescription(short, handler), Example: leafExample(use, handler), Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
 	if gatewayCallingHandler(handler) {
 		cmd.Flags().String("timeout", "10s", "Maximum total time for gateway dial, handshake, and request.")
 	}
@@ -250,11 +250,18 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 
 // leafDescription keeps operational warnings next to the command syntax.
 // Parsing and help stay side-effect free: this text is metadata only.
+func leafExample(use, handler string) string {
+	if handler == "task.reply" {
+		return "  mosscap task reply TASK --stdin --done <<'REPLY'\n  Your multiline reply\n  REPLY"
+	}
+	return "  " + use
+}
+
 func leafDescription(short, handler string) string {
 	description := short
 	switch handler {
 	case "task.create", "task.update", "task.reply", "slack.send", "slack.edit":
-		description += "\n\nProvide exactly one of --text, --text-file, or --stdin."
+		description += "\n\nProvide exactly one of --text, --text-file, or --stdin. --text is literal and does not decode \\n; use --stdin or --text-file for exact multiline text."
 	case "task.list":
 		description += "\n\nUse either --state (open, working, or done) or --all."
 	case "purge":
@@ -532,7 +539,7 @@ var cobraLeafSpecs = []cobraLeafSpec{
 }
 
 func textFlags() []flagSpec {
-	return []flagSpec{stringFlag("text", "Literal message text."), stringFlag("text-file", "Regular file containing message text."), boolFlag("stdin", "Read the complete message text from standard input."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}
+	return []flagSpec{stringFlag("text", "Literal message text; backslash-n is not decoded."), stringFlag("text-file", "Regular file containing exact message text."), boolFlag("stdin", "Read complete exact message text from standard input."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}
 }
 func transitionFlags() []flagSpec {
 	return []flagSpec{stringFlag("note", "Transition audit note."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}

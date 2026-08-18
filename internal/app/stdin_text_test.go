@@ -19,7 +19,8 @@ func TestStdinTextBodiesReachGatewayExactly(t *testing.T) {
 		want                 any
 		capability           string
 	}{
-		{"task create", "create\n", "task.create", []string{"task", "create", "--stdin", "--request-id", "req_stdin_create"}, protocol.TaskCreateParams{Text: "create\n"}, protocol.CapabilityLocalTasks},
+		{"task create multiline stdin", "first line\nsecond line\n", "task.create", []string{"task", "create", "--stdin", "--request-id", "req_stdin_create"}, protocol.TaskCreateParams{Text: "first line\nsecond line\n"}, protocol.CapabilityLocalTasks},
+		{"task create literal backslash-n text", "", "task.create", []string{"task", "create", "--text", "first\\nsecond", "--request-id", "req_text_literal"}, protocol.TaskCreateParams{Text: "first\\nsecond"}, protocol.CapabilityLocalTasks},
 		{"task update", "update\n\n", "task.update", []string{"task", "update", "abcdefghijklmnopqrstuv", "--stdin", "--request-id", "req_stdin_update"}, protocol.TaskUpdateParams{Task: "abcdefghijklmnopqrstuv", Text: "update\n\n"}, protocol.CapabilityLocalTasks},
 		{"task reply", "reply\n", "task.reply", []string{"task", "reply", "abcdefghijklmnopqrstuv", "--stdin", "--request-id", "req_stdin_reply"}, protocol.TaskReplyParams{Task: "abcdefghijklmnopqrstuv", Text: "reply\n"}, protocol.CapabilityTaskReply},
 		{"slack send", "send\n", "slack.send", []string{"slack", "send", "--stdin", "--request-id", "req_stdin_send"}, protocol.SlackSendParams{Text: "send\n"}, protocol.CapabilitySlackEffects},

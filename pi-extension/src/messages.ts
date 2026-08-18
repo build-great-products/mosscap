@@ -28,7 +28,9 @@ export function taskMessage(work: Work, sessionId: string): CustomMessage {
   const heading = slack ? `Slack task ${work.task_selector} from ${work.source.slack_author_id}` : `Local Mosscap task ${work.task_selector}`;
   const actionLines = slack ? [
     "Reply and finish:",
-    `mosscap task reply ${work.task_selector} --text "REPLY" --done`,
+    `mosscap task reply ${work.task_selector} --stdin --done <<'MOSSCAP_REPLY'`,
+    "REPLY",
+    "MOSSCAP_REPLY",
     "",
   ] : [];
   const attachments = work.attached_files ?? [];

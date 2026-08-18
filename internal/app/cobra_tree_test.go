@@ -112,6 +112,19 @@ func TestCobraHelpAndHighConfidenceSuggestions(t *testing.T) {
 	}
 }
 
+func TestTextSourceHelpDocumentsLiteralAndMultilineContracts(t *testing.T) {
+	var out, err bytes.Buffer
+	if exit := (App{Out: &out, Err: &err, Version: "test"}).Run(context.Background(), []string{"task", "reply", "--help"}); exit != ExitSuccess || err.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exit, out.String(), err.String())
+	}
+	help := out.String()
+	for _, want := range []string{"--text is literal and does not decode \\n", "--stdin or --text-file for exact multiline text", "--stdin --done <<'REPLY'"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestRuntimeErrorsDoNotRenderUsageAndGatewayRunExplainsSetup(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
