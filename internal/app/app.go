@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
@@ -42,11 +44,22 @@ const (
 	ExitUnsupported    = 9
 )
 
+type gatewayBudget struct {
+	once     sync.Once
+	deadline time.Time
+}
+
 type App struct {
 	Out     io.Writer
 	Err     io.Writer
 	In      io.Reader
 	Version string
+
+	// ctx and timeout are set for the copied App captured by each Cobra leaf.
+	// They keep the caller's cancellation/deadline attached to every gateway RPC.
+	ctx     context.Context
+	timeout time.Duration
+	budget  *gatewayBudget
 }
 
 func (a App) Run(ctx context.Context, args []string) int {
@@ -74,7 +87,7 @@ func (a App) Run(ctx context.Context, args []string) int {
 	}
 	return ExitSuccess
 }
-func (a App) Execute(_ context.Context, args []string) error {
+func (a App) Execute(ctx context.Context, args []string) error {
 	if a.Out == nil {
 		a.Out = io.Discard
 	}
@@ -87,8 +100,13 @@ func (a App) Execute(_ context.Context, args []string) error {
 	if a.Version == "" {
 		a.Version = "devel"
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.ctx = ctx
 	root := a.NewCommandTree()
 	root.SetArgs(args)
+	root.SetContext(ctx)
 	root.SetOut(a.Out)
 	root.SetErr(a.Err)
 	if err := root.Execute(); err != nil {
@@ -565,7 +583,23 @@ func colorEnabled(w io.Writer) bool {
 	return ok && (isatty.IsTerminal(f.Fd()) || isatty.IsCygwinTerminal(f.Fd()))
 }
 
+// gatewayCall starts its timeout immediately before contacting the gateway, so
+// local parsing and stdin consumption never consume the gateway budget.
 func (a App) gatewayCall(c config.Config, command, requestID string, params any, requiredCapability string) (any, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timeout := a.timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	if a.budget == nil {
+		a.budget = &gatewayBudget{}
+	}
+	a.budget.once.Do(func() { a.budget.deadline = time.Now().Add(timeout) })
+	ctx, cancel := context.WithDeadline(ctx, a.budget.deadline)
+	defer cancel()
 	if params == nil {
 		params = protocol.EmptyParams{}
 	}
@@ -577,20 +611,24 @@ func (a App) gatewayCall(c config.Config, command, requestID string, params any,
 	if err := request.Validate(); err != nil {
 		return nil, usage(err.Error())
 	}
-	cl, err := client.Dial(context.Background(), c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
+	cl, err := client.Dial(ctx, c.Paths.Endpoint, uint32(c.LocalProtocolMaximumFrame))
 	if err != nil {
 		return nil, &commandError{code: ExitUnavailable, message: err.Error()}
 	}
 	defer cl.Close()
-	hello, err := cl.Hello(context.Background(), "req_hello_"+strings.ReplaceAll(command, ".", "_"), "cli", a.Version, nil)
+	hello, err := cl.Hello(ctx, "req_hello_"+strings.ReplaceAll(command, ".", "_"), "cli", a.Version, nil)
 	if err != nil {
 		return nil, remote(err)
 	}
 	if requiredCapability != "" && !hasCapability(hello.Capabilities, requiredCapability) {
 		return nil, unsupported("gateway does not support " + requiredCapability + "; upgrade the gateway before using this command")
 	}
-	response, err := cl.Call(context.Background(), request)
+	response, err := cl.Call(ctx, request)
 	if err != nil {
+		var submitted *client.RequestSubmittedError
+		if errors.As(err, &submitted) && gatewayMutation(command) {
+			return nil, &commandError{code: ExitAmbiguous, message: "gateway response was lost after request submission"}
+		}
 		return nil, remote(err)
 	}
 	if response.Error != nil {
@@ -999,6 +1037,17 @@ func (a App) task(_ string, args []string) error {
 		out = map[string]any{"request_id": *requestID, "result": out}
 	}
 	return a.render(out, *j)
+}
+
+// gatewayMutation is intentionally conservative: a response lost after any
+// request that can write durable state is not safe to replay automatically.
+func gatewayMutation(command string) bool {
+	switch command {
+	case "config.reload", "metadata.purge", "trust.add", "trust.remove", "task.create", "task.update", "task.transition", "task.reply", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.retry", "file.get", "file.release", "delivery.requeue":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasCapability(capabilities []string, required string) bool {

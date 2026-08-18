@@ -93,6 +93,8 @@ mosscap task reply AbCdEfGh --text "I found the problem." --done
 
 For multiline or piped bodies, `task create`, `task update`, `task reply`, `slack send`, and `slack edit` also accept `--stdin`. Provide exactly one of `--text`, `--text-file`, or `--stdin`; stdin is read completely (including trailing newlines) before contacting the gateway.
 
+Every command that contacts the gateway accepts `--timeout DURATION` (default `10s`). The budget starts only immediately before dialing the gateway, covers dial, handshake, request, and frame I/O, and never extends an earlier caller deadline. Stdin and local input validation happen before that budget begins.
+
 Default output is compact human-readable cards, rows, and labelled details; use `--json` for the unchanged command DTOs. Message cards preserve full multiline Unicode text and visibly escape terminal control bytes. Colors require a TTY and are disabled by `NO_COLOR`.
 
 ## Files and exceptional outcomes

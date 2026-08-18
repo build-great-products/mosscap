@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -191,11 +192,25 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 		commandUse = strings.TrimPrefix(commandUse, strings.Join(path[:len(path)-1], " ")+" ")
 	}
 	cmd := &cobra.Command{Use: commandUse, Short: short, Long: leafDescription(short, handler), Example: "  " + use, Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
+	if gatewayCallingHandler(handler) {
+		cmd.Flags().String("timeout", "10s", "Maximum total time for gateway dial, handshake, and request.")
+	}
 	if isTypedCobraHandler(handler) {
 		// Keep migrated leaves structurally separate from the compatibility
 		// bridge: their execution can never reach a legacy flag.FlagSet parser.
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			return a.runtimeJSONError(cmd, a.runTypedCobraHandler(handler, cmd, args))
+			handlerApp := a
+			handlerApp.ctx = cmd.Context()
+			handlerApp.budget = &gatewayBudget{}
+			if gatewayCallingHandler(handler) {
+				value, _ := cmd.Flags().GetString("timeout")
+				parsed, err := time.ParseDuration(value)
+				if err != nil || parsed <= 0 {
+					return usage("--timeout must be a positive duration")
+				}
+				handlerApp.timeout = parsed
+			}
+			return handlerApp.runtimeJSONError(cmd, handlerApp.runTypedCobraHandler(handler, cmd, args))
 		}
 	} else {
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
@@ -295,6 +310,17 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // runTypedCobraHandler binds the first migrated family directly to typed
 // operations. These leaves must not pass through the legacy flag.FlagSet
 // adapters in runCobraHandler.
+// gatewayCallingHandler deliberately excludes local setup/configuration and
+// gateway run. Every leaf that opens the local protocol gets the shared bound.
+func gatewayCallingHandler(handler string) bool {
+	switch handler {
+	case "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
+		return true
+	default:
+		return false
+	}
+}
+
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
 	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":

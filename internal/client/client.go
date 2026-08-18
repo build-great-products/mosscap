@@ -15,6 +15,13 @@ import (
 
 const DefaultMaxFrameBytes = 1048576
 
+// RequestSubmittedError means transport certainty was lost after the request
+// frame was written. Callers of mutations must treat it as ambiguous.
+type RequestSubmittedError struct{ Err error }
+
+func (e *RequestSubmittedError) Error() string { return e.Err.Error() }
+func (e *RequestSubmittedError) Unwrap() error { return e.Err }
+
 type Client struct {
 	conn         net.Conn
 	codec        protocol.Codec
@@ -111,19 +118,32 @@ func (c *Client) exchange(ctx context.Context, request protocol.Request, needHel
 		return zero, err
 	}
 	defer c.conn.SetDeadline(time.Time{})
+	// Deadlines cover deadline contexts. Closing on plain cancellation also
+	// unblocks frame I/O immediately; a cancelled connection is intentionally
+	// not reusable, which is safer than letting a stale request continue.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.conn.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	if err := c.codec.WriteFrame(payload); err != nil {
-		return zero, err
+		// A partial stream write can still leave a complete request at the peer.
+		return zero, &RequestSubmittedError{Err: err}
 	}
 	payload, err = c.codec.ReadFrame()
 	if err != nil {
-		return zero, err
+		return zero, &RequestSubmittedError{Err: err}
 	}
 	response, err := protocol.DecodeResponse(payload)
 	if err != nil {
-		return zero, err
+		return zero, &RequestSubmittedError{Err: err}
 	}
 	if response.RequestID != request.RequestID {
-		return zero, errors.New("client: response request_id mismatch")
+		return zero, &RequestSubmittedError{Err: errors.New("client: response request_id mismatch")}
 	}
 	return response, nil
 }

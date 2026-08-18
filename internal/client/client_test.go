@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
@@ -50,6 +51,37 @@ func TestHelloThenCall(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestCallCancellationInterruptsFrameRead(t *testing.T) {
+	server, conn := net.Pipe()
+	defer server.Close()
+	defer conn.Close()
+	c := &Client{conn: conn, codec: protocol.NewCodec(conn, conn, 1024), hello: true}
+	read := make(chan struct{})
+	go func() {
+		codec := protocol.NewCodec(server, server, 1024)
+		if _, err := codec.ReadFrame(); err == nil {
+			close(read)
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { _, err := c.Call(ctx, request("status.get", "req_cancel")); result <- err }()
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Fatal("client did not write request")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled call succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt frame read")
+	}
+}
+
 func TestHelloReturnsTypedUnsupportedVersion(t *testing.T) {
 	server, conn := net.Pipe()
 	defer server.Close()

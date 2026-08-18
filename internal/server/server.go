@@ -442,12 +442,18 @@ func (s *Server) handle(c *net.UnixConn) {
 			}
 			return
 		}
+		// A client closing its socket while a request is running must stop
+		// cancellable pre-boundary work. Slack/Pi post-boundary commits detach
+		// cancellation themselves so their durable uncertainty evidence survives.
+		requestCtx, requestCancel := context.WithCancel(ctx)
+		watchDone := make(chan struct{})
+		go watchClientDisconnect(c, watchDone, requestCancel)
 		var response protocol.Response
 		if !hello {
 			if r.Command != "hello" {
 				response = protocol.NewErrorResponse(r.RequestID, s.Version, "hello_required", "usage", "hello is required", false)
 			} else {
-				response = s.dispatchConnection(ctx, r, state)
+				response = s.dispatchConnection(requestCtx, r, state)
 				hello = response.Error == nil
 				if hello {
 					state.clientKind = r.ClientKind
@@ -458,13 +464,43 @@ func (s *Server) handle(c *net.UnixConn) {
 		} else if r.ClientKind != state.clientKind {
 			response = protocol.NewErrorResponse(r.RequestID, s.Version, "client_kind_changed", "conflict", "client kind is bound to this connection", false)
 		} else {
-			response = s.dispatchConnection(ctx, r, state)
+			response = s.dispatchConnection(requestCtx, r, state)
 		}
+		close(watchDone)
+		requestCancel()
 		out, err := protocol.EncodeResponse(response)
 		if err != nil {
 			return
 		}
 		if codec.WriteFrame(out) != nil {
+			return
+		}
+	}
+}
+
+// watchClientDisconnect polls only hangup/error bits, never reads protocol
+// bytes, so it can cancel an in-flight dispatch without racing frame parsing.
+func watchClientDisconnect(c *net.UnixConn, done <-chan struct{}, cancel context.CancelFunc) {
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return
+	}
+	var fd int
+	if raw.Control(func(value uintptr) { fd = int(value) }) != nil || fd < 0 {
+		return
+	}
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLHUP | unix.POLLERR | unix.POLLRDHUP}}
+		if _, err := unix.Poll(poll, 25); err != nil {
+			return
+		}
+		if poll[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLRDHUP) != 0 {
+			cancel()
 			return
 		}
 	}

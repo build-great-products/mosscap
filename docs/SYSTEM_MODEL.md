@@ -52,7 +52,7 @@ Slack reads and writes are explicit. Each write records a durable intent before 
 
 ### Local protocol
 
-A private, versioned Unix-socket protocol connects the gateway, CLI, and extension. Request IDs deduplicate local mutations. Owner-only filesystem permissions and peer credentials protect the endpoint from other OS users; they do not protect against another process running as the same user.
+A private, versioned Unix-socket protocol connects the gateway, CLI, and extension. Request IDs deduplicate local mutations. Gateway-calling CLI leaves use a positive shared `--timeout` (10 seconds by default) beginning immediately before dial; it covers dial, hello, calls, and framed I/O, while caller cancellation and an earlier caller deadline take precedence. Body stdin is deliberately consumed before this budget. Owner-only filesystem permissions and peer credentials protect the endpoint from other OS users; they do not protect against another process running as the same user.
 
 ## Task and request flow
 
@@ -97,7 +97,7 @@ prepared → submitted → confirmed
                        └────→ ambiguous
 ```
 
-A conclusive rejection is `failed`. A timeout or disconnect after submission is `ambiguous`; Mosscap never retries it automatically. Explicit retry creates a linked new effect and, after ambiguity, requires duplicate-risk confirmation.
+A conclusive rejection is `failed`. A timeout, cancellation, or disconnect after submission is `ambiguous`; Mosscap never retries it automatically. The terminal post-submission commit uses a cancellation-detached context, so loss of the client cannot erase this evidence. Explicit retry creates a linked new effect and, after ambiguity, requires duplicate-risk confirmation.
 
 ## Files and retention
 
