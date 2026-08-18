@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -53,6 +52,9 @@ var (
 	ErrRequestConflict    = errors.New("request ID conflicts with prior request")
 	ErrNotFound           = errors.New("task not found")
 	ErrAmbiguous          = errors.New("task selector is ambiguous")
+	// ErrCursorExpired means a syntactically valid immutable cursor anchor was
+	// removed (normally by metadata purge). Restart the listing without it.
+	ErrCursorExpired = errors.New("list cursor has expired; restart without --cursor")
 )
 
 type Options struct {
@@ -117,31 +119,6 @@ func (e *mutationError) Error() string { return e.message }
 
 func invalidInput(message string) error {
 	return &mutationError{code: "invalid_input", message: message}
-}
-
-type listCursor struct {
-	UpdatedAt int64  `json:"updated_at"`
-	TaskID    string `json:"task_id"`
-}
-
-func encodeCursor(updatedAt int64, taskID string) string {
-	b, _ := json.Marshal(listCursor{UpdatedAt: updatedAt, TaskID: taskID})
-	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-func decodeCursor(cursor string) (listCursor, error) {
-	if cursor == "" {
-		return listCursor{}, nil
-	}
-	b, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
-		return listCursor{}, invalidInput("invalid task list cursor")
-	}
-	var c listCursor
-	if err := json.Unmarshal(b, &c); err != nil || c.UpdatedAt < 0 || len(c.TaskID) != 22 || !validOpaqueIDSuffix(c.TaskID) {
-		return listCursor{}, invalidInput("invalid task list cursor")
-	}
-	return c, nil
 }
 
 // Checksum returns the initial migration checksum for compatibility with v1 callers.
@@ -717,6 +694,8 @@ func (s *Store) mutate(ctx context.Context, req request, requestID string, fn fu
 }
 
 // ListTrustedUsers returns the committed Slack user-ID allowlist in lexical order.
+// Deprecated callers retain this unpaged view; gateway-facing reads use
+// ListTrustedUsersPage so no protocol response is unbounded.
 func (s *Store) ListTrustedUsers(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT slack_user_id FROM trusted_users ORDER BY slack_user_id")
 	if err != nil {
@@ -736,6 +715,49 @@ func (s *Store) ListTrustedUsers(ctx context.Context) ([]string, error) {
 
 // IsTrustedUser reads current committed authorization directly from SQLite;
 // callers must not replace this authority check with a configuration cache.
+// ListTrustedUsersPage returns a lexical ID-cursor page. Unlike resource
+// cursors, a removed trust anchor remains a valid point after which to resume.
+func (s *Store) ListTrustedUsersPage(ctx context.Context, limit int, cursor string) ([]string, string, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 100 {
+		return nil, "", invalidInput("invalid trusted-user list limit")
+	}
+	if cursor != "" && !validSlackUserID(cursor) {
+		return nil, "", invalidInput("invalid trusted-user list cursor")
+	}
+	q, args := "SELECT slack_user_id FROM trusted_users", []any{}
+	if cursor != "" {
+		q += " WHERE slack_user_id>?"
+		args = append(args, cursor)
+	}
+	q += " ORDER BY slack_user_id LIMIT ?"
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var users []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, "", err
+		}
+		users = append(users, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(users) > limit {
+		next = users[limit-1]
+		users = users[:limit]
+	}
+	return users, next, nil
+}
+
 func (s *Store) IsTrustedUser(ctx context.Context, userID string) (bool, error) {
 	if !validSlackUserID(userID) {
 		return false, invalidInput("invalid Slack user ID")
@@ -901,18 +923,25 @@ func (s *Store) LatestStateEvent(ctx context.Context, taskID string, priorState,
 	return event, true, nil
 }
 
-// List returns one stable updated-at/task-id page. By default done tasks are
-// excluded; an explicit state always takes precedence.
+// List returns a stable creation-time/task-ID page. A cursor is the full ID
+// of its last task; its immutable creation key is reloaded before continuation.
 func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool, limit int, cursor string) ([]Task, string, error) {
 	if limit == 0 {
-		limit = 100
+		limit = 20
 	}
-	if limit < 1 || limit > 1000 {
+	if limit < 1 || limit > 100 {
 		return nil, "", invalidInput("invalid task list limit")
 	}
-	c, err := decodeCursor(cursor)
-	if err != nil {
-		return nil, "", err
+	var anchorCreated int64
+	if cursor != "" {
+		if len(cursor) != 22 || !validOpaqueIDSuffix(cursor) {
+			return nil, "", invalidInput("invalid task list cursor")
+		}
+		if err := s.db.QueryRowContext(ctx, "SELECT created_at FROM tasks WHERE task_id=?", cursor).Scan(&anchorCreated); errors.Is(err, sql.ErrNoRows) {
+			return nil, "", ErrCursorExpired
+		} else if err != nil {
+			return nil, "", err
+		}
 	}
 	q := "SELECT task_id,version,state,text,source_kind,created_at,updated_at,done_at FROM tasks"
 	args := []any{}
@@ -924,13 +953,13 @@ func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool,
 		conditions = append(conditions, "state IN ('open','working')")
 	}
 	if cursor != "" {
-		conditions = append(conditions, "(updated_at > ? OR (updated_at = ? AND task_id > ?))")
-		args = append(args, c.UpdatedAt, c.UpdatedAt, c.TaskID)
+		conditions = append(conditions, "(created_at > ? OR (created_at = ? AND task_id > ?))")
+		args = append(args, anchorCreated, anchorCreated, cursor)
 	}
 	if len(conditions) > 0 {
 		q += " WHERE " + strings.Join(conditions, " AND ")
 	}
-	q += " ORDER BY updated_at,task_id LIMIT ?"
+	q += " ORDER BY created_at,task_id LIMIT ?"
 	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -959,7 +988,7 @@ func (s *Store) List(ctx context.Context, stateFilter *string, includeDone bool,
 	var next string
 	if len(tasks) > limit {
 		last := tasks[limit-1]
-		next = encodeCursor(last.UpdatedAt.UnixMicro(), last.ID)
+		next = last.ID
 		tasks = tasks[:limit]
 	}
 	return tasks, next, nil

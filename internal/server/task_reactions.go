@@ -225,7 +225,7 @@ func (s *Server) reconcileTaskReactions(ctx context.Context) error {
 	// Page tasks to completion. Persisted evidence is queried by exact task
 	// version, rather than inferred from the bounded operator delivery listing.
 	for cursor := ""; ; {
-		tasks, next, err := s.store.List(ctx, nil, true, 1000, cursor)
+		tasks, next, err := s.store.List(ctx, nil, true, 100, cursor)
 		if err != nil {
 			return err
 		}

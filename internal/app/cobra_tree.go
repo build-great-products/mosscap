@@ -328,10 +328,12 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.purgeTyped(before, dryRun, confirm, trackedOccurrences(cmd, "before"), trackedOccurrences(cmd, "dry-run"), trackedOccurrences(cmd, "confirm"), requestID, jsonOut)
 	case "trust.list":
-		return a.trustTyped("list", "", "", jsonOut)
+		limit, _ := cmd.Flags().GetInt("limit")
+		cursor, _ := cmd.Flags().GetString("cursor")
+		return a.trustTyped("list", "", "", limit, cursor, jsonOut)
 	case "trust.add", "trust.remove":
 		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.trustTyped(strings.TrimPrefix(handler, "trust."), args[0], requestID, jsonOut)
+		return a.trustTyped(strings.TrimPrefix(handler, "trust."), args[0], requestID, 0, "", jsonOut)
 	case "task.create", "task.update", "task.reply":
 		text, _ := cmd.Flags().GetString("text")
 		textFile, _ := cmd.Flags().GetString("text-file")
@@ -341,28 +343,32 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		if len(args) != 0 {
 			selector = args[0]
 		}
-		return a.taskTyped(strings.TrimPrefix(handler, "task."), selector, text, textFile, "", false, 0, "", done, requestID, jsonOut)
+		return a.taskTyped(strings.TrimPrefix(handler, "task."), selector, text, textFile, "", false, 0, "", done, requestID, "", jsonOut)
 	case "task.list":
 		state, _ := cmd.Flags().GetString("state")
 		all, _ := cmd.Flags().GetBool("all")
 		limit, _ := cmd.Flags().GetInt("limit")
-		return a.taskTyped("list", "", "", "", state, all, limit, "", false, "", jsonOut)
+		cursor, _ := cmd.Flags().GetString("cursor")
+		return a.taskTyped("list", "", "", "", state, all, limit, "", false, "", cursor, jsonOut)
 	case "task.show":
-		return a.taskTyped("show", args[0], "", "", "", false, 0, "", false, "", jsonOut)
+		return a.taskTyped("show", args[0], "", "", "", false, 0, "", false, "", "", jsonOut)
 	case "task.open", "task.working", "task.done":
 		note, _ := cmd.Flags().GetString("note")
 		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.taskTyped(strings.TrimPrefix(handler, "task."), args[0], "", "", "", false, 0, note, false, requestID, jsonOut)
+		return a.taskTyped(strings.TrimPrefix(handler, "task."), args[0], "", "", "", false, 0, note, false, requestID, "", jsonOut)
 	case "effect.list":
 		state, _ := cmd.Flags().GetString("state")
-		return a.effectTyped("list", "", state, "", false, "", jsonOut)
+		task, _ := cmd.Flags().GetString("task")
+		limit, _ := cmd.Flags().GetInt("limit")
+		cursor, _ := cmd.Flags().GetString("cursor")
+		return a.effectTyped("list", "", state, task, limit, cursor, "", false, "", jsonOut)
 	case "effect.inspect":
-		return a.effectTyped("inspect", args[0], "", "", false, "", jsonOut)
+		return a.effectTyped("inspect", args[0], "", "", 0, "", "", false, "", jsonOut)
 	case "effect.retry":
 		reason, _ := cmd.Flags().GetString("reason")
 		confirm, _ := cmd.Flags().GetBool("confirm-duplicate-risk")
 		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.effectTyped("retry", args[0], "", reason, confirm, requestID, jsonOut)
+		return a.effectTyped("retry", args[0], "", "", 0, "", reason, confirm, requestID, jsonOut)
 	case "file.show":
 		return a.fileShowTyped(args[0], jsonOut)
 	case "file.get":
@@ -381,13 +387,16 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		return a.slackFileTyped(thread, files, comment, task, requestID, jsonOut)
 	case "delivery.list":
 		state, _ := cmd.Flags().GetString("state")
-		return a.deliveryTyped("list", "", state, "", "", jsonOut)
+		task, _ := cmd.Flags().GetString("task")
+		limit, _ := cmd.Flags().GetInt("limit")
+		cursor, _ := cmd.Flags().GetString("cursor")
+		return a.deliveryTyped("list", "", state, task, limit, cursor, "", "", jsonOut)
 	case "delivery.inspect":
-		return a.deliveryTyped("inspect", args[0], "", "", "", jsonOut)
+		return a.deliveryTyped("inspect", args[0], "", "", 0, "", "", "", jsonOut)
 	case "delivery.requeue":
 		reason, _ := cmd.Flags().GetString("reason")
 		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.deliveryTyped("requeue", args[0], "", reason, requestID, jsonOut)
+		return a.deliveryTyped("requeue", args[0], "", "", 0, "", reason, requestID, jsonOut)
 	default:
 		return fmt.Errorf("unbound typed Cobra handler %q", handler)
 	}
@@ -458,11 +467,11 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"gateway", "run"}, "Run the foreground local gateway.", "mosscap gateway run", false, "", "gateway.run", nil, nil},
 	{[]string{"gateway", "reload"}, "Validate and atomically activate staged configuration.", "mosscap gateway reload [--request-id ID] [--json]", false, "config_reload", "gateway.reload", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
 	{[]string{"gateway", "status"}, "Show local gateway status.", "mosscap gateway status [--json]", true, protocol.CapabilityStatus, "gateway.status", []flagSpec{boolFlag("json", "Render the status as JSON.")}, nil},
-	{[]string{"trust", "list"}, "List trusted Slack users.", "mosscap trust list [--json]", true, "trusted_users", "trust.list", []flagSpec{boolFlag("json", "Render the list as JSON.")}, nil},
+	{[]string{"trust", "list"}, "List trusted Slack users.", "mosscap trust list [--limit N] [--cursor SLACK_USER_ID] [--json]", true, "trusted_users", "trust.list", []flagSpec{intFlag("limit", "Maximum number of users."), stringFlag("cursor", "Resume after this Slack user ID."), boolFlag("json", "Render the list as JSON.")}, nil},
 	{[]string{"trust", "add"}, "Add a trusted Slack user.", "mosscap trust add SLACK_USER_ID [--request-id ID] [--json]", false, "trusted_users", "trust.add", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
 	{[]string{"trust", "remove"}, "Remove a trusted Slack user.", "mosscap trust remove SLACK_USER_ID [--request-id ID] [--json]", false, "trusted_users", "trust.remove", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
 	{[]string{"task", "create"}, "Create a local task.", "mosscap task create (--text TEXT|--text-file PATH) [--request-id ID] [--json]", false, "local_tasks", "task.create", textFlags(), nil},
-	{[]string{"task", "list"}, "List durable tasks.", "mosscap task list [--state open|working|done|--all] [--limit N] [--json]", true, "local_tasks", "task.list", []flagSpec{stringFlag("state", "Filter by open, working, or done state."), boolFlag("all", "Include completed tasks."), intFlag("limit", "Maximum number of tasks."), boolFlag("json", "Render the list as JSON.")}, nil},
+	{[]string{"task", "list"}, "List durable tasks.", "mosscap task list [--state open|working|done|--all] [--limit N] [--cursor TASK_ID] [--json]", true, "local_tasks", "task.list", []flagSpec{stringFlag("state", "Filter by open, working, or done state."), boolFlag("all", "Include completed tasks."), intFlag("limit", "Maximum number of tasks."), stringFlag("cursor", "Resume after this task ID."), boolFlag("json", "Render the list as JSON.")}, nil},
 	{[]string{"task", "show"}, "Show current durable task state.", "mosscap task show TASK [--json]", true, "local_tasks", "task.show", []flagSpec{boolFlag("json", "Render the task as JSON.")}, nil},
 	{[]string{"task", "update"}, "Replace a task's text.", "mosscap task update TASK (--text TEXT|--text-file PATH) [--request-id ID] [--json]", false, "local_tasks", "task.update", textFlags(), nil},
 	{[]string{"task", "open"}, "Move a task to open.", "mosscap task open TASK [--note TEXT] [--request-id ID] [--json]", false, "local_tasks", "task.open", transitionFlags(), nil},
@@ -477,12 +486,12 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"slack", "delete"}, "Delete a Slack message with an audit reason.", "mosscap slack delete MESSAGE_TS --reason TEXT [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.delete", []flagSpec{stringFlag("reason", "Required audit reason."), stringFlag("task", "Related durable task."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 	{[]string{"slack", "react"}, "Add a reaction to a Slack message.", "mosscap slack react MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.react", taskMutationFlags(), nil},
 	{[]string{"slack", "unreact"}, "Remove a reaction from a Slack message.", "mosscap slack unreact MESSAGE_TS EMOJI [--task TASK] [--request-id ID] [--json]", false, "slack_effects", "slack.unreact", taskMutationFlags(), nil},
-	{[]string{"effect", "list"}, "List durable Slack effects.", "mosscap effect list [--state prepared|submitted|confirmed|ambiguous|failed] [--json]", true, "slack_effects", "effect.list", []flagSpec{stringFlag("state", "Filter by effect state."), boolFlag("json", "Render effects as JSON.")}, nil},
+	{[]string{"effect", "list"}, "List durable Slack effects.", "mosscap effect list [--state STATE] [--task TASK] [--limit N] [--cursor EFFECT_ID] [--json]", true, "slack_effects", "effect.list", []flagSpec{stringFlag("state", "Filter by effect state."), stringFlag("task", "Filter by related task."), intFlag("limit", "Maximum number of effects."), stringFlag("cursor", "Resume after this effect ID."), boolFlag("json", "Render effects as JSON.")}, nil},
 	{[]string{"effect", "inspect"}, "Inspect durable effect evidence.", "mosscap effect inspect EFFECT [--json]", true, "slack_effects", "effect.inspect", []flagSpec{boolFlag("json", "Render effect evidence as JSON.")}, nil},
 	{[]string{"effect", "retry"}, "Create a successor for a failed or explicitly confirmed risky effect.", "mosscap effect retry EFFECT --reason TEXT [--confirm-duplicate-risk] [--request-id ID] [--json]", false, "slack_effects", "effect.retry", []flagSpec{stringFlag("reason", "Required retry reason."), boolFlag("confirm-duplicate-risk", "Acknowledge duplicate risk for ambiguous effects."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 	{[]string{"file", "show"}, "Show admitted Slack file metadata; use file get for bytes.", "mosscap file show FILE [--json]", true, "slack_source_metadata", "file.show", []flagSpec{boolFlag("json", "Render metadata as JSON.")}, nil},
 	{[]string{"file", "get"}, "Retrieve an admitted Slack file to a safe destination.", "mosscap file get FILE [--output PATH] [--force] [--request-id ID] [--json]", false, protocol.CapabilityFileTransfer, "file.get", []flagSpec{stringFlag("output", "Absolute destination path."), boolFlag("force", "Replace an existing regular destination file."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
-	{[]string{"delivery", "list"}, "List Pi delivery attempts.", "mosscap delivery list [--state pending|inserting|persisted|uncertain|rejected] [--json]", true, "pi_delivery_mvp", "delivery.list", []flagSpec{stringFlag("state", "Filter by delivery state."), boolFlag("json", "Render deliveries as JSON.")}, nil},
+	{[]string{"delivery", "list"}, "List Pi delivery attempts.", "mosscap delivery list [--state STATE] [--task TASK] [--limit N] [--cursor DELIVERY_ID] [--json]", true, "pi_delivery_mvp", "delivery.list", []flagSpec{stringFlag("state", "Filter by delivery state."), stringFlag("task", "Filter by task."), intFlag("limit", "Maximum number of deliveries."), stringFlag("cursor", "Resume after this delivery ID."), boolFlag("json", "Render deliveries as JSON.")}, nil},
 	{[]string{"delivery", "inspect"}, "Inspect Pi delivery evidence.", "mosscap delivery inspect DELIVERY [--json]", true, "pi_delivery_mvp", "delivery.inspect", []flagSpec{boolFlag("json", "Render delivery evidence as JSON.")}, nil},
 	{[]string{"delivery", "requeue"}, "Create a new Pi delivery attempt; duplicate insertion is possible.", "mosscap delivery requeue DELIVERY --reason TEXT [--request-id ID] [--json]", false, "pi_delivery_mvp", "delivery.requeue", []flagSpec{stringFlag("reason", "Required requeue reason."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 }

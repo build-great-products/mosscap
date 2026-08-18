@@ -744,12 +744,14 @@ func (a App) trust(args []string) error {
 	h := fs.Bool("help", false, "")
 	fs.BoolVar(h, "h", false, "")
 	requestID := fs.String("request-id", "", "")
+	limit := fs.Int("limit", 0, "")
+	cursor := fs.String("cursor", "", "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
 	if *h {
 		if cmd == "list" {
-			fmt.Fprintln(a.Out, "Usage: mosscap trust list [--json]")
+			fmt.Fprintln(a.Out, "Usage: mosscap trust list [--limit N] [--cursor SLACK_USER_ID] [--json]")
 		} else {
 			fmt.Fprintf(a.Out, "Usage: mosscap trust %s SLACK_USER_ID [--request-id ID] [--json]\n", cmd)
 		}
@@ -783,7 +785,7 @@ func (a App) trust(args []string) error {
 	if err != nil {
 		return err
 	}
-	var params any = protocol.EmptyParams{}
+	var params any = protocol.TrustedUserListParams{Limit: *limit, Cursor: *cursor}
 	command := "trust.list"
 	if mutation {
 		params = protocol.TrustMutationParams{SlackUserID: fs.Arg(0)}
@@ -864,6 +866,7 @@ func (a App) task(_ string, args []string) error {
 	state := fs.String("state", "", "")
 	all := fs.Bool("all", false, "")
 	limit := fs.Int("limit", 0, "")
+	cursor := fs.String("cursor", "", "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return usage(err.Error())
 	}
@@ -930,7 +933,7 @@ func (a App) task(_ string, args []string) error {
 			}
 			sp = state
 		}
-		params = protocol.TaskListParams{State: sp, IncludeDone: *all, Limit: *limit}
+		params = protocol.TaskListParams{State: sp, IncludeDone: *all, Limit: *limit, Cursor: *cursor}
 	default:
 		if fs.NArg() != 1 {
 			return usage("task transition requires TASK")

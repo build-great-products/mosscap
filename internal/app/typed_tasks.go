@@ -12,7 +12,7 @@ import (
 // taskTyped binds Cobra's already-parsed task leaves directly to protocol DTOs.
 // It intentionally retains the legacy task request IDs, text-file safety, and
 // mutation JSON envelope while avoiding a second flag.FlagSet parse.
-func (a App) taskTyped(command, selector, text, textFile, state string, all bool, limit int, note string, done bool, requestID string, jsonOut bool) error {
+func (a App) taskTyped(command, selector, text, textFile, state string, all bool, limit int, note string, done bool, requestID, cursor string, jsonOut bool) error {
 	mutation := command == "create" || command == "update" || command == "open" || command == "working" || command == "done" || command == "reply"
 	var params any
 
@@ -42,7 +42,7 @@ func (a App) taskTyped(command, selector, text, textFile, state string, all bool
 			}
 			selectedState = &state
 		}
-		params = protocol.TaskListParams{State: selectedState, IncludeDone: all, Limit: limit}
+		params = protocol.TaskListParams{State: selectedState, IncludeDone: all, Limit: limit, Cursor: cursor}
 	case "open", "working", "done":
 		// The legacy flag parser always supplied a note pointer, including for
 		// an omitted --note; retain that precise wire DTO shape.

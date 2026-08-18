@@ -337,6 +337,80 @@ func (s *Store) ListDeliveries(ctx context.Context, state *DeliveryState, limit 
 	return out, rows.Err()
 }
 
+// ListDeliveriesPage returns a newest-created/ID page, optionally for one
+// task. Cursor anchors are immutable and must still be present.
+func (s *Store) ListDeliveriesPage(ctx context.Context, state *DeliveryState, taskSelector string, limit int, cursor string) ([]Delivery, string, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 100 {
+		return nil, "", invalidInput("invalid delivery list limit")
+	}
+	if state != nil && !state.valid() {
+		return nil, "", invalidInput("invalid delivery state")
+	}
+	var taskID string
+	if taskSelector != "" {
+		t, err := getTx(ctx, s.db, taskSelector)
+		if err != nil {
+			return nil, "", err
+		}
+		taskID = t.ID
+	}
+	var createdAt int64
+	if cursor != "" {
+		if !validDeliveryID(cursor) {
+			return nil, "", invalidInput("invalid delivery list cursor")
+		}
+		if err := s.db.QueryRowContext(ctx, "SELECT created_at_us FROM pi_deliveries WHERE delivery_id=?", cursor).Scan(&createdAt); errors.Is(err, sql.ErrNoRows) {
+			return nil, "", ErrCursorExpired
+		} else if err != nil {
+			return nil, "", err
+		}
+	}
+	q, args := deliverySelect, []any{}
+	conditions := []string{}
+	if state != nil {
+		conditions = append(conditions, "state=?")
+		args = append(args, *state)
+	}
+	if taskID != "" {
+		conditions = append(conditions, "task_id=?")
+		args = append(args, taskID)
+	}
+	if cursor != "" {
+		conditions = append(conditions, "(created_at_us < ? OR (created_at_us = ? AND delivery_id > ?))")
+		args = append(args, createdAt, createdAt, cursor)
+	}
+	if len(conditions) != 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	q += " ORDER BY created_at_us DESC,delivery_id LIMIT ?"
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var out []Delivery
+	for rows.Next() {
+		x, err := scanDelivery(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		out = append(out, x.Delivery)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		next = out[limit-1].ID
+		out = out[:limit]
+	}
+	return out, next, nil
+}
+
 // HasPersistedDelivery answers the exact lifecycle question without depending
 // on the bounded operator-facing delivery listing.
 func (s *Store) HasPersistedDelivery(ctx context.Context, taskID string, version int64) (bool, error) {

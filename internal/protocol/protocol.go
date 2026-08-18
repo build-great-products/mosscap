@@ -35,12 +35,13 @@ const (
 	CapabilityFileTransfer        = "file_transfer_v1"
 	CapabilityMetadataPurge       = "metadata_purge_v1"
 	CapabilityTaskReply           = "task_reply_v1"
+	CapabilitySQLitePagination    = "sqlite_pagination_v1"
 	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
 	// the gateway owns every delivery route and disconnect cleanup (T1).
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -205,8 +206,10 @@ type SlackReactionParams struct {
 	Task      string `json:"task,omitempty"`
 }
 type EffectListParams struct {
-	State *string `json:"state,omitempty"`
-	Limit int     `json:"limit,omitempty"`
+	State  *string `json:"state,omitempty"`
+	Task   string  `json:"task,omitempty"`
+	Limit  int     `json:"limit,omitempty"`
+	Cursor string  `json:"cursor,omitempty"`
 }
 type EffectSelector struct {
 	Effect string `json:"effect"`
@@ -250,8 +253,10 @@ type DeliveryRejectedParams struct {
 	DiagnosticCode string `json:"diagnostic_code"`
 }
 type DeliveryListParams struct {
-	State *string `json:"state,omitempty"`
-	Limit int     `json:"limit,omitempty"`
+	State  *string `json:"state,omitempty"`
+	Task   string  `json:"task,omitempty"`
+	Limit  int     `json:"limit,omitempty"`
+	Cursor string  `json:"cursor,omitempty"`
 }
 type DeliverySelector struct {
 	Delivery string `json:"delivery"`
@@ -320,6 +325,7 @@ type DeliveryPollDTO struct {
 }
 type DeliveryListDTO struct {
 	Deliveries []DeliveryDTO `json:"deliveries"`
+	NextCursor string        `json:"next_cursor,omitempty"`
 }
 type DeliveryRequeueDTO struct {
 	Delivery                   DeliveryDTO `json:"delivery"`
@@ -453,7 +459,8 @@ type EffectInspectDTO struct {
 	OutgoingFiles []FileUploadSourceDTO `json:"outgoing_files,omitempty"`
 }
 type EffectListDTO struct {
-	Effects []SlackEffectDTO `json:"effects"`
+	Effects    []SlackEffectDTO `json:"effects"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 }
 type SlackEffectCountsDTO struct {
 	Total          int64            `json:"total"`
@@ -503,9 +510,15 @@ type TaskListDTO struct {
 
 // TrustedUserListDTO contains lexicographically sorted immutable Slack user
 // IDs and any presentation-only usernames resolved from the active runtime.
+type TrustedUserListParams struct {
+	Limit  int    `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
 type TrustedUserListDTO struct {
 	SlackUserIDs   []string          `json:"slack_user_ids"`
 	SlackUserNames map[string]string `json:"slack_user_names,omitempty"`
+	NextCursor     string            `json:"next_cursor,omitempty"`
 }
 
 // TrustMutationDTO reports the resulting authorization state for one Slack user.
@@ -603,8 +616,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	switch command {
 	case "hello":
 		target = &HelloParams{}
-	case "status.get", "doctor.run", "trust.list", "config.reload", "delivery.poll", "delivery.close":
+	case "status.get", "doctor.run", "config.reload", "delivery.poll", "delivery.close":
 		target = &EmptyParams{}
+	case "trust.list":
+		target = &TrustedUserListParams{}
 	case "metadata.purge":
 		target = &MetadataPurgeParams{}
 	case "slack.history":
@@ -689,6 +704,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		if _, err := ParsePurgeCutoff(p.Cutoff); err != nil {
 			return errors.New("invalid metadata purge cutoff")
 		}
+	case *TrustedUserListParams:
+		if p.Limit < 0 || p.Limit > 100 || (p.Cursor != "" && !validSlackUserID(p.Cursor)) {
+			return errors.New("invalid trusted-user list")
+		}
 	case *TrustMutationParams:
 		if !validSlackUserID(p.SlackUserID) {
 			return errors.New("invalid Slack user ID")
@@ -717,7 +736,7 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		if p.State != nil && *p.State != "open" && *p.State != "working" && *p.State != "done" {
 			return errors.New("invalid list state")
 		}
-		if p.Limit < 0 || p.Limit > 1000 || len(p.Cursor) > 1024 || (p.State != nil && p.IncludeDone) {
+		if p.Limit < 0 || p.Limit > 100 || (p.Cursor != "" && !validFullTaskID(p.Cursor)) || (p.State != nil && p.IncludeDone) {
 			return errors.New("invalid task list")
 		}
 	case *SlackHistoryParams:
@@ -752,7 +771,7 @@ func ValidateParams(command string, raw json.RawMessage) error {
 			return errors.New("invalid Slack emoji")
 		}
 	case *EffectListParams:
-		if p.Limit < 0 || p.Limit > 100 || (p.State != nil && !validEffectState(*p.State)) {
+		if p.Limit < 0 || p.Limit > 100 || (p.State != nil && !validEffectState(*p.State)) || (p.Task != "" && !validTaskSelector(p.Task)) || (p.Cursor != "" && !validFullEffectID(p.Cursor)) {
 			return errors.New("invalid effect list")
 		}
 	case *EffectSelector:
@@ -801,7 +820,7 @@ func ValidateParams(command string, raw json.RawMessage) error {
 			return errors.New("invalid delivery rejected")
 		}
 	case *DeliveryListParams:
-		if p.Limit < 0 || p.Limit > 1000 || (p.State != nil && !validDeliveryState(*p.State)) {
+		if p.Limit < 0 || p.Limit > 100 || (p.State != nil && !validDeliveryState(*p.State)) || (p.Task != "" && !validTaskSelector(p.Task)) || (p.Cursor != "" && !validDeliveryID(p.Cursor)) {
 			return errors.New("invalid delivery list")
 		}
 	case *DeliverySelector:
@@ -901,7 +920,9 @@ func validTask(value string) bool { return value == "" || validTaskSelector(valu
 func validTaskSelector(value string) bool {
 	return value != "" && len(value) <= 22 && validSelectorSuffix(value)
 }
+func validFullTaskID(value string) bool       { return len(value) == 22 && validTaskSelector(value) }
 func validEffectSelector(value string) bool   { return validTypedSelector(value, "eff_") }
+func validFullEffectID(value string) bool     { return len(value) == 26 && validEffectSelector(value) }
 func validFileSelector(value string) bool     { return validTypedSelector(value, "fil_") }
 func validTransferSelector(value string) bool { return validTypedSelector(value, "xfr_") }
 func validTypedSelector(value, prefix string) bool {

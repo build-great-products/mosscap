@@ -110,7 +110,7 @@ func trackedBool(cmd *cobra.Command, name string) bool {
 	return value
 }
 
-func (a App) trustTyped(command, slackUserID, requestID string, jsonOut bool) error {
+func (a App) trustTyped(command, slackUserID, requestID string, limit int, cursor string, jsonOut bool) error {
 	mutation := command != "list"
 	if mutation && requestID == "" {
 		id, err := identity.NewGenerator(nil).NewRequestID()
@@ -132,7 +132,7 @@ func (a App) trustTyped(command, slackUserID, requestID string, jsonOut bool) er
 	if err != nil {
 		return err
 	}
-	var params any = protocol.EmptyParams{}
+	var params any = protocol.TrustedUserListParams{Limit: limit, Cursor: cursor}
 	gatewayCommand := "trust.list"
 	if mutation {
 		params = protocol.TrustMutationParams{SlackUserID: slackUserID}

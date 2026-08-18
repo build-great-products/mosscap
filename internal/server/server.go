@@ -634,9 +634,10 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 			state = &v
 		}
 		var deliveries []store.Delivery
-		deliveries, err = s.store.ListDeliveries(ctx, state, p.Limit)
+		var next string
+		deliveries, next, err = s.store.ListDeliveriesPage(ctx, state, p.Task, p.Limit, p.Cursor)
 		if err == nil {
-			result = protocol.DeliveryListDTO{Deliveries: deliveryDTOs(deliveries)}
+			result = protocol.DeliveryListDTO{Deliveries: deliveryDTOs(deliveries), NextCursor: next}
 		}
 	case "delivery.inspect":
 		var p protocol.DeliverySelector
@@ -684,9 +685,12 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		}
 	case "trust.list":
 		resultType = "trusted_user_list"
+		var p protocol.TrustedUserListParams
+		_ = json.Unmarshal(r.Params, &p)
 		var users []string
-		users, err = s.store.ListTrustedUsers(ctx)
-		result = protocol.TrustedUserListDTO{SlackUserIDs: users, SlackUserNames: s.slackUserNames(ctx, users)}
+		var next string
+		users, next, err = s.store.ListTrustedUsersPage(ctx, p.Limit, p.Cursor)
+		result = protocol.TrustedUserListDTO{SlackUserIDs: users, SlackUserNames: s.slackUserNames(ctx, users), NextCursor: next}
 	case "trust.add", "trust.remove":
 		var p protocol.TrustMutationParams
 		_ = json.Unmarshal(r.Params, &p)
@@ -783,7 +787,12 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 			x := store.SlackEffectState(*p.State)
 			state = &x
 		}
-		result, err = s.store.ListSlackEffects(ctx, state, p.Limit)
+		var effects []store.SlackEffect
+		var next string
+		effects, next, err = s.store.ListSlackEffectsPage(ctx, state, p.Task, p.Limit, p.Cursor)
+		if err == nil {
+			result = protocol.EffectListDTO{Effects: slackEffectDTOs(effects), NextCursor: next}
+		}
 	case "effect.inspect":
 		var p protocol.EffectSelector
 		_ = json.Unmarshal(r.Params, &p)
@@ -1217,6 +1226,8 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "ambiguous", "ambiguous"
 	case errors.Is(err, store.ErrRequestConflict):
 		code, category = "request_id_conflict", "conflict"
+	case errors.Is(err, store.ErrCursorExpired):
+		code, category = "cursor_expired", "conflict"
 	case func() bool { var purge *store.PurgeError; return errors.As(err, &purge) }():
 		var purge *store.PurgeError
 		_ = errors.As(err, &purge)
@@ -1439,6 +1450,14 @@ func slackFileDTOs(files []store.SlackFile) []protocol.SlackFileDTO {
 	}
 	return out
 }
+func slackEffectDTOs(effects []store.SlackEffect) []protocol.SlackEffectDTO {
+	out := make([]protocol.SlackEffectDTO, len(effects))
+	for i := range effects {
+		out[i] = slackEffectDTO(effects[i])
+	}
+	return out
+}
+
 func slackEffectDTO(e store.SlackEffect) protocol.SlackEffectDTO {
 	out := protocol.SlackEffectDTO{EffectID: e.ID, PredecessorEffectID: e.PredecessorEffectID, RelatedTaskID: e.RelatedTaskID, Kind: string(e.Kind), TargetMessageTS: e.TargetMessageTS, ThreadTS: e.ThreadTS, State: string(e.State), AttemptCount: e.AttemptCount, PreparedAt: stamp(e.PreparedAt), ResponseMessageTS: e.ResponseMessageTS, DiagnosticCode: string(e.DiagnosticCode)}
 	if e.SubmittedAt != nil {

@@ -171,6 +171,22 @@ func TestListPaginationUsesStableCursor(t *testing.T) {
 	}
 }
 
+func TestListCursorExpiredAndTrustCursorSurvivesRemoval(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	created, err := s.Create(ctx, "cursor-expired", "task")
+	if err != nil { t.Fatal(err) }
+	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); err != nil { t.Fatalf("present cursor: %v", err) }
+	if _, err := s.DB().Exec("DELETE FROM tasks WHERE task_id=?", created.TaskID); err != nil { t.Fatal(err) }
+	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); !errors.Is(err, ErrCursorExpired) { t.Fatalf("expired cursor = %v", err) }
+	for _, id := range []string{"U00000001", "U00000002", "U00000003"} { if _, err := s.AddTrustedUser(ctx, "trust-"+id, id); err != nil { t.Fatal(err) } }
+	users, next, err := s.ListTrustedUsersPage(ctx, 2, "")
+	if err != nil || len(users) != 2 || next == "" { t.Fatalf("trust first = %#v %q %v", users, next, err) }
+	if _, err := s.RemoveTrustedUser(ctx, "remove-anchor", next); err != nil { t.Fatal(err) }
+	users, next, err = s.ListTrustedUsersPage(ctx, 2, next)
+	if err != nil || len(users) != 1 || next != "" { t.Fatalf("trust resume = %#v %q %v", users, next, err) }
+}
+
 func TestTransitionsAndRestart(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

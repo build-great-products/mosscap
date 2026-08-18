@@ -8,7 +8,7 @@ import (
 
 // effectTyped directly binds Cobra values to the recovery protocol requests.
 // It deliberately does not pass through effect's legacy flag.FlagSet adapter.
-func (a App) effectTyped(command, effect, state, reason string, confirmDuplicateRisk bool, requestID string, jsonOut bool) error {
+func (a App) effectTyped(command, effect, state, task string, limit int, cursor, reason string, confirmDuplicateRisk bool, requestID string, jsonOut bool) error {
 	mutation := command == "retry"
 	var params any
 	switch command {
@@ -20,7 +20,7 @@ func (a App) effectTyped(command, effect, state, reason string, confirmDuplicate
 		if state != "" {
 			selected = &state
 		}
-		params = protocol.EffectListParams{State: selected}
+		params = protocol.EffectListParams{State: selected, Task: task, Limit: limit, Cursor: cursor}
 	case "inspect":
 		params = protocol.EffectSelector{Effect: effect}
 	case "retry":
@@ -58,7 +58,7 @@ func (a App) effectTyped(command, effect, state, reason string, confirmDuplicate
 // deliveryTyped directly binds Cobra values to the delivery recovery requests.
 // The CLI remains gateway-mediated so ownership and duplicate-risk protections
 // stay enforced by the gateway.
-func (a App) deliveryTyped(command, delivery, state, reason, requestID string, jsonOut bool) error {
+func (a App) deliveryTyped(command, delivery, state, task string, limit int, cursor, reason, requestID string, jsonOut bool) error {
 	mutation := command == "requeue"
 	var params any
 	switch command {
@@ -70,7 +70,7 @@ func (a App) deliveryTyped(command, delivery, state, reason, requestID string, j
 		if state != "" {
 			selected = &state
 		}
-		params = protocol.DeliveryListParams{State: selected}
+		params = protocol.DeliveryListParams{State: selected, Task: task, Limit: limit, Cursor: cursor}
 	case "inspect":
 		params = protocol.DeliverySelector{Delivery: delivery}
 	case "requeue":

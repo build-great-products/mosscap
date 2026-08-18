@@ -164,6 +164,9 @@ func (a App) effect(args []string) error {
 	fs := newCommandFlagSet("effect " + cmd)
 	jsonOut := fs.Bool("json", false, "")
 	state := fs.String("state", "", "")
+	task := fs.String("task", "", "")
+	limit := fs.Int("limit", 0, "")
+	cursor := fs.String("cursor", "", "")
 	reason := fs.String("reason", "", "")
 	confirm := fs.Bool("confirm-duplicate-risk", false, "")
 	requestID := fs.String("request-id", "", "")
@@ -176,7 +179,7 @@ func (a App) effect(args []string) error {
 		a.printEffectHelp(cmd)
 		return nil
 	}
-	allowed := map[string][]string{"list": {"json", "state"}, "inspect": {"json"}, "retry": {"json", "reason", "confirm-duplicate-risk", "request-id"}}
+	allowed := map[string][]string{"list": {"json", "state", "task", "limit", "cursor"}, "inspect": {"json"}, "retry": {"json", "reason", "confirm-duplicate-risk", "request-id"}}
 	if err := rejectUnsupportedFlags(fs, allowed[cmd]); err != nil {
 		return err
 	}
@@ -194,7 +197,7 @@ func (a App) effect(args []string) error {
 		if *state != "" {
 			p = state
 		}
-		params = protocol.EffectListParams{State: p}
+		params = protocol.EffectListParams{State: p, Task: *task, Limit: *limit, Cursor: *cursor}
 	case "inspect":
 		if fs.NArg() != 1 || *requestID != "" {
 			return usage("effect inspect requires EFFECT and no --request-id")
@@ -376,6 +379,6 @@ func (a App) printSlackHelp(cmd string) {
 	fmt.Fprintf(a.Out, "Usage: mosscap slack %s %s\n", cmd, usages[cmd])
 }
 func (a App) printEffectHelp(cmd string) {
-	usages := map[string]string{"list": "[--state prepared|submitted|confirmed|ambiguous|failed] [--json]", "inspect": "EFFECT [--json]", "retry": "EFFECT --reason TEXT [--confirm-duplicate-risk] [--request-id ID] [--json]"}
+	usages := map[string]string{"list": "[--state prepared|submitted|confirmed|ambiguous|failed] [--task TASK] [--limit N] [--cursor EFFECT_ID] [--json]", "inspect": "EFFECT [--json]", "retry": "EFFECT --reason TEXT [--confirm-duplicate-risk] [--request-id ID] [--json]"}
 	fmt.Fprintf(a.Out, "Usage: mosscap effect %s %s\n", cmd, usages[cmd])
 }

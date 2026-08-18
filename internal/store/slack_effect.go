@@ -229,6 +229,81 @@ func (s *Store) ListSlackEffects(ctx context.Context, state *SlackEffectState, l
 	return effects, rows.Err()
 }
 
+// ListSlackEffectsPage returns a newest-prepared/ID page, optionally narrowed
+// to one related task. Cursor IDs are exact anchors, never short selectors.
+func (s *Store) ListSlackEffectsPage(ctx context.Context, state *SlackEffectState, taskSelector string, limit int, cursor string) ([]SlackEffect, string, error) {
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 100 {
+		return nil, "", invalidInput("invalid Slack effect list limit")
+	}
+	if state != nil && !state.valid() {
+		return nil, "", invalidInput("invalid Slack effect state")
+	}
+	var taskID string
+	if taskSelector != "" {
+		var err error
+		resolved, err := getTx(ctx, s.db, taskSelector)
+		taskID = resolved.ID
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	var preparedAt int64
+	if cursor != "" {
+		if !validFullSlackEffectID(cursor) {
+			return nil, "", invalidInput("invalid Slack effect list cursor")
+		}
+		if err := s.db.QueryRowContext(ctx, "SELECT prepared_at_us FROM slack_effects WHERE effect_id=?", cursor).Scan(&preparedAt); errors.Is(err, sql.ErrNoRows) {
+			return nil, "", ErrCursorExpired
+		} else if err != nil {
+			return nil, "", err
+		}
+	}
+	q, args := slackEffectSelect, []any{}
+	conditions := []string{}
+	if state != nil {
+		conditions = append(conditions, "state=?")
+		args = append(args, *state)
+	}
+	if taskID != "" {
+		conditions = append(conditions, "related_task_id=?")
+		args = append(args, taskID)
+	}
+	if cursor != "" {
+		conditions = append(conditions, "(prepared_at_us < ? OR (prepared_at_us = ? AND effect_id > ?))")
+		args = append(args, preparedAt, preparedAt, cursor)
+	}
+	if len(conditions) != 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	q += " ORDER BY prepared_at_us DESC,effect_id LIMIT ?"
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var effects []SlackEffect
+	for rows.Next() {
+		effect, err := scanSlackEffect(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		effects = append(effects, effect)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(effects) > limit {
+		next = effects[limit-1].ID
+		effects = effects[:limit]
+	}
+	return effects, next, nil
+}
+
 // ClaimSlackEffect atomically performs the only legal submission claim:
 // prepared -> submitted, with exactly one attempt. It requires a full ID.
 func (s *Store) ClaimSlackEffect(ctx context.Context, effectID string) (SlackEffect, error) {

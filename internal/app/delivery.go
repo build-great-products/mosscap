@@ -26,6 +26,9 @@ func (a App) delivery(args []string) error {
 	help := fs.Bool("help", false, "")
 	fs.BoolVar(help, "h", false, "")
 	state := fs.String("state", "", "")
+	task := fs.String("task", "", "")
+	limit := fs.Int("limit", 0, "")
+	cursor := fs.String("cursor", "", "")
 	reason := fs.String("reason", "", "")
 	requestID := fs.String("request-id", "", "")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -34,7 +37,7 @@ func (a App) delivery(args []string) error {
 	if *help {
 		switch cmd {
 		case "list":
-			fmt.Fprintln(a.Out, "Usage: mosscap delivery list [--state pending|inserting|persisted|uncertain|rejected] [--json]")
+			fmt.Fprintln(a.Out, "Usage: mosscap delivery list [--state pending|inserting|persisted|uncertain|rejected] [--task TASK] [--limit N] [--cursor DELIVERY_ID] [--json]")
 		case "inspect":
 			fmt.Fprintln(a.Out, "Usage: mosscap delivery inspect DELIVERY [--json]")
 		case "requeue":
@@ -57,7 +60,7 @@ func (a App) delivery(args []string) error {
 			}
 			selected = state
 		}
-		params, command = protocol.DeliveryListParams{State: selected}, "delivery.list"
+		params, command = protocol.DeliveryListParams{State: selected, Task: *task, Limit: *limit, Cursor: *cursor}, "delivery.list"
 	case "inspect":
 		if fs.NArg() != 1 || *state != "" || *reason != "" || *requestID != "" {
 			return usage("delivery inspect requires DELIVERY only")
