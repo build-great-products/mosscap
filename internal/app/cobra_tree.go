@@ -30,20 +30,23 @@ const (
 // command family can switch in one atomic release.
 func (a App) NewCommandTree() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "mosscap",
-		Short:         "Mosscap is a durable local work coordinator.",
-		Long:          "Mosscap coordinates durable local tasks and explicit Slack operations.",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		Version:       a.Version,
-		Args:          cobra.NoArgs,
+		Use:                        "mosscap",
+		Short:                      "Mosscap is a durable local work coordinator.",
+		Long:                       "Mosscap coordinates durable local tasks and explicit Slack operations.",
+		Example:                    "  mosscap task list\n  mosscap doctor",
+		SilenceUsage:               true,
+		SilenceErrors:              true,
+		SuggestionsMinimumDistance: 3,
+		Version:                    a.Version,
+		Args:                       noArgsWithSuggestions,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return cmd.Help()
 		},
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetFlagErrorFunc(flagSuggestionError)
 	root.SetVersionTemplate("{{.Version}}\n")
-	root.AddCommand(&cobra.Command{Use: "version", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	root.AddCommand(&cobra.Command{Use: "version", Short: "Print the Mosscap version.", Long: "Print the Mosscap version.", Example: "  mosscap version", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, err := fmt.Fprintln(cmd.OutOrStdout(), a.Version)
 		return err
 	}})
@@ -92,8 +95,83 @@ func trackedBoolFlag(name, usage string) flagSpec {
 }
 
 func commandBranch(use, short string) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
+	return &cobra.Command{Use: use, Short: short, Long: short, Example: "  mosscap " + use + " --help", Args: noArgsWithSuggestions, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
 }
+
+func noArgsWithSuggestions(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	best, distance, tied := "", -1, false
+	for _, child := range cmd.Commands() {
+		d := editDistance(args[0], child.Name())
+		if distance == -1 || d < distance {
+			best, distance, tied = child.Name(), d, false
+		} else if d == distance {
+			tied = true
+		}
+	}
+	suggestion := ""
+	if best != "" && !tied && highConfidenceTypo(args[0], best, distance) {
+		suggestion = fmt.Sprintf("\n\nDid you mean %q?", best)
+	}
+	return fmt.Errorf("unknown command %q for %q%s", args[0], cmd.CommandPath(), suggestion)
+}
+
+// flagSuggestionError offers a correction only for a close spelling of a flag
+// accepted by the command being parsed. It never examines operands.
+func flagSuggestionError(cmd *cobra.Command, err error) error {
+	const prefix = "unknown flag: --"
+	message := err.Error()
+	if !strings.HasPrefix(message, prefix) {
+		return err
+	}
+	name := strings.Fields(strings.TrimPrefix(message, prefix))[0]
+	best, distance, tied := "", -1, false
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		d := editDistance(name, flag.Name)
+		if distance == -1 || d < distance {
+			best, distance, tied = flag.Name, d, false
+		} else if d == distance {
+			tied = true
+		}
+	})
+	if best == "" || tied || !highConfidenceTypo(name, best, distance) {
+		return err
+	}
+	return fmt.Errorf("%s\n\nDid you mean --%s?", message, best)
+}
+
+func highConfidenceTypo(input, candidate string, distance int) bool {
+	return distance <= 1 || (len(candidate) >= 5 && len(input) >= 5 && distance == 2)
+}
+
+// editDistance treats a single adjacent transposition as one typo, so common
+// errors such as --tezt can be corrected without broad fuzzy matching.
+func editDistance(a, b string) int {
+	rows := make([][]int, len(a)+1)
+	for i := range rows {
+		rows[i] = make([]int, len(b)+1)
+		rows[i][0] = i
+	}
+	for j := range rows[0] {
+		rows[0][j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		for j := 1; j <= len(b); j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			rows[i][j] = min(rows[i-1][j]+1, rows[i][j-1]+1, rows[i-1][j-1]+cost)
+			if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
+				rows[i][j] = min(rows[i][j], rows[i-2][j-2]+1)
+			}
+		}
+	}
+	return rows[len(a)][len(b)]
+}
+
 func findCommand(root *cobra.Command, path []string) *cobra.Command {
 	c := root
 	for _, name := range path {
@@ -112,7 +190,7 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 	if len(path) > 1 {
 		commandUse = strings.TrimPrefix(commandUse, strings.Join(path[:len(path)-1], " ")+" ")
 	}
-	cmd := &cobra.Command{Use: commandUse, Short: short, Long: short, Example: "  " + use, Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
+	cmd := &cobra.Command{Use: commandUse, Short: short, Long: leafDescription(short, handler), Example: "  " + use, Args: cobra.ExactArgs(expectedArgs(handler)), Annotations: map[string]string{annotationReadOnly: fmt.Sprint(readOnly), annotationCapability: capability, annotationHandler: handler}}
 	if isTypedCobraHandler(handler) {
 		// Keep migrated leaves structurally separate from the compatibility
 		// bridge: their execution can never reach a legacy flag.FlagSet parser.
@@ -149,6 +227,33 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 		}
 	}
 	return cmd
+}
+
+// leafDescription keeps operational warnings next to the command syntax.
+// Parsing and help stay side-effect free: this text is metadata only.
+func leafDescription(short, handler string) string {
+	description := short
+	switch handler {
+	case "task.create", "task.update", "task.reply", "slack.send", "slack.edit":
+		description += "\n\nProvide exactly one of --text or --text-file."
+	case "task.list":
+		description += "\n\nUse either --state (open, working, or done) or --all."
+	case "purge":
+		description += "\n\nProvide --before and exactly one of --dry-run or --confirm. Warning: confirmed removal is irreversible."
+	case "slack.file":
+		description += "\n\nProvide at least one --file PATH."
+	case "slack.delete", "effect.retry", "delivery.requeue":
+		description += "\n\nProvide a non-empty --reason."
+	}
+	switch handler {
+	case "task.reply":
+		description += " Warning: --done completes the task only after Slack confirms the reply."
+	case "effect.retry":
+		description += " Warning: retrying an ambiguous effect requires --confirm-duplicate-risk and can duplicate external work."
+	case "delivery.requeue":
+		description += " Warning: requeueing can duplicate a prior Pi insertion."
+	}
+	return description
 }
 
 // canonicalArgs gives the business handlers flags-first input after Cobra has

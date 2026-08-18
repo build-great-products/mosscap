@@ -1,6 +1,9 @@
 package app
 
 import (
+	"bytes"
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,6 +82,49 @@ func commandAt(root *cobra.Command, path []string) *cobra.Command {
 		}
 	}
 	return command
+}
+
+func TestCobraHelpAndHighConfidenceSuggestions(t *testing.T) {
+	for _, args := range [][]string{nil, {"task"}, {"task", "create", "--help"}} {
+		var out, err bytes.Buffer
+		if exit := (App{Out: &out, Err: &err, Version: "test"}).Run(context.Background(), args); exit != ExitSuccess || err.Len() != 0 || !strings.Contains(out.String(), "Usage:") {
+			t.Fatalf("help %v: exit=%d stdout=%q stderr=%q", args, exit, out.String(), err.String())
+		}
+	}
+
+	for _, tc := range []struct {
+		args        []string
+		wantUsage   string
+		wantSuggest string
+	}{
+		{[]string{"task", "udpate"}, "mosscap task", `Did you mean "update"?`},
+		{[]string{"task", "list", "--sttae", "open"}, "mosscap task list", "Did you mean --state?"},
+		// Operands are never candidates for correction.
+		{[]string{"task", "show", "task-typo", "extra"}, "mosscap task show", ""},
+	} {
+		var out, err bytes.Buffer
+		if exit := (App{Out: &out, Err: &err, Version: "test"}).Run(context.Background(), tc.args); exit != ExitUsage {
+			t.Fatalf("%v exit=%d stdout=%q stderr=%q", tc.args, exit, out.String(), err.String())
+		}
+		if !strings.Contains(err.String(), tc.wantUsage) || (tc.wantSuggest != "" && !strings.Contains(err.String(), tc.wantSuggest)) || (tc.wantSuggest == "" && strings.Contains(err.String(), "Did you mean")) {
+			t.Errorf("%v stderr=%q, usage=%q suggestion=%q", tc.args, err.String(), tc.wantUsage, tc.wantSuggest)
+		}
+	}
+}
+
+func TestRuntimeErrorsDoNotRenderUsageAndGatewayRunExplainsSetup(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
+
+	var out, err bytes.Buffer
+	if exit := (App{Out: &out, Err: &err, Version: "test"}).Run(context.Background(), []string{"gateway", "status"}); exit != ExitUnavailable || strings.Contains(err.String(), "Usage:") {
+		t.Fatalf("gateway status exit=%d stdout=%q stderr=%q", exit, out.String(), err.String())
+	}
+	out.Reset()
+	err.Reset()
+	if exit := (App{Out: &out, Err: &err, Version: "test"}).Run(context.Background(), []string{"gateway", "run"}); exit != ExitUnsafe || !strings.Contains(err.String(), "run mosscap setup") || strings.Contains(err.String(), "Usage:") {
+		t.Fatalf("gateway run exit=%d stdout=%q stderr=%q", exit, out.String(), err.String())
+	}
 }
 
 func TestTaskReplyFramePreflightCoversLiteralAndFileText(t *testing.T) {

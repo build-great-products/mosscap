@@ -257,7 +257,7 @@ func TestAlternateConfigPathIsNotAuthority(t *testing.T) {
 	}
 }
 
-func TestVersionAndUnimplementedCommand(t *testing.T) {
+func TestVersionAndGatewayRunRequiresSetup(t *testing.T) {
 	// gateway run is intentionally exercised before setup; isolate it from any
 	// developer installation that might otherwise make the test block forever.
 	root := t.TempDir()
@@ -271,10 +271,10 @@ func TestVersionAndUnimplementedCommand(t *testing.T) {
 	if got, want := stdout.String(), "v1.2.3\n"; got != want {
 		t.Fatalf("version = %q, want %q", got, want)
 	}
-	if got := a.Run(context.Background(), []string{"gateway", "run"}); got != ExitUnsupported {
-		t.Fatalf("gateway run exit = %d, want %d", got, ExitUnsupported)
+	if got := a.Run(context.Background(), []string{"gateway", "run"}); got != ExitUnsafe {
+		t.Fatalf("gateway run exit = %d, want %d", got, ExitUnsafe)
 	}
-	if !strings.Contains(stderr.String(), "not implemented") {
+	if !strings.Contains(stderr.String(), "run mosscap setup") {
 		t.Fatalf("gateway stderr = %q", stderr.String())
 	}
 }

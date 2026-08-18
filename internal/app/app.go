@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/mattn/go-isatty"
+	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 
 	"github.com/stayradiated/mosscap/internal/client"
@@ -86,16 +87,42 @@ func (a App) Execute(_ context.Context, args []string) error {
 	root.SetOut(a.Out)
 	root.SetErr(a.Err)
 	if err := root.Execute(); err != nil {
-		root.SetOut(a.Err)
 		var ce *commandError
-		if errors.As(err, &ce) {
-			_ = root.Usage()
+		if errors.As(err, &ce) && ce.code != ExitUsage {
 			return ce
 		}
-		_ = root.Usage()
+		root.SetOut(a.Err)
+		// Cobra stops at the command that rejected an option or argument. Find
+		// that command again without interpreting operands, so usage errors guide
+		// the relevant command family rather than always falling back to root.
+		_ = usageCommand(root, args).Usage()
+		if ce != nil {
+			return ce
+		}
 		return usage(err.Error())
 	}
 	return nil
+}
+
+func usageCommand(root *cobra.Command, args []string) *cobra.Command {
+	cmd := root
+	for _, arg := range args {
+		if arg == "--" || strings.HasPrefix(arg, "-") {
+			break
+		}
+		var next *cobra.Command
+		for _, child := range cmd.Commands() {
+			if child.Name() == arg {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			break
+		}
+		cmd = next
+	}
+	return cmd
 }
 func (a App) setup(_ string, args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)

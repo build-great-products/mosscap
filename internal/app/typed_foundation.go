@@ -86,7 +86,7 @@ func (a App) gatewayRunTyped() error {
 	c, err := config.Load(loc)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return unsupported("gateway run is not implemented until setup has completed")
+			return &commandError{code: ExitUnsafe, message: "configuration is missing; run mosscap setup"}
 		}
 		return err
 	}
