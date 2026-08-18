@@ -164,6 +164,8 @@ Cobra help is the complete command-discovery interface. Running the root or a co
 
 For every syntactically valid leaf invocation whose parsed `--json` flag is true, success and runtime failure write exactly one JSON object followed by one newline to stdout and nothing to stderr. Successful objects retain each command's existing DTO shape. Runtime failures use a shared error object with `code`, `category`, `message`, `retriable`, and optional safe `details`, `progress`, `request_id`, and guidance; doctor gateway failures additionally contain only the completed diagnostic report in `partial_result`. Parse and usage failures remain text on stderr with exit 2.
 
+Without `--json`, each command uses a compact purpose-specific human view: task and Slack reads retain complete multiline text in cards, lists use rows, and mutations display resource state and request IDs. Presentation escapes terminal control characters while retaining printable Unicode; it never changes stored text or JSON output. Color is only enabled for a TTY and is disabled by `NO_COLOR` or `TERM=dumb`.
+
 Stable process exit categories are:
 
 | Code | Meaning |

@@ -821,7 +821,9 @@ func (a App) renderTrustedUsers(users protocol.TrustedUserListDTO, jsonOut bool)
 	}
 	for _, userID := range users.SlackUserIDs {
 		bullet, formattedID := "•", userID
-		name := users.SlackUserNames[userID]
+		// User display names are Slack-provided text. Escape only for this
+		// terminal projection; the JSON DTO preserves the original value.
+		name := escapeTerminal(users.SlackUserNames[userID])
 		formattedName := ""
 		if name != "" {
 			formattedName = "  @" + name
@@ -1094,12 +1096,7 @@ func (a App) render(v any, jsonOut bool) error {
 		fmt.Fprintln(a.Out, string(b))
 		return nil
 	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(a.Out, string(b))
-	return nil
+	return renderHuman(a.Out, v)
 }
 func (a App) branch(name string, args, children []string) error {
 	if len(args) == 0 || isHelp(args[0]) {

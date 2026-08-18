@@ -29,7 +29,7 @@ The `mosscap` executable has two roles:
 
 ### SQLite ledger
 
-SQLite is authoritative for tasks, Slack source deduplication, delivery attempts, Slack effect intents and outcomes, file metadata, trusted users, and mutation request deduplication. Logs, reactions, Pi conversation text, and terminal output are projections, not task state.
+SQLite is authoritative for tasks, Slack source deduplication, delivery attempts, Slack effect intents and outcomes, file metadata, trusted users, and mutation request deduplication. Logs, reactions, Pi conversation text, and terminal output are projections, not task state. Human terminal renderers escape control characters only at presentation time; stored and JSON-protocol text remains exact.
 
 ### Pi extension
 

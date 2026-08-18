@@ -91,6 +91,8 @@ mosscap task reply AbCdEfGh --text "I found the problem." --done
 
 `task reply --done` is a resumable composition: it completes the task only after Slack confirms the reply. A plain Slack send never changes task state, and marking a task done never posts to Slack.
 
+Default output is compact human-readable cards, rows, and labelled details; use `--json` for the unchanged command DTOs. Message cards preserve full multiline Unicode text and visibly escape terminal control bytes. Colors require a TTY and are disabled by `NO_COLOR`.
+
 ## Files and exceptional outcomes
 
 Incoming Slack attachments are stored as metadata and downloaded only on request:

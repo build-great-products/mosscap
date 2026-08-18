@@ -306,16 +306,9 @@ func (a App) renderSlackCommand(v any, jsonOut, explicitRead bool) error {
 	if jsonOut {
 		return a.render(v, true)
 	}
-	if explicitRead {
-		return a.render(v, false)
-	}
-	// Mutation output intentionally exposes durable identity/state but no effect body.
-	if m, ok := v.(map[string]any); ok {
-		if e, ok := m["effect"].(map[string]any); ok {
-			fmt.Fprintf(a.Out, "request_id: %v\neffect_id: %v\nkind: %v\nstate: %v\ntarget: %v\n", m["request_id"], e["effect_id"], e["kind"], e["state"], first(e["target_message_ts"], e["thread_ts"]))
-			return nil
-		}
-	}
+	// Both reads and mutations use the same presentation-only renderer. Mutation
+	// envelopes retain their request ID while effect bodies remain absent.
+	_ = explicitRead
 	return a.render(v, false)
 }
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

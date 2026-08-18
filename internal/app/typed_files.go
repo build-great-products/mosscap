@@ -2,8 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"fmt"
-
 	"github.com/stayradiated/mosscap/internal/fileio"
 	"github.com/stayradiated/mosscap/internal/identity"
 	"github.com/stayradiated/mosscap/internal/protocol"
@@ -70,8 +68,7 @@ func (a App) fileGetTyped(file, output string, force bool, requestID string, jso
 		if jsonOut {
 			return a.render(map[string]any{"request_id": requestID, "result": transfer}, true)
 		}
-		fmt.Fprintf(a.Out, "file_id: %s\ntransfer_id: %s\ntemporary_path: %q\nvalidated_size_bytes: %d\nsha256: %s\nexpires_at: %s\nretention: release this private temporary file when finished; it expires at the time shown\n", transfer.FileID, transfer.TransferID, transfer.TemporaryPath, transfer.ValidatedSizeBytes, transfer.SHA256, transfer.ExpiresAt)
-		return nil
+		return a.render(map[string]any{"request_id": requestID, "result": transfer}, false)
 	}
 	if err := fileio.PlaceOutput(transfer.TemporaryPath, destination, transfer.ValidatedSizeBytes, transfer.SHA256, force); err != nil {
 		// A successful gateway get is durable even if local placement fails, so
@@ -82,11 +79,7 @@ func (a App) fileGetTyped(file, output string, force bool, requestID string, jso
 		_, _ = a.gatewayCall(c, "file.release", releaseID, protocol.FileReleaseParams{TransferID: transfer.TransferID}, protocol.CapabilityFileTransfer)
 	}
 	out := map[string]any{"request_id": requestID, "file_id": transfer.FileID, "destination": destination, "validated_size_bytes": transfer.ValidatedSizeBytes, "sha256": transfer.SHA256}
-	if jsonOut {
-		return a.render(out, true)
-	}
-	fmt.Fprintf(a.Out, "file_id: %s\ndestination: %q\nvalidated_size_bytes: %d\nsha256: %s\n", transfer.FileID, destination, transfer.ValidatedSizeBytes, transfer.SHA256)
-	return nil
+	return a.render(out, jsonOut)
 }
 
 // slackFileTyped accepts exactly one already-parsed repeated --file value.
