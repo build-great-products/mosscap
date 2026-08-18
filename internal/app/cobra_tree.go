@@ -51,7 +51,7 @@ func (a App) NewCommandTree() *cobra.Command {
 	findCommand(root, []string{"config"}).AddCommand(commandBranch("secret", "Manage private Slack credentials."))
 	root.AddCommand(a.cobraLeaf([]string{"setup"}, "Create private local configuration and state directories.", "mosscap setup [--json]", true, "", "setup", []flagSpec{boolFlag("json", "Render the result as JSON.")}, nil))
 	root.AddCommand(a.cobraLeaf([]string{"doctor"}, "Run non-destructive local and gateway diagnostics.", "mosscap doctor [--json]", true, protocol.CapabilityDoctor, "doctor", []flagSpec{boolFlag("json", "Render the report as JSON.")}, nil))
-	root.AddCommand(a.cobraLeaf([]string{"purge"}, "Preview or confirm irreversible metadata removal.", "mosscap purge --before RFC3339 (--dry-run|--confirm) [--request-id ID] [--json]", false, protocol.CapabilityMetadataPurge, "purge", []flagSpec{stringFlag("before", "RFC3339 cutoff for eligible metadata."), boolFlag("dry-run", "Preview removal without changing state."), boolFlag("confirm", "Confirm irreversible removal."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"before"}))
+	root.AddCommand(a.cobraLeaf([]string{"purge"}, "Preview or confirm irreversible metadata removal.", "mosscap purge --before RFC3339 (--dry-run|--confirm) [--request-id ID] [--json]", false, protocol.CapabilityMetadataPurge, "purge", []flagSpec{trackedStringFlag("before", "RFC3339 cutoff for eligible metadata."), trackedBoolFlag("dry-run", "Preview removal without changing state."), trackedBoolFlag("confirm", "Confirm irreversible removal."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"before"}))
 
 	for _, spec := range cobraLeafSpecs {
 		parent := findCommand(root, spec.path[:len(spec.path)-1])
@@ -75,6 +75,7 @@ type flagSpec struct {
 	bool        bool
 	integer     bool
 	repeat      bool
+	tracked     bool
 }
 
 func stringFlag(name, usage string) flagSpec { return flagSpec{name: name, usage: usage} }
@@ -83,6 +84,12 @@ func repeatStringFlag(name, usage string) flagSpec {
 }
 func intFlag(name, usage string) flagSpec  { return flagSpec{name: name, usage: usage, integer: true} }
 func boolFlag(name, usage string) flagSpec { return flagSpec{name: name, usage: usage, bool: true} }
+func trackedStringFlag(name, usage string) flagSpec {
+	return flagSpec{name: name, usage: usage, tracked: true}
+}
+func trackedBoolFlag(name, usage string) flagSpec {
+	return flagSpec{name: name, usage: usage, bool: true, tracked: true}
+}
 
 func commandBranch(use, short string) *cobra.Command {
 	return &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() }}
@@ -119,6 +126,11 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 	}
 	for _, f := range flags {
 		switch {
+		case f.tracked:
+			cmd.Flags().Var(newTrackedFlag(f.bool), f.name, f.usage)
+			if f.bool {
+				cmd.Flags().Lookup(f.name).NoOptDefVal = "true"
+			}
 		case f.bool:
 			cmd.Flags().Bool(f.name, false, f.usage)
 		case f.integer:
@@ -176,7 +188,7 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // adapters in runCobraHandler.
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor":
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove":
 		return true
 	default:
 		return false
@@ -204,6 +216,17 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		return a.gatewayStatusTyped(jsonOut)
 	case "doctor":
 		return a.doctorTyped(jsonOut)
+	case "purge":
+		before := trackedString(cmd, "before")
+		dryRun := trackedBool(cmd, "dry-run")
+		confirm := trackedBool(cmd, "confirm")
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.purgeTyped(before, dryRun, confirm, trackedOccurrences(cmd, "before"), trackedOccurrences(cmd, "dry-run"), trackedOccurrences(cmd, "confirm"), requestID, jsonOut)
+	case "trust.list":
+		return a.trustTyped("list", "", "", jsonOut)
+	case "trust.add", "trust.remove":
+		requestID, _ := cmd.Flags().GetString("request-id")
+		return a.trustTyped(strings.TrimPrefix(handler, "trust."), args[0], requestID, jsonOut)
 	default:
 		return fmt.Errorf("unbound typed Cobra handler %q", handler)
 	}

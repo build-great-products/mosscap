@@ -350,6 +350,8 @@ func TestPurgeRejectsAmbiguousModesAndInvalidCutoffsBeforeDialing(t *testing.T) 
 		{"purge", "--before", "2026-01-01T00:00:00,000000Z", "--dry-run"},
 		{"purge", "--before", "2026-01-01T00:00:00.000000", "--dry-run"},
 		{"purge", "--before", "2026-01-01T00:00:00Z", "--dry-run", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--before", "2026-01-02T00:00:00.000000Z", "--dry-run"},
+		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--confirm", "--confirm"},
 		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run=false"},
 		{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run", "--confirm=false"},
 	} {

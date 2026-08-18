@@ -78,6 +78,8 @@ func TestGatewayRequestConstructionCharacterization(t *testing.T) {
 		requestID  string
 		params     any
 	}{
+		{"trust add", []string{"trust", "add", "U01234567", "--request-id", "req_characterization_trust_add"}, protocol.CapabilityTrustedUsers, "trust.add", "req_characterization_trust_add", protocol.TrustMutationParams{SlackUserID: "U01234567"}},
+		{"purge preview", []string{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run"}, protocol.CapabilityMetadataPurge, "metadata.purge", "req_purge_preview", protocol.MetadataPurgeParams{Cutoff: "2026-01-01T00:00:00.000000Z", Mode: "dry_run"}},
 		{"task create", []string{"task", "create", "--text", "write tests", "--request-id", "req_characterization_create"}, protocol.CapabilityLocalTasks, "task.create", "req_characterization_create", protocol.TaskCreateParams{Text: "write tests"}},
 		{"task update selector before flags", []string{"task", "update", "abcdefghijklmnopqrstuv", "--text", "revised", "--request-id", "req_characterization_update"}, protocol.CapabilityLocalTasks, "task.update", "req_characterization_update", protocol.TaskUpdateParams{Task: "abcdefghijklmnopqrstuv", Text: "revised"}},
 		{"task transition", []string{"task", "working", "abcdefghijklmnopqrstuv", "--note", "started", "--request-id", "req_characterization_working"}, protocol.CapabilityLocalTasks, "task.transition", "req_characterization_working", protocol.TaskTransitionParams{Task: "abcdefghijklmnopqrstuv", State: "working", Note: stringPointer("started")}},
