@@ -77,3 +77,22 @@ func TestEscapeTerminalRetainsPrintableUnicode(t *testing.T) {
 		t.Fatalf("escapeTerminal = %q, want %q", got, want)
 	}
 }
+
+func TestPaginationContinuationIsHumanOnlyAndShellSafe(t *testing.T) {
+	var out bytes.Buffer
+	page := map[string]any{"next_cursor": "cursor with ' quote"}
+	if err := renderPaginationContinuation(&out, page, "mosscap task list --state open --limit 20"); err != nil {
+		t.Fatal(err)
+	}
+	want := "More results available.\nNext: mosscap task list --state open --limit 20 --cursor 'cursor with '\"'\"' quote'\n"
+	if got := out.String(); got != want {
+		t.Fatalf("continuation = %q, want %q", got, want)
+	}
+	out.Reset()
+	if err := renderPaginationContinuation(&out, map[string]any{}, "mosscap task list"); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("unexpected final-page continuation: %q", out.String())
+	}
+}

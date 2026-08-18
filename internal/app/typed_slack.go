@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/stayradiated/mosscap/internal/identity"
@@ -102,7 +104,18 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 	if mutation {
 		out = map[string]any{"request_id": requestID, "effect": out}
 	}
-	return a.renderSlackCommand(out, jsonOut, !mutation)
+	if !mutation {
+		limit, _ := cmd.Flags().GetInt("limit")
+		if limit == 0 {
+			limit = 50
+		}
+		continuation := "mosscap slack " + command
+		if command == "thread" {
+			continuation += " " + shellQuote(args[0])
+		}
+		return a.renderPage(out, jsonOut, continuation+fmt.Sprintf(" --limit %d", limit))
+	}
+	return a.renderSlackCommand(out, jsonOut, false)
 }
 
 func (a App) slackTypedText(cmd *cobra.Command) (string, error) {

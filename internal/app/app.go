@@ -1150,6 +1150,15 @@ func (a App) render(v any, jsonOut bool) error {
 	}
 	return renderHuman(a.Out, v)
 }
+
+// renderPage preserves the DTO in JSON mode while making bounded human reads
+// directly resumable. continuation intentionally contains no prior cursor.
+func (a App) renderPage(v any, jsonOut bool, continuation string) error {
+	if err := a.render(v, jsonOut); err != nil || jsonOut {
+		return err
+	}
+	return renderPaginationContinuation(a.Out, v, continuation)
+}
 func (a App) branch(name string, args, children []string) error {
 	if len(args) == 0 || isHelp(args[0]) {
 		a.printBranchHelp(name, children)

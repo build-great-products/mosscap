@@ -89,6 +89,19 @@ func (a App) taskTyped(command, selector, text, textFile string, textSet, textFi
 	if mutation {
 		out = map[string]any{"request_id": requestID, "result": out}
 	}
+	if command == "list" {
+		continuation := "mosscap task list"
+		if state != "" {
+			continuation += " --state " + shellQuote(state)
+		} else if all {
+			continuation += " --all"
+		}
+		if limit == 0 {
+			limit = 20
+		}
+		continuation += fmt.Sprintf(" --limit %d", limit)
+		return a.renderPage(out, jsonOut, continuation)
+	}
 	return a.render(out, jsonOut)
 }
 

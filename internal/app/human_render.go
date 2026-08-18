@@ -239,3 +239,34 @@ func escapeTerminal(s string) string {
 	}
 	return b.String()
 }
+
+// renderPaginationContinuation is deliberately outside renderHuman: JSON
+// responses expose only next_cursor, while human responses get an executable
+// command without adding a shell-command field to the protocol DTO.
+func renderPaginationContinuation(w io.Writer, value any, continuation string) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var page struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(encoded, &page); err != nil {
+		return err
+	}
+	if page.NextCursor == "" {
+		return nil
+	}
+	fmt.Fprintln(w, "More results available.")
+	fmt.Fprintf(w, "Next: %s --cursor %s\n", continuation, shellQuote(page.NextCursor))
+	return nil
+}
+
+func shellQuote(value string) string {
+	if value != "" && strings.IndexFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("_@%+=:,./-", r))
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}

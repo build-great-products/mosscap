@@ -1,6 +1,8 @@
 package app
 
 import (
+	"fmt"
+
 	"github.com/stayradiated/mosscap/internal/config"
 	"github.com/stayradiated/mosscap/internal/identity"
 	"github.com/stayradiated/mosscap/internal/protocol"
@@ -51,6 +53,19 @@ func (a App) effectTyped(command, effect, state, task string, limit int, cursor,
 	}
 	if mutation {
 		out = map[string]any{"request_id": requestID, "effect": out}
+	}
+	if command == "list" {
+		continuation := "mosscap effect list"
+		if state != "" {
+			continuation += " --state " + shellQuote(state)
+		}
+		if task != "" {
+			continuation += " --task " + shellQuote(task)
+		}
+		if limit == 0 {
+			limit = 50
+		}
+		return a.renderPage(out, jsonOut, continuation+fmt.Sprintf(" --limit %d", limit))
 	}
 	return a.renderSlackCommand(out, jsonOut, command == "inspect")
 }
@@ -105,6 +120,19 @@ func (a App) deliveryTyped(command, delivery, state, task string, limit int, cur
 	}
 	if mutation {
 		result = map[string]any{"request_id": requestID, "result": result, "warning": "duplicate insertion is possible"}
+	}
+	if command == "list" {
+		continuation := "mosscap delivery list"
+		if state != "" {
+			continuation += " --state " + shellQuote(state)
+		}
+		if task != "" {
+			continuation += " --task " + shellQuote(task)
+		}
+		if limit == 0 {
+			limit = 50
+		}
+		return a.renderPage(result, jsonOut, continuation+fmt.Sprintf(" --limit %d", limit))
 	}
 	return a.render(result, jsonOut)
 }

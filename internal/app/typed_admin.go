@@ -153,5 +153,11 @@ func (a App) trustTyped(command, slackUserID, requestID string, limit int, curso
 	if err := json.Unmarshal(bytes, &users); err != nil {
 		return err
 	}
-	return a.renderTrustedUsers(users, jsonOut)
+	if err := a.renderTrustedUsers(users, jsonOut); err != nil || jsonOut {
+		return err
+	}
+	if limit == 0 {
+		limit = 50
+	}
+	return renderPaginationContinuation(a.Out, users, fmt.Sprintf("mosscap trust list --limit %d", limit))
 }
