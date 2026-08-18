@@ -70,6 +70,10 @@ func TestCommandTreeCharacterization(t *testing.T) {
 // positional selectors preceding flags are part of today's CLI contract.
 func TestGatewayRequestConstructionCharacterization(t *testing.T) {
 	endpoint := characterizationEndpoint(t)
+	attachment := filepath.Join(t.TempDir(), "attachment.txt")
+	if err := os.WriteFile(attachment, []byte("attachment"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name       string
 		args       []string
@@ -85,8 +89,14 @@ func TestGatewayRequestConstructionCharacterization(t *testing.T) {
 		{"task transition", []string{"task", "working", "abcdefghijklmnopqrstuv", "--note", "started", "--request-id", "req_characterization_working"}, protocol.CapabilityLocalTasks, "task.transition", "req_characterization_working", protocol.TaskTransitionParams{Task: "abcdefghijklmnopqrstuv", State: "working", Note: stringPointer("started")}},
 		{"task list", []string{"task", "list", "--state", "open", "--limit", "7"}, protocol.CapabilityLocalTasks, "task.list", "req_readlist", protocol.TaskListParams{State: stringPointer("open"), Limit: 7}},
 		{"task reply", []string{"task", "reply", "abcdefghijklmnopqrstuv", "--text", "reply", "--done", "--request-id", "req_characterization_reply"}, protocol.CapabilityTaskReply, "task.reply", "req_characterization_reply", protocol.TaskReplyParams{Task: "abcdefghijklmnopqrstuv", Text: "reply", Done: true}},
+		{"slack history", []string{"slack", "history", "--limit", "17"}, protocol.CapabilitySlackReads, "slack.history", "req_slack_history", protocol.SlackHistoryParams{Limit: 17}},
+		{"slack thread", []string{"slack", "thread", "1700000000.000001"}, protocol.CapabilitySlackReads, "slack.thread", "req_slack_thread", protocol.SlackThreadParams{ThreadTS: "1700000000.000001"}},
 		{"slack send", []string{"slack", "send", "--thread", "1700000000.000001", "--text", "hello", "--task", "abcdefghijklmnopqrstuv", "--request-id", "req_characterization_send"}, protocol.CapabilitySlackEffects, "slack.send", "req_characterization_send", protocol.SlackSendParams{ThreadTS: "1700000000.000001", Text: "hello", Task: "abcdefghijklmnopqrstuv"}},
+		{"slack send attachment", []string{"slack", "send", "--text", "hello", "--file", attachment, "--request-id", "req_characterization_send_attachment"}, protocol.CapabilityFileTransfer, "slack.send", "req_characterization_send_attachment", protocol.SlackSendParams{Text: "hello", FilePaths: []string{attachment}}},
+		{"slack edit selector before flags", []string{"slack", "edit", "1700000000.000002", "--text", "revised", "--request-id", "req_characterization_edit"}, protocol.CapabilitySlackEffects, "slack.edit", "req_characterization_edit", protocol.SlackEditParams{MessageTS: "1700000000.000002", Text: "revised"}},
 		{"slack delete selector before flags", []string{"slack", "delete", "1700000000.000002", "--reason", "cleanup", "--request-id", "req_characterization_delete"}, protocol.CapabilitySlackEffects, "slack.delete", "req_characterization_delete", protocol.SlackDeleteParams{MessageTS: "1700000000.000002", Reason: "cleanup"}},
+		{"slack react", []string{"slack", "react", "1700000000.000002", "eyes", "--request-id", "req_characterization_react"}, protocol.CapabilitySlackEffects, "slack.react", "req_characterization_react", protocol.SlackReactionParams{MessageTS: "1700000000.000002", Emoji: "eyes"}},
+		{"slack unreact", []string{"slack", "unreact", "1700000000.000002", "eyes", "--request-id", "req_characterization_unreact"}, protocol.CapabilitySlackEffects, "slack.unreact", "req_characterization_unreact", protocol.SlackReactionParams{MessageTS: "1700000000.000002", Emoji: "eyes"}},
 		{"effect list", []string{"effect", "list", "--state", "ambiguous"}, protocol.CapabilitySlackEffects, "effect.list", "req_effect_list", protocol.EffectListParams{State: stringPointer("ambiguous")}},
 		{"effect inspect", []string{"effect", "inspect", "eff_AbCdEfGhIjKlMnOpQrStUv"}, protocol.CapabilitySlackEffects, "effect.inspect", "req_effect_inspect", protocol.EffectSelector{Effect: "eff_AbCdEfGhIjKlMnOpQrStUv"}},
 		{"effect retry", []string{"effect", "retry", "eff_AbCdEfGhIjKlMnOpQrStUv", "--reason", "retry", "--confirm-duplicate-risk", "--request-id", "req_characterization_retry"}, protocol.CapabilitySlackEffects, "effect.retry", "req_characterization_retry", protocol.EffectRetryParams{Effect: "eff_AbCdEfGhIjKlMnOpQrStUv", Reason: "retry", ConfirmDuplicateRisk: true}},

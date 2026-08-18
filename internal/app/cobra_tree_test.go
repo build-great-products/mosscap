@@ -99,7 +99,7 @@ func TestTypedLeavesBypassLegacyParserBridge(t *testing.T) {
 		"trust list", "trust add", "trust remove", "purge",
 		"task create", "task list", "task show", "task update", "task open", "task working", "task done", "task reply",
 		"effect list", "effect inspect", "effect retry",
-		"file show", "file get", "slack file",
+		"file show", "file get", "slack history", "slack thread", "slack send", "slack file", "slack edit", "slack delete", "slack react", "slack unreact",
 		"delivery list", "delivery inspect", "delivery requeue",
 	} {
 		cmd := commandAt(tree, strings.Fields(path))
@@ -108,11 +108,6 @@ func TestTypedLeavesBypassLegacyParserBridge(t *testing.T) {
 		}
 		if !isTypedCobraHandler(cmd.Annotations[annotationHandler]) {
 			t.Errorf("%s is still bound to the legacy parser bridge", path)
-		}
-	}
-	for _, handler := range []string{"slack.send", "slack.history", "slack.edit"} {
-		if isTypedCobraHandler(handler) {
-			t.Errorf("%s unexpectedly left the compatibility bridge", handler)
 		}
 	}
 }

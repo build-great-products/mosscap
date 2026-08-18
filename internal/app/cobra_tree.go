@@ -188,7 +188,7 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // adapters in runCobraHandler.
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.file", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	default:
 		return false
@@ -265,6 +265,8 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		force, _ := cmd.Flags().GetBool("force")
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.fileGetTyped(args[0], output, force, requestID, jsonOut)
+	case "slack.history", "slack.thread", "slack.send", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
+		return a.slackTyped(strings.TrimPrefix(handler, "slack."), cmd, args)
 	case "slack.file":
 		thread, _ := cmd.Flags().GetString("thread")
 		files, _ := cmd.Flags().GetStringArray("file")
@@ -314,8 +316,6 @@ func (a App) runCobraHandler(handler string, args []string) error {
 		return a.taskReply(args)
 	case "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done":
 		return a.task("", append([]string{strings.TrimPrefix(handler, "task.")}, args...))
-	case "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
-		return a.slackCommand(strings.TrimPrefix(handler, "slack."), args)
 	case "effect.list", "effect.inspect", "effect.retry":
 		return a.effect(append([]string{strings.TrimPrefix(handler, "effect.")}, args...))
 	case "file.show":

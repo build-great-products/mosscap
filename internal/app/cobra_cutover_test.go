@@ -15,14 +15,10 @@ func TestCobraCutoverHonorsEndOfOptionsForPositionalSelectors(t *testing.T) {
 	}
 }
 
-func TestCanonicalArgsPreservesCommaInRepeatedFiles(t *testing.T) {
-	cmd := commandAt((App{}).NewCommandTree(), []string{"slack", "send"})
-	if err := cmd.Flags().Set("file", "/tmp/a,b"); err != nil {
-		t.Fatal(err)
-	}
-	got := canonicalArgs(cmd, nil)
-	want := []string{"--file", "/tmp/a,b"}
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("canonical args=%q, want %q", got, want)
+func TestSlackLeavesUseTypedCobraHandlers(t *testing.T) {
+	for _, handler := range []string{"slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact"} {
+		if !isTypedCobraHandler(handler) {
+			t.Errorf("%s still uses the legacy Cobra bridge", handler)
+		}
 	}
 }
