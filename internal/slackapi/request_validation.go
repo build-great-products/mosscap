@@ -29,7 +29,7 @@ func ValidateRepliesRequest(request RepliesRequest) error {
 	if !request.ThreadTS.Valid() {
 		return errors.New("invalid Slack thread timestamp")
 	}
-	if err := ValidateReadLimit(request.Limit); err != nil {
+	if err := ValidateThreadReadLimit(request.Limit); err != nil {
 		return err
 	}
 	return validateOpaque("Slack cursor", request.Cursor, MaxCursorBytes, false)

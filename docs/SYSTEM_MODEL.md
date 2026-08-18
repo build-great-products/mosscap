@@ -77,6 +77,8 @@ An eligible Slack envelope follows this path:
 
 Tasks remain durable while Pi is absent or opted out. Slack Socket Mode does not guarantee indefinite retention while the gateway itself is offline.
 
+`task context` keeps this authority boundary explicit: SQLite supplies current task, admitted source attachment, effect, and delivery evidence; a single bounded Slack thread page is live and timestamped separately. If that live read is unavailable, durable context still succeeds with an unavailable component status and warning. Live thread-reply attachments are neither admitted task attachments nor exposed by this view.
+
 ## Cross-system uncertainty
 
 SQLite and Pi JSONL cannot share a transaction:

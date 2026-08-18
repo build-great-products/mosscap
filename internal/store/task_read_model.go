@@ -19,6 +19,53 @@ type TaskReadModel struct {
 // GetTaskReadModel resolves an exact task ID or an unambiguous prefix and
 // includes current Slack source and metadata-only incoming file details when
 // the task originated in Slack.
+// TaskContextReadModel is the bounded durable portion of task context. Live
+// Slack is deliberately assembled by the server, outside SQLite authority.
+type TaskContextReadModel struct {
+	TaskReadModel
+	NonConfirmed      []SlackEffect
+	NonConfirmedCount int64
+	LatestDelivery    *Delivery
+}
+
+func (s *Store) GetTaskContextReadModel(ctx context.Context, selector string) (TaskContextReadModel, error) {
+	model, err := s.GetTaskReadModel(ctx, selector)
+	if err != nil {
+		return TaskContextReadModel{}, err
+	}
+	out := TaskContextReadModel{TaskReadModel: model}
+	rows, err := s.db.QueryContext(ctx, slackEffectSelect+` WHERE related_task_id=? AND state IN ('prepared','submitted','failed','ambiguous') ORDER BY prepared_at_us DESC,effect_id DESC LIMIT 11`, model.Task.ID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		effect, err := scanSlackEffect(rows)
+		if err != nil {
+			return out, err
+		}
+		out.NonConfirmed = append(out.NonConfirmed, effect)
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM slack_effects WHERE related_task_id=? AND state IN ('prepared','submitted','failed','ambiguous')`, model.Task.ID).Scan(&out.NonConfirmedCount); err != nil {
+		return out, err
+	}
+	if len(out.NonConfirmed) == 11 {
+		out.NonConfirmed = out.NonConfirmed[:10]
+	}
+	var delivery Delivery
+	stored, err := scanDelivery(s.db.QueryRowContext(ctx, deliverySelect+` WHERE task_id=? AND task_version=? ORDER BY created_at_us DESC,delivery_id DESC LIMIT 1`, model.Task.ID, model.Task.Version))
+	if err == nil {
+		delivery = stored.Delivery
+		out.LatestDelivery = &delivery
+	} else if err != sql.ErrNoRows {
+		return out, err
+	}
+	return out, nil
+}
+
 func (s *Store) GetTaskReadModel(ctx context.Context, selector string) (TaskReadModel, error) {
 	canonical, ok := canonicalTaskSelector(selector)
 	if !ok {

@@ -79,6 +79,8 @@ func renderHumanValue(out *bytes.Buffer, v any) {
 		renderRows(out, "Effect", []any{m}, []string{"effect_id", "kind", "state", "related_task_id", "target_message_ts", "thread_ts", "diagnostic_code"})
 	case m["delivery_id"] != nil:
 		renderRows(out, "Delivery", []any{m}, []string{"delivery_id", "task_id", "task_version", "state", "diagnostic_code"})
+	case m["task"] != nil && m["thread"] != nil && m["effects"] != nil:
+		renderTaskContext(out, m)
 	case m["text"] != nil && m["task_id"] != nil:
 		renderTaskCard(out, m)
 	case m["text"] != nil && m["message_ts"] != nil:
@@ -105,6 +107,32 @@ func renderWarnings(out *bytes.Buffer, m map[string]any) {
 		if text := present(warning); text != "" {
 			fmt.Fprintf(out, "Warning: %s\n", text)
 		}
+	}
+}
+
+func renderTaskContext(out *bytes.Buffer, context map[string]any) {
+	fmt.Fprintln(out, "Task:")
+	if task, ok := context["task"].(map[string]any); ok {
+		renderTaskCard(out, task)
+	}
+	renderWarnings(out, context)
+	if thread, ok := context["thread"].(map[string]any); ok {
+		fmt.Fprintf(out, "Thread: %s\n", present(thread["status"]))
+		if messages, _ := thread["messages"].([]any); len(messages) > 0 {
+			for _, message := range messages {
+				if m, ok := message.(map[string]any); ok {
+					renderMessageCard(out, m)
+				}
+			}
+		}
+	}
+	if effects, ok := context["effects"].(map[string]any); ok {
+		if count := present(effects["non_confirmed_count"]); count != "" && count != "0" {
+			fmt.Fprintf(out, "Related effects requiring attention: %s\n", count)
+		}
+	}
+	if delivery, ok := context["delivery"].(map[string]any); ok {
+		fmt.Fprintf(out, "Current-version delivery: %s  %s\n", present(delivery["delivery_id"]), present(delivery["state"]))
 	}
 }
 

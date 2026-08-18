@@ -136,7 +136,7 @@ func (s *Service) Thread(ctx context.Context, threadTS string, limit int, cursor
 	if limit == 0 {
 		limit = 50
 	}
-	if err := slackapi.ValidateReadLimit(limit); err != nil {
+	if err := slackapi.ValidateThreadReadLimit(limit); err != nil {
 		return slackapi.MessagePage{}, err
 	}
 	if err := s.ready(); err != nil {

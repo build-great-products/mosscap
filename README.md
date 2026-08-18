@@ -86,6 +86,8 @@ mosscap task create --text "review the release"
 mosscap task list
 mosscap task working AbCdEfGh
 mosscap task show AbCdEfGh --json
+# Prefer this bounded durable-plus-live view before handling a Slack task.
+mosscap task context AbCdEfGh --thread-limit 20
 mosscap task reply AbCdEfGh --text "I found the problem." --done
 ```
 

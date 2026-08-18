@@ -66,6 +66,14 @@ func ValidateReadLimit(limit int) error {
 	return nil
 }
 
+// ValidateThreadReadLimit permits the larger bounded page used by task context.
+func ValidateThreadReadLimit(limit int) error {
+	if limit < 1 || limit > 100 {
+		return errors.New("Slack thread limit must be between 1 and 100")
+	}
+	return nil
+}
+
 // NormalizeEmoji accepts a bare reaction name or one pair of surrounding
 // colons and returns Slack's bare API representation.
 func NormalizeEmoji(value string) (string, error) {

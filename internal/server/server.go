@@ -748,6 +748,11 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		_ = json.Unmarshal(r.Params, &p)
 		resultType = "task"
 		result, err = s.store.GetTaskReadModel(ctx, p.Task)
+	case "task.context":
+		var p protocol.TaskContextParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_context"
+		result, err = s.taskContext(ctx, p)
 	case "file.show":
 		var p protocol.FileSelector
 		_ = json.Unmarshal(r.Params, &p)
@@ -910,12 +915,75 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 	if err != nil {
 		return errorResponse(r.RequestID, s.Version, err)
 	}
-	return protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: resultType, Result: b}
+	// Context (and every other response) must fail explicitly rather than let
+	// the frame codec silently strand an oversized result at the client.
+	candidate := protocol.Response{ProtocolVersion: protocol.Version, RequestID: r.RequestID, ServerVersion: s.Version, ResultType: resultType, Result: b}
+	encoded, encodeErr := protocol.EncodeResponse(candidate)
+	if encodeErr != nil {
+		return errorResponse(r.RequestID, s.Version, encodeErr)
+	}
+	if maximum := s.snapshot().LocalProtocolMaximumFrame; maximum > 0 && len(encoded) > maximum {
+		return protocol.NewErrorResponse(r.RequestID, s.Version, "bounded_result_exceeded", "usage", "result exceeds the configured protocol frame limit", false)
+	}
+	return candidate
 }
 
 // taskReply is deliberately a resumable composition, not a cross-system
 // transaction. A deterministic sub-request first durably prepares/executes the
 // Slack effect; only its confirmed state permits the separate SQLite transition.
+// taskContext combines an authoritative bounded SQLite read with one best-effort
+// Slack thread read. Slack failure is represented in the successful component,
+// never as a failure of the durable context read.
+func (s *Server) taskContext(ctx context.Context, p protocol.TaskContextParams) (protocol.TaskContextDTO, error) {
+	model, err := s.store.GetTaskContextReadModel(ctx, p.Task)
+	if err != nil {
+		return protocol.TaskContextDTO{}, err
+	}
+	taskValue := dto(model.TaskReadModel).(protocol.TaskDTO)
+	out := protocol.TaskContextDTO{Task: taskValue, Thread: protocol.TaskContextThreadDTO{Status: "not_applicable", Messages: []protocol.SlackMessageDTO{}}, Effects: protocol.TaskContextEffectsDTO{NonConfirmed: slackEffectDTOs(model.NonConfirmed), NonConfirmedCount: model.NonConfirmedCount, Truncated: model.NonConfirmedCount > 10}}
+	if model.LatestReplyEffect != nil {
+		v := slackEffectDTO(*model.LatestReplyEffect)
+		out.Effects.LatestReply = &v
+	}
+	if model.LatestDelivery != nil {
+		d := model.LatestDelivery
+		out.Delivery = &protocol.TaskContextDeliveryDTO{DeliveryID: d.ID, TaskVersion: d.TaskVersion, State: string(d.State), DiagnosticCode: d.DiagnosticCode, ActionRequired: d.State == store.DeliveryUncertain || d.State == store.DeliveryRejected}
+	}
+	if model.SlackSource == nil {
+		return out, nil
+	}
+	limit := p.ThreadLimit
+	if limit == 0 {
+		limit = 20
+	}
+	op, release, opErr := s.ops()
+	if opErr != nil {
+		out.Thread.Status, out.Thread.DiagnosticCode = "unavailable", "slack_unavailable"
+		out.Warnings = []string{"Slack thread was unavailable"}
+		return out, nil
+	}
+	defer release()
+	if !op.MatchesTarget(model.SlackSource.TeamID, model.SlackSource.ChannelID) {
+		out.Thread.Status, out.Thread.DiagnosticCode = "unavailable", "slack_source_unavailable"
+		out.Warnings = []string{"Slack thread was unavailable"}
+		return out, nil
+	}
+	page, readErr := op.Thread(ctx, model.SlackSource.ThreadTS, limit, "")
+	if readErr != nil {
+		out.Thread.Status, out.Thread.DiagnosticCode = "unavailable", string(slackapi.Classify(readErr, slackapi.FailureRead).Diagnostic)
+		out.Warnings = []string{"Slack thread was unavailable"}
+		return out, nil
+	}
+	messages := messagePageDTO(page).Messages
+	// Live reply files have not passed task-source admission. Keep their metadata
+	// out of context so callers cannot mistake them for file-get resources.
+	for i := range messages {
+		messages[i].Files = nil
+	}
+	out.Thread = protocol.TaskContextThreadDTO{Status: "available", Messages: messages, NextCursor: page.NextCursor, FetchedAt: stamp(time.Now())}
+	return out, nil
+}
+
 func (s *Server) taskReply(ctx context.Context, requestID string, p protocol.TaskReplyParams) (protocol.TaskReplyDTO, error) {
 	source, err := s.store.GetSlackSource(ctx, p.Task)
 	if err != nil {

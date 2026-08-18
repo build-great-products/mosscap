@@ -38,12 +38,13 @@ const (
 	CapabilityMetadataPurge       = "metadata_purge_v1"
 	CapabilityTaskReply           = "task_reply_v1"
 	CapabilitySQLitePagination    = "sqlite_pagination_v1"
+	CapabilityTaskContext         = "task_context_v1"
 	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
 	// the gateway owns every delivery route and disconnect cleanup (T1).
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -170,6 +171,39 @@ type TaskListParams struct {
 	IncludeDone bool    `json:"include_done,omitempty"`
 	Limit       int     `json:"limit,omitempty"`
 	Cursor      string  `json:"cursor,omitempty"`
+}
+
+// TaskContextParams requests one bounded live thread page alongside durable task evidence.
+type TaskContextParams struct {
+	Task        string `json:"task"`
+	ThreadLimit int    `json:"thread_limit,omitempty"`
+}
+type TaskContextThreadDTO struct {
+	Status         string            `json:"status"`
+	Messages       []SlackMessageDTO `json:"messages"`
+	FetchedAt      string            `json:"fetched_at,omitempty"`
+	NextCursor     string            `json:"next_cursor,omitempty"`
+	DiagnosticCode string            `json:"diagnostic_code,omitempty"`
+}
+type TaskContextEffectsDTO struct {
+	LatestReply       *SlackEffectDTO  `json:"latest_reply,omitempty"`
+	NonConfirmed      []SlackEffectDTO `json:"non_confirmed"`
+	NonConfirmedCount int64            `json:"non_confirmed_count"`
+	Truncated         bool             `json:"effects_truncated"`
+}
+type TaskContextDeliveryDTO struct {
+	DeliveryID     string `json:"delivery_id"`
+	TaskVersion    int64  `json:"task_version"`
+	State          string `json:"state"`
+	DiagnosticCode string `json:"diagnostic_code,omitempty"`
+	ActionRequired bool   `json:"action_required"`
+}
+type TaskContextDTO struct {
+	Task     TaskDTO                 `json:"task"`
+	Thread   TaskContextThreadDTO    `json:"thread"`
+	Effects  TaskContextEffectsDTO   `json:"effects"`
+	Delivery *TaskContextDeliveryDTO `json:"delivery,omitempty"`
+	Warnings []string                `json:"warnings,omitempty"`
 }
 
 // SlackHistoryParams and SlackThreadParams deliberately contain no workspace
@@ -675,6 +709,8 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &TaskListParams{}
 	case "task.get":
 		target = &TaskSelector{}
+	case "task.context":
+		target = &TaskContextParams{}
 	case "task.update":
 		target = &TaskUpdateParams{}
 	case "task.transition":
@@ -724,6 +760,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	case *TaskSelector:
 		if !validTaskSelector(p.Task) {
 			return errors.New("invalid task selector")
+		}
+	case *TaskContextParams:
+		if !validTaskSelector(p.Task) || p.ThreadLimit < 0 || p.ThreadLimit > 100 {
+			return errors.New("invalid task context")
 		}
 	case *TaskUpdateParams:
 		if !validTaskSelector(p.Task) || p.Text == "" {
@@ -888,7 +928,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	}
 	return false

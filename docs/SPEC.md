@@ -148,7 +148,7 @@ mosscap config show|set|secret set
 mosscap gateway run|reload|status
 mosscap doctor
 mosscap trust list|add|remove
-mosscap task create|list|show|update|open|working|done|reply
+mosscap task create|list|show|context|update|open|working|done|reply
 mosscap slack history|thread|send|file|edit|delete|react|unreact
 mosscap effect list|inspect|retry
 mosscap file show|get
@@ -165,6 +165,8 @@ The private Unix-socket protocol uses bounded 32-bit-length-prefixed JSON frames
 Every CLI leaf that contacts the gateway accepts a positive shared `--timeout` duration, defaulting to 10 seconds. Its deadline begins immediately before gateway contact and covers dial, hello, calls, and frame I/O; an earlier application/caller deadline wins. Explicit body stdin and local validation occur before this deadline. Cancellation before a Slack/Pi external boundary leaves work unsubmitted; after a boundary, the gateway durably records a confirmed, failed, or ambiguous outcome using a non-cancelled commit context. Timeout, cancellation, or disconnect after submission is ambiguous and is never retried automatically.
 
 Cobra help is the complete command-discovery interface. Running the root or a command branch without a leaf prints help and exits successfully; every leaf documents its syntax, flags, examples, and applicable irreversible or duplicate-risk warnings. Help performs no configuration, gateway, or mutation work. Unknown commands and flags print usage for the relevant command and exit 2. Only unambiguous close command or flag misspellings may be suggested; positional values are never rewritten or suggested. Shell-completion and machine-readable help commands are not exposed.
+
+`task context TASK [--thread-limit N]` is a read-only bounded task workflow view. It includes the current durable task/source attachment metadata, latest reply effect, at most ten newest non-confirmed related effects and their total, and the latest delivery for the current task version. For Slack tasks it makes one best-effort live thread-page read (default 20, maximum 100); `thread.status` is `available`, `unavailable`, or `not_applicable`. An unavailable live thread is a successful partial result with a warning; missing tasks remain not-found. It never downloads files or returns live-reply file metadata, file bytes, private URLs, effect body text, or operator reasons.
 
 `task create`, `task update`, `task reply`, `slack send`, and `slack edit` require exactly one text source: `--text`, `--text-file`, or `--stdin`. Explicit stdin reads its complete bounded UTF-8 body (including trailing newlines) before gateway interaction; empty, NUL-containing, malformed UTF-8, and over-limit bodies fail locally. This body stdin is independent from `config secret set --stdin` credential input.
 
