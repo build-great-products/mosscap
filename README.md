@@ -88,12 +88,14 @@ mosscap task working AbCdEfGh
 mosscap task show AbCdEfGh --json
 # Prefer this bounded durable-plus-live view before handling a Slack task.
 mosscap task context AbCdEfGh --thread-limit 20
-mosscap task reply AbCdEfGh --text "I found the problem." --done
+mosscap task reply AbCdEfGh --stdin --done <<'REPLY'
+I found the problem.
+REPLY
 ```
 
 `task reply --done` is a resumable composition: it completes the task only after Slack confirms the reply. A plain Slack send never changes task state, and marking a task done never posts to Slack.
 
-For multiline or piped bodies, `task create`, `task update`, `task reply`, `slack send`, and `slack edit` also accept `--stdin`. Provide exactly one of `--text`, `--text-file`, or `--stdin`; stdin is read completely (including trailing newlines) before contacting the gateway.
+For exact multiline or piped bodies, `task create`, `task update`, `task reply`, `slack send`, and `slack edit` accept `--stdin` or `--text-file`; prefer those sources over shell-quoted `--text`. Provide exactly one of `--text`, `--text-file`, or `--stdin`; stdin is read completely (including trailing newlines) before contacting the gateway. `--text` is literal: a typed `\\n` remains a backslash followed by `n`, not a newline.
 
 Every command that contacts the gateway accepts `--timeout DURATION` (default `10s`). The budget starts only immediately before dialing the gateway, covers dial, handshake, request, and frame I/O, and never extends an earlier caller deadline. Stdin and local input validation happen before that budget begins.
 

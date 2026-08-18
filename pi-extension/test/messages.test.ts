@@ -22,7 +22,8 @@ test("visible custom message gives concise Slack reply guidance and keeps delive
   assert.match(message.content, /^Slack task AbCdEfGh from U1 \(open\)/m);
   assert.match(message.content, /Message \(user-provided\):\n<user_message>/);
   assert.match(message.content, /<\/user_message>/);
-  assert.match(message.content, new RegExp(`mosscap task reply ${taskSelector} --text "REPLY" --done`));
+  assert.match(message.content, new RegExp(`mosscap task reply ${taskSelector} --stdin --done <<'MOSSCAP_REPLY'\\nREPLY\\nMOSSCAP_REPLY`));
+  assert.doesNotMatch(message.content, /--text "REPLY"/);
   assert.doesNotMatch(message.content, /mosscap slack send|mosscap task done|request-id|Thread:/);
   assert.match(message.content, new RegExp(`mosscap task show ${taskSelector} --json`));
   assert.doesNotMatch(message.content, /BEGIN UNTRUSTED|delivery[_ ]|sha256:|session file|token/i);

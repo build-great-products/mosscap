@@ -28,9 +28,11 @@ pi install /absolute/path/to/mosscap/pi-extension
 safe compact state, and `/mosscap off` releases the connection. While connected,
 the extension adds per-turn context explaining that remote users do not see
 normal Pi output and that Pi should use the ordinary `mosscap` CLI to reply.
-Delivered tasks use concise, visibly delimited user-message text, a short
-unambiguous task selector, and Slack reply/completion commands without explicit
-request IDs. The CLI generates request IDs and reports them for safe recovery.
+Delivered Slack tasks use concise, visibly delimited user-message text, a short
+unambiguous task selector, and a quoted-heredoc `--stdin` reply/completion
+template without explicit request IDs. Replace the template body with the reply;
+this preserves multiline text exactly. The CLI generates request IDs and reports
+them for safe recovery.
 Attached Slack files are rendered as
 escaped, bounded metadata with `file show` and explicit `file get --output`
 hints only; the extension never receives bytes, hashes, private URLs, temporary
