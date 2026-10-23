@@ -204,15 +204,15 @@ func TestBuiltBinaryTaskWatchResumesEscapesAndReconnects(t *testing.T) {
 
 	// Without a cursor the watcher first emits currently open tasks only.
 	watch := startWatch("--cursor-file", cursorFile)
-	if got := watch.next(t); !strings.HasPrefix(got, "cursor=1 change=created task="+backlogTask+" version=1 state=open source=local channel= text=already open") {
+	if got := watch.next(t); !strings.HasPrefix(got, "cursor=1 change=created task="+backlogTask+" version=1 state=open source=local channel= thread= parent= text=already open") {
 		t.Fatalf("backlog line=%q", got)
 	}
 	multiline := createTask("line one\n\tline two \\ end\n")
-	if got, want := watch.next(t), "cursor=4 change=created task="+multiline+" version=1 state=open source=local channel= text=line one\\n\\tline two \\\\ end\\n"; got != want {
+	if got, want := watch.next(t), "cursor=4 change=created task="+multiline+" version=1 state=open source=local channel= thread= parent= text=line one\\n\\tline two \\\\ end\\n"; got != want {
 		t.Fatalf("multiline line=%q want %q", got, want)
 	}
 	run("task", "update", backlogTask, "--text", "already open, edited", "--json")
-	if got, want := watch.next(t), "cursor=5 change=edited task="+backlogTask+" version=2 state=open source=local channel= text=already open, edited"; got != want {
+	if got, want := watch.next(t), "cursor=5 change=edited task="+backlogTask+" version=2 state=open source=local channel= thread= parent= text=already open, edited"; got != want {
 		t.Fatalf("edit line=%q want %q", got, want)
 	}
 	// State changes away from open are filtered by default but still advance

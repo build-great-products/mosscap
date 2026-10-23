@@ -254,7 +254,7 @@ func leafDescription(short, handler string) string {
 	case "task.list":
 		description += "\n\nUse either --state (open, working, or done) or --all."
 	case "task.watch":
-		description += "\n\nEach stdout line is one event: cursor=N change=created|edited|state task=ID version=N state=S source=local|slack channel=CHANNEL text=ESCAPED (channel is empty for local tasks), or one JSON object with --json. Without a cursor, currently open tasks are emitted first. Gateway reconnects are reported on stderr only. Watching never acknowledges or changes tasks."
+		description += "\n\nEach stdout line is one event: cursor=N change=created|edited|state task=ID version=N state=S source=local|slack channel=CHANNEL thread=THREAD_TS parent=TASK_ID text=ESCAPED (channel and thread are empty for local tasks; parent is set for a thread follow-up), or one JSON object with --json. Without a cursor, currently open tasks are emitted first. Gateway reconnects are reported on stderr only. Watching never acknowledges or changes tasks."
 	case "purge":
 		description += "\n\nProvide --before and exactly one of --dry-run or --confirm. Warning: confirmed removal is irreversible."
 	case "slack.file":

@@ -96,3 +96,15 @@ func TestPaginationContinuationIsHumanOnlyAndShellSafe(t *testing.T) {
 		t.Fatalf("unexpected final-page continuation: %q", out.String())
 	}
 }
+
+func TestHumanTaskCardNamesChannelThreadAndParent(t *testing.T) {
+	var out bytes.Buffer
+	task := map[string]any{"task_id": "FollowUpTaskIdFollowUp", "state": "open", "source_kind": "slack", "version": 1, "text": "Perfect",
+		"slack_source": map[string]any{"channel_id": "C0BAQM6JEAJ", "thread_ts": "1700000000.000001", "parent_task_id": "RootTaskIdRootTaskIdRo"}}
+	if err := renderHuman(&out, task); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Slack C0BAQM6JEAJ  thread 1700000000.000001  follow-up of RootTaskIdRootTaskIdRo") {
+		t.Fatalf("card=%q", out.String())
+	}
+}

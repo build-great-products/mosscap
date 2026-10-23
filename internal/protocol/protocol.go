@@ -337,6 +337,7 @@ type SlackSourceDTO struct {
 	MessageTS            string  `json:"message_ts"`
 	ThreadTS             string  `json:"thread_ts"`
 	Permalink            string  `json:"permalink,omitempty"`
+	ParentTaskID         string  `json:"parent_task_id,omitempty"`
 	LatestEventAt        string  `json:"latest_event_at"`
 	SourceDeletedAt      *string `json:"source_deleted_at,omitempty"`
 }

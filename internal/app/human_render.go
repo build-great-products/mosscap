@@ -135,6 +135,13 @@ func renderTaskCard(out *bytes.Buffer, task map[string]any) {
 		fmt.Fprintf(out, "  updated %s", updated)
 	}
 	fmt.Fprintln(out)
+	if source, ok := task["slack_source"].(map[string]any); ok {
+		fmt.Fprintf(out, "Slack %s  thread %s", present(source["channel_id"]), present(source["thread_ts"]))
+		if parent := present(source["parent_task_id"]); parent != "" {
+			fmt.Fprintf(out, "  follow-up of %s", parent)
+		}
+		fmt.Fprintln(out)
+	}
 	renderCardText(out, fmt.Sprint(task["text"]))
 }
 func renderMessageCard(out *bytes.Buffer, message map[string]any) {

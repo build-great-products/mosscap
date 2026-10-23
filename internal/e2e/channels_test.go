@@ -63,7 +63,7 @@ func TestEveryMemberChannelAdmitsAndCarriesItsChannel(t *testing.T) {
 		t.Fatalf("pitch sends=%d", n)
 	}
 	watch := startWatchProcess(t, h.binary, h.env, "--since", "0")
-	for i, want := range []string{"source=slack channel=" + mainChannel + " text=<@U012BOT> main work", "source=slack channel=" + pitchChannel + " text=<@U012BOT> pitch work"} {
+	for i, want := range []string{"source=slack channel=" + mainChannel + " thread=" + mainMentionTS + " parent= text=<@U012BOT> main work", "source=slack channel=" + pitchChannel + " thread=" + pitchMentionTS + " parent= text=<@U012BOT> pitch work"} {
 		if got := watch.next(t); !strings.Contains(got, "task="+ids[i]+" ") || !strings.HasSuffix(got, want) {
 			t.Fatalf("watch line %d=%q want suffix %q", i, got, want)
 		}

@@ -1269,7 +1269,7 @@ func slackTaskActionsDTO(source store.SlackSource, effect *store.SlackEffect, st
 }
 
 func slackSourceDTO(s store.SlackSource) *protocol.SlackSourceDTO {
-	out := &protocol.SlackSourceDTO{InitialSourceEventID: s.InitialSourceEventID, TeamID: s.TeamID, ChannelID: s.ChannelID, AuthorUserID: s.AuthorUserID, MessageTS: s.MessageTS, ThreadTS: s.ThreadTS, Permalink: s.Permalink, LatestEventAt: stamp(time.UnixMicro(s.LatestEventAtUS))}
+	out := &protocol.SlackSourceDTO{InitialSourceEventID: s.InitialSourceEventID, TeamID: s.TeamID, ChannelID: s.ChannelID, AuthorUserID: s.AuthorUserID, MessageTS: s.MessageTS, ThreadTS: s.ThreadTS, Permalink: s.Permalink, ParentTaskID: s.ParentTaskID, LatestEventAt: stamp(time.UnixMicro(s.LatestEventAtUS))}
 	if s.SourceDeletedAt != nil {
 		v := stamp(*s.SourceDeletedAt)
 		out.SourceDeletedAt = &v
