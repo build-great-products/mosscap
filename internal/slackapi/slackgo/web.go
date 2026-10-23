@@ -388,6 +388,10 @@ func (web *Web) AddReaction(ctx context.Context, request slackapi.ReactionReques
 		return invalidRequest()
 	}
 	err := web.client.AddReactionContext(ctx, request.Emoji, slack.ItemRef{Channel: request.ChannelID, Timestamp: string(request.MessageTS)})
+	if slackErrorCode(err) == "already_reacted" {
+		// The requested end state already holds; this is a conclusive success.
+		return nil
+	}
 	return sanitizeError(err)
 }
 
@@ -399,6 +403,10 @@ func (web *Web) RemoveReaction(ctx context.Context, request slackapi.ReactionReq
 		return invalidRequest()
 	}
 	err := web.client.RemoveReactionContext(ctx, request.Emoji, slack.ItemRef{Channel: request.ChannelID, Timestamp: string(request.MessageTS)})
+	if slackErrorCode(err) == "no_reaction" {
+		// The reaction is already absent, which is the requested end state.
+		return nil
+	}
 	return sanitizeError(err)
 }
 

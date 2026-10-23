@@ -85,6 +85,16 @@ func sanitizeError(err error) error {
 	return slackapi.NewExternalError(slackapi.ReasonUnavailable, slackapi.DiagnosticUnavailable, "", nil)
 }
 
+// slackErrorCode returns the normalized Web API error code of an ok:false
+// response, or "" for any other error. Callers use it only for comparisons.
+func slackErrorCode(err error) string {
+	var slackError slack.SlackErrorResponse
+	if !errors.As(err, &slackError) {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(slackError.Err))
+}
+
 func slackAPIError(code string) (slackapi.ErrorReason, slackapi.DiagnosticCode) {
 	switch strings.ToLower(strings.TrimSpace(code)) {
 	case "invalid_auth", "not_authed", "account_inactive":

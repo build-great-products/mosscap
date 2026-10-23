@@ -302,6 +302,34 @@ func TestReactionRequiresProvenOKResponse(t *testing.T) {
 	}
 }
 
+func TestReactionAlreadyInRequestedStateIsConfirmed(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		code   string
+		remove bool
+	}{{"already_reacted", false}, {"no_reaction", true}} {
+		tc := tc
+		t.Run(tc.code, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/json")
+				writeJSON(t, writer, map[string]any{"ok": false, "error": tc.code})
+			}))
+			defer server.Close()
+			web := NewWeb("xoxb-test", WebAPIURL(server.URL))
+			request := slackapi.ReactionRequest{ChannelID: "C012ABC", MessageTS: "1700000000.000001", Emoji: "eyes"}
+			var err error
+			if tc.remove {
+				err = web.RemoveReaction(context.Background(), request)
+			} else {
+				err = web.AddReaction(context.Background(), request)
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.code, err)
+			}
+		})
+	}
+}
+
 func TestHTTPStatusClassificationDependsOnSubmissionPoint(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
