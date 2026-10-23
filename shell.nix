@@ -3,8 +3,6 @@
 pkgs.mkShell {
   packages = with pkgs; [
     go_1_26
-    nodejs_26
-    (pnpm.override { nodejs-slim = nodejs-slim_26; })
     just
   ];
 

@@ -5,7 +5,7 @@ default:
 
 # Format all Go source files.
 fmt:
-    gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
+    gofmt -w $(find . -name '*.go' -not -path './vendor/*')
 
 # Run the test suite.
 test:
@@ -15,8 +15,12 @@ test:
 vet:
     go vet ./...
 
-# Run the tests and static checks.
-check: test vet
+# Fail if any Go source file is not gofmt-formatted.
+fmt-check:
+    test -z "$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
+
+# Run the formatting check, tests, and static checks.
+check: fmt-check test vet
 
 # Build the CLI binary.
 build:
