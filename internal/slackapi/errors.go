@@ -209,7 +209,7 @@ func VerificationAdvice(code DiagnosticCode) string {
 	case DiagnosticTeamMismatch, DiagnosticBotMismatch:
 		return "Check that the installed Slack app belongs to the intended workspace, then restart or gateway reload."
 	case DiagnosticChannelNotFound, DiagnosticNotInChannel:
-		return "Check allowlisted channel access and invite the bot to that channel, then restart or gateway reload."
+		return "Check channel access and invite the bot to that channel, then restart or gateway reload."
 	case DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel:
 		return "Configure a writable public or private channel where the bot is a member, then restart or gateway reload."
 	case DiagnosticInvalidRequest:

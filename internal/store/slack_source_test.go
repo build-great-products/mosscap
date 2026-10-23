@@ -12,7 +12,9 @@ import (
 	"github.com/stayradiated/mosscap/internal/clock"
 )
 
-var sourceTestPolicy = SlackAdmissionPolicy{TeamID: "T12345678", Channels: []string{"C12345678"}, BotUserID: "U99999999"}
+var sourceTestPolicy = SlackAdmissionPolicy{TeamID: "T12345678", BotUserID: "U99999999"}
+
+const sourceTestChannel = "C12345678"
 
 func sourceTestEvent(id string, kind SlackSourceEventKind, order int64) SlackSourceEvent {
 	return SlackSourceEvent{
@@ -20,7 +22,7 @@ func sourceTestEvent(id string, kind SlackSourceEventKind, order int64) SlackSou
 		EnvelopeID:     "env-" + id,
 		EventKind:      kind,
 		TeamID:         sourceTestPolicy.TeamID,
-		ChannelID:      sourceTestPolicy.Channels[0],
+		ChannelID:      sourceTestChannel,
 		UserID:         "U12345678",
 		MessageTS:      "1700000000.000001",
 		Text:           "do this <@U99999999>  \r\nnext\t",
@@ -84,7 +86,6 @@ func TestSlackAdmissionPolicyAndMalformedResultsAreDurableAndSafe(t *testing.T) 
 		want   SlackAdmissionResult
 	}{
 		{"workspace", func(e *SlackSourceEvent) { e.TeamID = "T87654321" }, SlackIgnoredWorkspace},
-		{"channel", func(e *SlackSourceEvent) { e.ChannelID = "G87654321" }, SlackIgnoredChannel},
 		{"chatter", func(e *SlackSourceEvent) { e.Text = "just talking" }, SlackIgnoredUnmentioned},
 		{"bot", func(e *SlackSourceEvent) { e.UserID, e.BotID, e.Text = "", "B12345678", "" }, SlackIgnoredBot},
 	}
@@ -428,7 +429,7 @@ func TestSlackRepositoryRejectsSchemaValidLocalTaskSource(t *testing.T) {
 	}
 }
 
-func TestSlackAdmissionWithoutAllowlistAdmitsEveryChannelSeparately(t *testing.T) {
+func TestSlackMentionsInEveryChannelAreAdmittedSeparately(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	open := SlackAdmissionPolicy{TeamID: sourceTestPolicy.TeamID, BotUserID: sourceTestPolicy.BotUserID}
@@ -445,7 +446,7 @@ func TestSlackAdmissionWithoutAllowlistAdmitsEveryChannelSeparately(t *testing.T
 			t.Fatalf("%s source=%+v err=%v", channel, source, err)
 		}
 	}
-	if _, err := s.CommitSlackSourceEvent(ctx, SlackAdmissionPolicy{TeamID: "T12345678", BotUserID: "U99999999", Channels: []string{"D12345678"}}, sourceTestEvent("Ev-bad-policy", SlackEventAppMention, 200)); err == nil {
-		t.Fatal("accepted a DM channel in the allowlist")
+	if _, err := s.CommitSlackSourceEvent(ctx, SlackAdmissionPolicy{TeamID: "T12345678", BotUserID: "B99999999"}, sourceTestEvent("Ev-bad-policy", SlackEventAppMention, 200)); err == nil {
+		t.Fatal("accepted a bot ID as the policy's bot user")
 	}
 }

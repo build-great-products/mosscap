@@ -45,7 +45,7 @@ func TestSlackVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_allowlist": "C012ABC"} {
+	for key, value := range map[string]string{"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test"} {
 		set := config.Set
 		if key == "slack_app_token" || key == "slack_bot_token" {
 			set = config.SetSecret
@@ -87,7 +87,6 @@ func TestSlackVerticalSlice(t *testing.T) {
 	web := fake.NewWeb(
 		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
-		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
 		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 17, Cursor: "history-cursor"}, Result: slackapi.MessagePage{NextCursor: "next-history-cursor"}},
 		fake.Step{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: "C012ABC", MessageTS: "1700000009.000001"}},
@@ -193,18 +192,18 @@ func TestSlackVerticalSlice(t *testing.T) {
 		}
 		return out
 	}
-	if out := run("slack", "history", "--limit", "17", "--cursor", "history-cursor", "--json"); !json.Valid(out) || !strings.Contains(string(out), `"next_cursor":"next-history-cursor"`) {
+	if out := run("slack", "history", "--channel", "C012ABC", "--limit", "17", "--cursor", "history-cursor", "--json"); !json.Valid(out) || !strings.Contains(string(out), `"next_cursor":"next-history-cursor"`) {
 		t.Fatalf("history=%s", out)
 	}
-	if out := run("slack", "send", "--text", "confirmed", "--request-id", "confirmed", "--json"); !json.Valid(out) {
+	if out := run("slack", "send", "--channel", "C012ABC", "--text", "confirmed", "--request-id", "confirmed", "--json"); !json.Valid(out) {
 		t.Fatalf("send=%s", out)
 	}
 	// A post-submit timeout is ambiguous. It is surfaced as CLI exit 8 and
 	// neither it nor a later inspection may consume a further fake write step.
-	if out := runFailure(8, "slack", "send", "--text", "maybe", "--request-id", "ambiguous", "--json"); !strings.Contains(string(out), "ambiguous_external_outcome") {
+	if out := runFailure(8, "slack", "send", "--channel", "C012ABC", "--text", "maybe", "--request-id", "ambiguous", "--json"); !strings.Contains(string(out), "ambiguous_external_outcome") {
 		t.Fatalf("ambiguous output=%s", out)
 	}
-	if got := len(web.Calls()); got != 7 {
+	if got := len(web.Calls()); got != 6 {
 		t.Fatalf("Web calls=%d; ambiguous retry occurred", got)
 	}
 	if out := run("effect", "list", "--state", "ambiguous", "--json"); !json.Valid(out) || !strings.Contains(string(out), `"state":"ambiguous"`) {

@@ -40,7 +40,7 @@ const (
 	CapabilityTaskContext         = "task_context_v1"
 	CapabilityTaskChanges         = "task_changes_v1"
 	// CapabilitySlackChannels means Slack commands accept an explicit channel
-	// and admission is not limited to one configured channel.
+	// and admission covers every channel the bot is a member of.
 	CapabilitySlackChannels = "slack_channels_v1"
 )
 
@@ -219,8 +219,7 @@ type TaskContextDTO struct {
 
 // Slack command params carry an optional Channel. The workspace is always the
 // active runtime's. When Channel is empty the gateway uses the channel of the
-// related Task, then the only allowlisted channel; otherwise it is a usage
-// error. Every channel must pass the runtime's allowlist.
+// related Task; otherwise it is a usage error (channel_required).
 type SlackHistoryParams struct {
 	Channel string `json:"channel,omitempty"`
 	Limit   int    `json:"limit,omitempty"`
@@ -436,7 +435,6 @@ type SlackRuntimeStatusDTO struct {
 	State                          string               `json:"state"`
 	TeamID                         string               `json:"team_id,omitempty"`
 	BotUserID                      string               `json:"bot_user_id,omitempty"`
-	Channels                       []string             `json:"channels,omitempty"`
 	IdentitySource                 string               `json:"identity_source,omitempty"`
 	ReconnectAttempt               int                  `json:"reconnect_attempt"`
 	BackoffMilliseconds            int64                `json:"backoff_milliseconds"`

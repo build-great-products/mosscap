@@ -13,7 +13,9 @@ import (
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
-var policy = store.SlackAdmissionPolicy{TeamID: "T12345678", Channels: []string{"C12345678"}, BotUserID: "U99999999"}
+var policy = store.SlackAdmissionPolicy{TeamID: "T12345678", BotUserID: "U99999999"}
+
+const testChannel = "C12345678"
 
 type fixedClock struct{ at time.Time }
 
@@ -53,7 +55,7 @@ func (s *fakeStore) call(t *testing.T) commitCall {
 
 func envelope(id string) (slackapi.Envelope, *fake.AckRecorder) {
 	ack, recorder := fake.NewAckRecorder(nil)
-	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: policy.TeamID, ChannelID: policy.Channels[0], UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U99999999>", Ack: ack}, recorder
+	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: policy.TeamID, ChannelID: testChannel, UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U99999999>", Ack: ack}, recorder
 }
 
 func TestHandleCommitsBeforeOneShotAcknowledgementAndNormalizes(t *testing.T) {

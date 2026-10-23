@@ -182,7 +182,6 @@ func verifiedSlackWeb() slackapi.Web {
 	return fake.NewWeb(
 		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
-		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
 		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 	)
 }
@@ -196,7 +195,7 @@ func newTaskReplySource(t *testing.T, ledger *store.Store, id string) store.Slac
 	t.Helper()
 	ctx := context.Background()
 	id = strings.ReplaceAll(id, " ", "_")
-	source, err := ledger.CommitSlackSourceEvent(ctx, store.SlackAdmissionPolicy{TeamID: "T012ABC", Channels: []string{"C012ABC"}, BotUserID: "U012BOT"}, store.SlackSourceEvent{SourceEventID: "Ev-" + id, EventKind: store.SlackEventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", ThreadTS: "1699999999.000001", Text: "do this <@U012BOT>", SlackEventAtUS: 1700000000000001})
+	source, err := ledger.CommitSlackSourceEvent(ctx, store.SlackAdmissionPolicy{TeamID: "T012ABC", BotUserID: "U012BOT"}, store.SlackSourceEvent{SourceEventID: "Ev-" + id, EventKind: store.SlackEventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", ThreadTS: "1699999999.000001", Text: "do this <@U012BOT>", SlackEventAtUS: 1700000000000001})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +207,6 @@ func newTaskReplyServer(t *testing.T, ledger *store.Store, steps ...fake.Step) (
 	verification := []fake.Step{
 		{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
-		{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
 		{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 	}
 	web := fake.NewWeb(append(verification, steps...)...)
@@ -217,7 +215,7 @@ func newTaskReplyServer(t *testing.T, ledger *store.Store, steps ...fake.Step) (
 		t.Fatal(err)
 	}
 	c := testConfig(config.Paths{})
-	c.SlackAppToken, c.SlackBotToken, c.SlackChannelAllowlist = "xapp-test", "xoxb-test", "C012ABC"
+	c.SlackAppToken, c.SlackBotToken = "xapp-test", "xoxb-test"
 	if err := runtime.Start(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +286,7 @@ func TestSlackTaskReactionLifecycleUsesDurableOrderedEffects(t *testing.T) {
 	if err := s.projectLatestTransition(ctx, source.TaskID); err != nil {
 		t.Fatal(err)
 	}
-	if len(web.Calls()) != 12 { // verification plus exactly four preflight/write pairs
+	if len(web.Calls()) != 11 { // verification plus exactly four preflight/write pairs
 		t.Fatalf("duplicate lifecycle action made a Slack call: %+v", web.Calls())
 	}
 }
@@ -335,7 +333,7 @@ func TestTaskReactionRecoveryDoesNotRemoveQueueWhenWorkingAddFails(t *testing.T)
 			t.Fatalf("queue removal prepared despite failed working add: %+v", effect)
 		}
 	}
-	if len(web.Calls()) != 8 { // verification plus two preflight/write pairs
+	if len(web.Calls()) != 7 { // verification plus two preflight/write pairs
 		t.Fatalf("unexpected recovery calls: %+v", web.Calls())
 	}
 }
@@ -400,7 +398,7 @@ func TestReopenedSlackTaskRestoresQueuedReactionEachCycle(t *testing.T) {
 	if err := s.projectLatestTransition(ctx, source.TaskID); err != nil {
 		t.Fatal(err)
 	}
-	if len(web.Calls()) != 14 {
+	if len(web.Calls()) != 13 {
 		t.Fatalf("duplicate projection changed reopened marker: %+v", web.Calls())
 	}
 	transitionAndProject(t, s, ledger, "reopen-done-again", source.TaskID, task.Done)
@@ -409,7 +407,7 @@ func TestReopenedSlackTaskRestoresQueuedReactionEachCycle(t *testing.T) {
 	if err != nil || len(effects) != 7 || effects[6].Emoji != queuedTaskReaction || effects[6].Kind != store.SlackEffectReact || effects[6].State != store.SlackEffectConfirmed {
 		t.Fatalf("reopened task did not restore queued marker per cycle: %+v err=%v", effects, err)
 	}
-	if len(web.Calls()) != 18 { // verification plus seven preflight/write pairs
+	if len(web.Calls()) != 17 { // verification plus seven preflight/write pairs
 		t.Fatalf("each reopen did not issue a fresh queued reaction: %+v", web.Calls())
 	}
 }
@@ -597,7 +595,7 @@ func TestSlackReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{
-		"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_allowlist": "C012ABC",
+		"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test",
 	} {
 		set := config.Set
 		if key == "slack_app_token" || key == "slack_bot_token" {
@@ -636,7 +634,7 @@ func TestSlackReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.TeamID != "T012ABC" || status.BotUserID != "U012BOT" || len(status.Channels) != 1 || status.Channels[0] != "C012ABC" || status.IdentitySource != "auth_test" {
+	if status.TeamID != "T012ABC" || status.BotUserID != "U012BOT" || status.IdentitySource != "auth_test" {
 		t.Fatalf("runtime identity status = %#v", status)
 	}
 	t.Cleanup(func() { s.closeSlack(); _ = ledger.Close() })

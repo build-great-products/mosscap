@@ -85,7 +85,7 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 		_ = rt.Close()
 		return nil, nil, "", err
 	}
-	policy := store.SlackAdmissionPolicy{TeamID: snapshot.TeamID, Channels: append([]string(nil), snapshot.Channels...), BotUserID: snapshot.BotUserID}
+	policy := store.SlackAdmissionPolicy{TeamID: snapshot.TeamID, BotUserID: snapshot.BotUserID}
 	coordinator = slackingest.NewWithOptions(ledger, policy, nil, slackingest.Options{
 		BeforeAcknowledge: func(ctx context.Context, event store.SlackSourceEvent, result store.SlackEventResult) error {
 			if result.AdmissionResult == store.SlackAdmitted {
@@ -193,9 +193,9 @@ func (s *Server) ops() (*slackops.Service, func(), error) {
 	}
 	if files, ok := snap.Web.(slackapi.FileTransfer); ok {
 		c := s.snapshot()
-		return slackops.NewWithFileTransfer(s.store, snap.Web, files, slackops.Scope{TeamID: snap.TeamID, Channels: snap.Channels}, int64(c.MaximumFileSize), c.MaximumFilesPerSlackOperation), snap.Release, nil
+		return slackops.NewWithFileTransfer(s.store, snap.Web, files, slackops.Scope{TeamID: snap.TeamID}, int64(c.MaximumFileSize), c.MaximumFilesPerSlackOperation), snap.Release, nil
 	}
-	return slackops.New(s.store, snap.Web, slackops.Scope{TeamID: snap.TeamID, Channels: snap.Channels}), snap.Release, nil
+	return slackops.New(s.store, snap.Web, slackops.Scope{TeamID: snap.TeamID}), snap.Release, nil
 }
 func (s *Server) slackStatus(ctx context.Context) (*protocol.SlackRuntimeStatusDTO, error) {
 	counts, err := s.store.SlackEffectCounts(ctx)
@@ -213,7 +213,6 @@ func (s *Server) slackStatus(ctx context.Context) (*protocol.SlackRuntimeStatusD
 		if err == nil {
 			out.TeamID = snapshot.TeamID
 			out.BotUserID = snapshot.BotUserID
-			out.Channels = append([]string(nil), snapshot.Channels...)
 			out.IdentitySource = "auth_test"
 			snapshot.Release()
 		}
@@ -403,12 +402,12 @@ func effectIntent(command string, p protocol.Request) (store.SlackEffectIntent, 
 }
 
 // ErrChannelRequired means a Slack command named no channel and none could be
-// derived from its task or a single-channel allowlist.
+// derived from its task.
 var ErrChannelRequired = errors.New("Slack channel is required: pass --channel, or --task for a Slack task")
 
 // resolveChannel chooses the channel of a Slack command: the explicit one, else
-// the related task's source channel, else the only allowlisted channel.
-func (s *Server) resolveChannel(ctx context.Context, op *slackops.Service, channel, taskSelector string) (string, error) {
+// the related task's source channel.
+func (s *Server) resolveChannel(ctx context.Context, channel, taskSelector string) (string, error) {
 	if channel != "" {
 		return channel, nil
 	}
@@ -420,9 +419,6 @@ func (s *Server) resolveChannel(ctx context.Context, op *slackops.Service, chann
 		if !errors.Is(err, store.ErrNotFound) {
 			return "", err
 		}
-	}
-	if channels := op.Channels(); len(channels) == 1 {
-		return channels[0], nil
 	}
 	return "", ErrChannelRequired
 }

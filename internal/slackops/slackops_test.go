@@ -17,7 +17,7 @@ import (
 
 var testTarget = store.SlackEffectTarget{TeamID: "T12345678", ChannelID: "C12345678"}
 
-var testScope = Scope{TeamID: testTarget.TeamID, Channels: []string{testTarget.ChannelID}}
+var testScope = Scope{TeamID: testTarget.TeamID}
 
 type cancelAfterPrepareStore struct {
 	EffectStore
@@ -370,7 +370,7 @@ func TestScopeRoutesEachOperationToItsChannelAndRejectsOthers(t *testing.T) {
 		fake.Step{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: "C0BAQM6JEAJ", MessageTS: "1700000001.000001"}},
 		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: "G0PRIVATE1", Limit: 50}},
 	)
-	// An empty allowlist admits every channel; Slack enforces membership.
+	// Every channel in the workspace is a target; Slack enforces membership.
 	open := New(ledger, web, Scope{TeamID: testTarget.TeamID})
 	if !open.Allows(testTarget.TeamID, "C0CC6JQ4A2U") || open.Allows("T99999999", "C0CC6JQ4A2U") || open.Allows(testTarget.TeamID, "D012DM") {
 		t.Fatal("open scope admission is wrong")
@@ -382,14 +382,10 @@ func TestScopeRoutesEachOperationToItsChannelAndRejectsOthers(t *testing.T) {
 	if got := web.Calls()[0].Request.(slackapi.PostMessageRequest); got.ChannelID != "C0BAQM6JEAJ" {
 		t.Fatalf("post=%+v", got)
 	}
-	narrow := New(ledger, web, Scope{TeamID: testTarget.TeamID, Channels: []string{"C0BAQM6JEAJ", "G0PRIVATE1"}})
-	if _, err := narrow.Execute(context.Background(), "outside-allowlist", "C0CC6JQ4A2U", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "no"}); !errors.Is(err, ErrInvalidTarget) {
-		t.Fatalf("outside allowlist err=%v", err)
+	if _, err := open.Execute(context.Background(), "dm-send", "D012DM", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "no"}); !errors.Is(err, ErrInvalidTarget) {
+		t.Fatalf("DM target err=%v", err)
 	}
-	if _, err := narrow.History(context.Background(), "C0CC6JQ4A2U", 0, ""); !errors.Is(err, ErrInvalidTarget) {
-		t.Fatalf("outside allowlist history err=%v", err)
-	}
-	if _, err := narrow.History(context.Background(), "G0PRIVATE1", 0, ""); err != nil {
+	if _, err := open.History(context.Background(), "G0PRIVATE1", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	effects, err := ledger.ListSlackEffects(context.Background(), nil, 10)

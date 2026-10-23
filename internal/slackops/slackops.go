@@ -20,7 +20,7 @@ const maxUploadFiles = 20
 
 var (
 	ErrUnavailable   = errors.New("Slack operations are unavailable")
-	ErrInvalidTarget = errors.New("Slack target is not an admitted channel")
+	ErrInvalidTarget = errors.New("Slack target is not a C... or G... channel in the active workspace")
 )
 
 // EffectStore is the narrow durable boundary used by Service.
@@ -74,28 +74,15 @@ func (e *FailureError) Error() string {
 	return fmt.Sprintf("Slack operation failed (%s)", e.Diagnostic)
 }
 
-// Scope is the authority of one verified runtime snapshot: its workspace and
-// the channel allowlist. An empty allowlist admits every channel the bot is a
-// member of; Slack itself enforces membership.
+// Scope is the authority of one verified runtime snapshot: its workspace.
+// Every channel in it is a target; Slack itself enforces bot membership.
 type Scope struct {
-	TeamID   string
-	Channels []string
+	TeamID string
 }
 
 // Allows reports whether channelID in teamID is within the scope.
 func (s Scope) Allows(teamID, channelID string) bool {
-	if teamID != s.TeamID || slackapi.ValidateChannelID(channelID) != nil {
-		return false
-	}
-	if len(s.Channels) == 0 {
-		return true
-	}
-	for _, allowed := range s.Channels {
-		if allowed == channelID {
-			return true
-		}
-	}
-	return false
+	return teamID == s.TeamID && slackapi.ValidateChannelID(channelID) == nil
 }
 
 // Service is pinned to one verified runtime snapshot's Web client and scope.
@@ -190,9 +177,6 @@ func (s *Service) Allows(teamID, channelID string) bool {
 
 // TeamID is the verified workspace of this service.
 func (s *Service) TeamID() string { return s.scope.TeamID }
-
-// Channels returns the channel allowlist; empty admits every member channel.
-func (s *Service) Channels() []string { return append([]string(nil), s.scope.Channels...) }
 
 // Execute durably prepares, claims, and executes one public Slack mutation.
 // It never retries a submitted effect, including after an uncertain response.
@@ -546,11 +530,6 @@ func (s *Service) readyUpload() error {
 func (s *Service) validTarget() error {
 	if err := slackapi.ValidateTeamID(s.scope.TeamID); err != nil {
 		return ErrUnavailable
-	}
-	for _, channelID := range s.scope.Channels {
-		if err := slackapi.ValidateChannelID(channelID); err != nil {
-			return ErrUnavailable
-		}
 	}
 	return nil
 }

@@ -35,7 +35,6 @@ type Config struct {
 	Version                       int      `toml:"version" json:"version"`
 	SlackAppToken                 string   `toml:"slack_app_token" json:"-"`
 	SlackBotToken                 string   `toml:"slack_bot_token" json:"-"`
-	SlackChannelAllowlist         string   `toml:"slack_channel_allowlist" json:"slack_channel_allowlist"`
 	SlackReconnectInitialBackoff  string   `toml:"slack_reconnect_initial_backoff" json:"slack_reconnect_initial_backoff"`
 	SlackReconnectMaxBackoff      string   `toml:"slack_reconnect_max_backoff" json:"slack_reconnect_max_backoff"`
 	SlackReconnectJitter          bool     `toml:"slack_reconnect_jitter" json:"slack_reconnect_jitter"`
@@ -276,8 +275,12 @@ func decode(loc Location, b []byte) (Config, error) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) != 0 {
-		key := undecoded[0].String()
-		return Config{}, unknownKeyError(key)
+		// Name every unknown or obsolete key, so an upgrade needs one edit.
+		errs := make([]error, 0, len(undecoded))
+		for _, key := range undecoded {
+			errs = append(errs, unknownKeyError(key.String()))
+		}
+		return Config{}, errors.Join(errs...)
 	}
 	for _, key := range configKeys {
 		if !md.IsDefined(key) {
@@ -305,8 +308,8 @@ func unknownKeyError(key string) error {
 	if key == "trusted_user_ids" || strings.HasSuffix(key, ".trusted_user_ids") {
 		return fmt.Errorf("decode config: obsolete %q: trusted users were removed and every workspace member may send work; remove it", key)
 	}
-	if key == "slack_channel_id" {
-		return fmt.Errorf("decode config: obsolete %q: replace it with slack_channel_allowlist, set to the same ID to keep single-channel admission or to \"\" to admit every channel the bot is a member of", key)
+	if key == "slack_channel_id" || key == "slack_channel_allowlist" {
+		return fmt.Errorf("decode config: obsolete %q: channel restrictions were removed and work is admitted from every channel the bot is a member of; remove it", key)
 	}
 	if key == "delivery_lease" || key == "leader_heartbeat" || key == "leader_expiry" {
 		return fmt.Errorf("decode config: obsolete %q: Pi delivery was removed; remove it", key)
@@ -318,7 +321,7 @@ func unknownKeyError(key string) error {
 }
 
 var configKeys = []string{
-	"version", "slack_app_token", "slack_bot_token", "slack_channel_allowlist",
+	"version", "slack_app_token", "slack_bot_token",
 	"slack_reconnect_initial_backoff",
 	"slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size",
 	"maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame",
@@ -343,9 +346,6 @@ func Validate(c Config) error {
 		return err
 	}
 	if err := optionalToken("slack_bot_token", c.SlackBotToken); err != nil {
-		return err
-	}
-	if _, err := parseChannelAllowlist(c.SlackChannelAllowlist); err != nil {
 		return err
 	}
 	initial, err := positiveDuration("slack_reconnect_initial_backoff", c.SlackReconnectInitialBackoff)
@@ -375,36 +375,6 @@ func Validate(c Config) error {
 		return errors.New("local_protocol_maximum_frame must be between 65536 and 16777216")
 	}
 	return nil
-}
-
-// ChannelAllowlist returns the configured channel allowlist in file order. An
-// empty result admits every channel the bot is a member of.
-func ChannelAllowlist(c Config) []string {
-	channels, _ := parseChannelAllowlist(c.SlackChannelAllowlist)
-	return channels
-}
-
-func parseChannelAllowlist(value string) ([]string, error) {
-	if strings.TrimSpace(value) == "" {
-		return nil, nil
-	}
-	var channels []string
-	seen := map[string]bool{}
-	for _, part := range strings.Split(value, ",") {
-		id := strings.TrimSpace(part)
-		if !slackID.MatchString(id) || (id[0] != 'C' && id[0] != 'G') {
-			return nil, errors.New("slack_channel_allowlist must be empty or comma-separated Slack channel IDs beginning with C/G")
-		}
-		if seen[id] {
-			return nil, errors.New("slack_channel_allowlist must not repeat a channel ID")
-		}
-		seen[id] = true
-		channels = append(channels, id)
-	}
-	if len(channels) > 100 {
-		return nil, errors.New("slack_channel_allowlist must not list more than 100 channels")
-	}
-	return channels, nil
 }
 
 func optionalToken(name, value string) error {
@@ -499,9 +469,8 @@ version = %d
 # Slack Socket Mode app token and bot token. Both are redacted from all output.
 slack_app_token = %q
 slack_bot_token = %q
-# Comma-separated channel IDs (C... or G...) that may submit work. Empty admits
-# every channel the bot is a member of. Workspace and bot user IDs are derived from auth.test.
-slack_channel_allowlist = %q
+# Work is admitted from every channel the bot is a member of. Workspace and bot
+# user IDs are derived from auth.test.
 
 # Slack reconnect uses exponential backoff in this inclusive range.
 slack_reconnect_initial_backoff = %q
@@ -514,7 +483,7 @@ maximum_file_size = %q
 maximum_files_per_slack_operation = %d
 temporary_download_lifetime = %q
 local_protocol_maximum_frame = %d
-`, c.Version, c.SlackAppToken, c.SlackBotToken, c.SlackChannelAllowlist,
+`, c.Version, c.SlackAppToken, c.SlackBotToken,
 		c.SlackReconnectInitialBackoff, c.SlackReconnectMaxBackoff,
 		c.SlackReconnectJitter, c.SQLiteBusyTimeout, c.MaximumFileSize.String(), c.MaximumFilesPerSlackOperation,
 		c.TemporaryDownloadLifetime, c.LocalProtocolMaximumFrame))
@@ -523,7 +492,6 @@ local_protocol_maximum_frame = %d
 var setMu sync.Mutex
 
 var settable = map[string]bool{
-	"slack_channel_allowlist":         true,
 	"slack_reconnect_initial_backoff": true, "slack_reconnect_max_backoff": true, "slack_reconnect_jitter": true,
 	"sqlite_busy_timeout": true, "maximum_file_size": true, "maximum_files_per_slack_operation": true,
 	"temporary_download_lifetime": true, "local_protocol_maximum_frame": true,
@@ -623,8 +591,6 @@ func setValue(c *Config, key, input string) ([]byte, error) {
 		return stringValue(&c.SlackAppToken)
 	case "slack_bot_token":
 		return stringValue(&c.SlackBotToken)
-	case "slack_channel_allowlist":
-		return stringValue(&c.SlackChannelAllowlist)
 	case "slack_reconnect_initial_backoff":
 		return durationValue(&c.SlackReconnectInitialBackoff)
 	case "slack_reconnect_max_backoff":
@@ -823,29 +789,24 @@ func syncDir(path string) error {
 // View is safe for all display and protocol output: token values are not part
 // of its structure.
 type View struct {
-	Version                       int      `json:"version"`
-	Paths                         Paths    `json:"paths"`
-	SlackAppTokenPresent          bool     `json:"slack_app_token_present"`
-	SlackBotTokenPresent          bool     `json:"slack_bot_token_present"`
-	SlackChannelAllowlist         []string `json:"slack_channel_allowlist"`
-	SlackIdentitySource           string   `json:"slack_identity_source"`
-	SlackReconnectInitialBackoff  string   `json:"slack_reconnect_initial_backoff"`
-	SlackReconnectMaxBackoff      string   `json:"slack_reconnect_max_backoff"`
-	SlackReconnectJitter          bool     `json:"slack_reconnect_jitter"`
-	SQLiteBusyTimeout             string   `json:"sqlite_busy_timeout"`
-	MaximumFileSize               int64    `json:"maximum_file_size"`
-	MaximumFilesPerSlackOperation int      `json:"maximum_files_per_slack_operation"`
-	TemporaryDownloadLifetime     string   `json:"temporary_download_lifetime"`
-	LocalProtocolMaximumFrame     int      `json:"local_protocol_maximum_frame"`
+	Version                       int    `json:"version"`
+	Paths                         Paths  `json:"paths"`
+	SlackAppTokenPresent          bool   `json:"slack_app_token_present"`
+	SlackBotTokenPresent          bool   `json:"slack_bot_token_present"`
+	SlackIdentitySource           string `json:"slack_identity_source"`
+	SlackReconnectInitialBackoff  string `json:"slack_reconnect_initial_backoff"`
+	SlackReconnectMaxBackoff      string `json:"slack_reconnect_max_backoff"`
+	SlackReconnectJitter          bool   `json:"slack_reconnect_jitter"`
+	SQLiteBusyTimeout             string `json:"sqlite_busy_timeout"`
+	MaximumFileSize               int64  `json:"maximum_file_size"`
+	MaximumFilesPerSlackOperation int    `json:"maximum_files_per_slack_operation"`
+	TemporaryDownloadLifetime     string `json:"temporary_download_lifetime"`
+	LocalProtocolMaximumFrame     int    `json:"local_protocol_maximum_frame"`
 }
 
 // Redact returns a structurally token-free configuration view.
 func Redact(c Config) View {
-	channels, _ := parseChannelAllowlist(c.SlackChannelAllowlist)
-	if channels == nil {
-		channels = []string{}
-	}
-	return View{c.Version, c.Paths, c.SlackAppToken != "", c.SlackBotToken != "", channels, "verified_at_runtime",
+	return View{c.Version, c.Paths, c.SlackAppToken != "", c.SlackBotToken != "", "verified_at_runtime",
 		c.SlackReconnectInitialBackoff,
 		c.SlackReconnectMaxBackoff, c.SlackReconnectJitter, c.SQLiteBusyTimeout, int64(c.MaximumFileSize),
 		c.MaximumFilesPerSlackOperation, c.TemporaryDownloadLifetime, c.LocalProtocolMaximumFrame}

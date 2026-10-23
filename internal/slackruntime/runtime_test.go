@@ -39,14 +39,13 @@ func validConfig(t *testing.T) config.Config {
 	}
 	c.SlackAppToken = "xapp-test"
 	c.SlackBotToken = "xoxb-test"
-	c.SlackChannelAllowlist = "C012ABC"
 	c.SlackReconnectJitter = false
 	c.SlackReconnectInitialBackoff = "1ms"
 	c.SlackReconnectMaxBackoff = "2ms"
 	return c
 }
 func verifiedWeb() slackapi.Web {
-	return fake.NewWeb(fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}}, fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}}, fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}}, fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()})
+	return fake.NewWeb(fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}}, fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}}, fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()})
 }
 func TestStartFailureLeavesNoSnapshotAndSecretsSafe(t *testing.T) {
 	c := validConfig(t)

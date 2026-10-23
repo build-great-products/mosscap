@@ -22,9 +22,9 @@ func mentionIn(id, channel, ts, text string) (slackapi.Envelope, *fake.AckRecord
 	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: harnessTeam, ChannelID: channel, UserID: harnessUser, MessageTS: slackapi.Timestamp(ts), EventTS: slackapi.Timestamp(ts), Text: text, Ack: ack}, recorder
 }
 
-// TestEveryMemberChannelAdmitsAndCarriesItsChannel runs with an empty
-// allowlist: mentions in two channels both become tasks, their reactions and
-// replies go to their own channel, and task watch names each channel.
+// TestEveryMemberChannelAdmitsAndCarriesItsChannel: mentions in two channels
+// both become tasks, their reactions and replies go to their own channel, and
+// task watch names each channel.
 func TestEveryMemberChannelAdmitsAndCarriesItsChannel(t *testing.T) {
 	main, mainAck := mentionIn("main", mainChannel, mainMentionTS, "<@U012BOT> main work")
 	pitch, pitchAck := mentionIn("pitch", pitchChannel, pitchMentionTS, "<@U012BOT> pitch work")
@@ -55,7 +55,7 @@ func TestEveryMemberChannelAdmitsAndCarriesItsChannel(t *testing.T) {
 	if got := calls[len(calls)-1].Request.(slackapi.PostMessageRequest); got.ChannelID != mainChannel || got.ThreadTS != mainMentionTS {
 		t.Fatalf("--channel send=%+v", got)
 	}
-	// With several possible channels and no task, a channel is required.
+	// Without --channel or --task, a Slack command needs a channel.
 	if out, code := h.runExit("", "slack", "history", "--json"); code != 2 || !strings.Contains(string(out), "channel_required") {
 		t.Fatalf("history without channel exit=%d out=%s", code, out)
 	}
@@ -71,27 +71,30 @@ func TestEveryMemberChannelAdmitsAndCarriesItsChannel(t *testing.T) {
 	watch.stop(t)
 }
 
-// TestChannelAllowlistNarrowsAdmission ignores a member channel that is not
-// allowlisted and makes the only allowlisted channel the default.
-func TestChannelAllowlistNarrowsAdmission(t *testing.T) {
-	outside, outsideAck := mentionIn("outside", privateChannel, privateRemarkTS, "<@U012BOT> not here")
-	inside, insideAck := mentionIn("inside", mainChannel, mainMentionTS, "<@U012BOT> here")
-	h := newSlackHarness(t, map[string]string{"slack_channel_allowlist": mainChannel}, []fake.ReceiveStep{{Envelope: outside}, {Envelope: inside}}, steps(
-		verificationSteps(mainChannel),
-		reactionSteps(fake.AddReaction, mainChannel, mainMentionTS, "hourglass_flowing_sand"),
-		[]fake.Step{{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: mainChannel, Limit: 50}}},
+// TestPrivateChannelMentionIsAdmittedAndChannelIsAlwaysNamed: a mention in a
+// private member channel is admitted like any other, a lone task does not make
+// its channel the default, and a DM target is refused before any intent.
+func TestPrivateChannelMentionIsAdmittedAndChannelIsAlwaysNamed(t *testing.T) {
+	private, privateAck := mentionIn("private", privateChannel, privateRemarkTS, "<@U012BOT> private work")
+	h := newSlackHarness(t, nil, []fake.ReceiveStep{{Envelope: private}}, steps(
+		verificationSteps(),
+		reactionSteps(fake.AddReaction, privateChannel, privateRemarkTS, "hourglass_flowing_sand"),
+		[]fake.Step{{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: privateChannel, Limit: 50}}},
 	))
-	waitAcks(t, outsideAck, insideAck)
+	waitAcks(t, privateAck)
 	h.waitWebRemaining(1)
-	if n := h.count("SELECT count(*) FROM slack_source_events WHERE admission_result='ignored_channel' AND channel_id=?", privateChannel); n != 1 {
-		t.Fatalf("ignored_channel events=%d", n)
-	}
 	if ids := h.taskIDs(); len(ids) != 1 {
 		t.Fatalf("tasks=%v", ids)
 	}
-	h.run("", "slack", "history", "--json")
+	if out, code := h.runExit("", "slack", "history", "--json"); code != 2 || !strings.Contains(string(out), "channel_required") {
+		t.Fatalf("history without channel exit=%d out=%s", code, out)
+	}
+	h.run("", "slack", "history", "--channel", privateChannel, "--json")
 	h.waitWebDone()
-	if out, code := h.runExit("", "slack", "send", "--channel", pitchChannel, "--text", "nope", "--json"); code != 2 || !strings.Contains(string(out), "channel_not_admitted") {
-		t.Fatalf("send outside allowlist exit=%d out=%s", code, out)
+	if out, code := h.runExit("", "slack", "send", "--channel", "D012DM", "--text", "nope", "--json"); code != 2 {
+		t.Fatalf("send to a DM exit=%d out=%s", code, out)
+	}
+	if n := h.count("SELECT count(*) FROM slack_effects WHERE kind='send'"); n != 0 {
+		t.Fatalf("a refused target recorded %d sends", n)
 	}
 }

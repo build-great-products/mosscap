@@ -118,7 +118,7 @@ type User struct {
 	Deactivated bool   `json:"deactivated"`
 }
 
-// Channel contains access facts needed to verify an allowlisted channel.
+// Channel contains access facts needed to verify a target channel.
 type Channel struct {
 	ID         string `json:"id"`
 	TeamID     string `json:"team_id"`
@@ -131,20 +131,16 @@ type Channel struct {
 	MPIM       bool   `json:"mpim"`
 }
 
-// VerificationRequest is the immutable identity and authority expected by a
-// prepared runtime. ChannelIDs is the optional channel allowlist; each listed
-// channel must be a writable member channel. An empty list admits every
-// channel the bot belongs to and verifies none up front.
+// VerificationRequest is the immutable identity expected by a prepared
+// runtime. Empty fields accept whatever Slack authentication reports.
 type VerificationRequest struct {
-	TeamID     string
-	BotUserID  string
-	ChannelIDs []string
+	TeamID    string
+	BotUserID string
 }
 
 // VerificationResult contains only safe, proven configuration facts.
 type VerificationResult struct {
 	Identity AuthIdentity
 	Team     Team
-	Channels []Channel
 	Scopes   []Scope
 }

@@ -36,17 +36,14 @@ const (
 	harnessUser = "U12345678"
 )
 
-// verificationSteps are the Web calls a gateway makes before it starts: one
-// channel check per allowlisted channel.
-func verificationSteps(allowlist ...string) []fake.Step {
-	out := []fake.Step{
+// verificationSteps are the Web calls a gateway makes before it starts. No
+// channel is checked up front.
+func verificationSteps() []fake.Step {
+	return []fake.Step{
 		{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: harnessTeam, BotUserID: harnessBot}},
 		{Operation: fake.Team, Result: slackapi.Team{ID: harnessTeam}},
+		{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 	}
-	for _, channelID := range allowlist {
-		out = append(out, fake.Step{Operation: fake.Channel, Request: channelID, Result: slackapi.Channel{ID: channelID, TeamID: harnessTeam, Member: true, Accessible: true}})
-	}
-	return append(out, fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()})
 }
 
 // reactionSteps scripts the preflight read and write of one reaction effect.

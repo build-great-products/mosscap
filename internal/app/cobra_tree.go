@@ -436,5 +436,5 @@ func taskMutationFlags() []flagSpec {
 	return []flagSpec{channelFlag(), stringFlag("task", "Related durable task; also the default channel."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}
 }
 func channelFlag() flagSpec {
-	return stringFlag("channel", "Slack channel ID (C... or G...). Defaults to the --task channel, then the only allowlisted channel.")
+	return stringFlag("channel", "Slack channel ID (C... or G...). Defaults to the --task channel; required otherwise.")
 }

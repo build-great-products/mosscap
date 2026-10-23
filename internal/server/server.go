@@ -611,14 +611,14 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		if err == nil && r.Command == "slack.history" {
 			var p protocol.SlackHistoryParams
 			_ = json.Unmarshal(r.Params, &p)
-			if channel, err = s.resolveChannel(ctx, op, p.Channel, ""); err == nil {
+			if channel, err = s.resolveChannel(ctx, p.Channel, ""); err == nil {
 				result, err = op.History(ctx, channel, p.Limit, p.Cursor)
 			}
 		}
 		if err == nil && r.Command == "slack.thread" {
 			var p protocol.SlackThreadParams
 			_ = json.Unmarshal(r.Params, &p)
-			if channel, err = s.resolveChannel(ctx, op, p.Channel, p.Task); err == nil {
+			if channel, err = s.resolveChannel(ctx, p.Channel, p.Task); err == nil {
 				result, err = op.Thread(ctx, channel, p.ThreadTS, p.Limit, p.Cursor)
 			}
 		}
@@ -633,7 +633,7 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 				var intent store.SlackFileUploadIntent
 				intent, channel, err = fileUploadIntent(r.Command, r)
 				if err == nil {
-					channel, err = s.resolveChannel(ctx, op, channel, intent.RelatedTaskID)
+					channel, err = s.resolveChannel(ctx, channel, intent.RelatedTaskID)
 				}
 				if err == nil {
 					result, err = op.ExecuteFileUpload(ctx, r.RequestID, channel, intent)
@@ -642,7 +642,7 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 				var intent store.SlackEffectIntent
 				intent, channel, err = effectIntent(r.Command, r)
 				if err == nil {
-					channel, err = s.resolveChannel(ctx, op, channel, intent.RelatedTaskID)
+					channel, err = s.resolveChannel(ctx, channel, intent.RelatedTaskID)
 				}
 				if err == nil {
 					result, err = op.Execute(ctx, r.RequestID, channel, intent)
@@ -1133,7 +1133,7 @@ func errorResponse(id, version string, err error) protocol.Response {
 		_ = errors.As(err, &purge)
 		return protocol.Response{ProtocolVersion: protocol.Version, RequestID: id, ServerVersion: version, Error: &protocol.Error{Code: "purge_interrupted", Category: "unavailable", Message: "metadata purge interrupted; retry safely", Retriable: true, Progress: &protocol.PurgeProgressDTO{Removed: purgeCountsDTO(purge.Progress.Removed)}}}
 	case errors.Is(err, slackops.ErrInvalidTarget):
-		code, category = "channel_not_admitted", "usage"
+		code, category = "invalid_channel", "usage"
 	case errors.Is(err, ErrChannelRequired):
 		code, category = "channel_required", "usage"
 	case errors.Is(err, slackops.ErrUnavailable), errors.Is(err, slackruntime.ErrClosed):
