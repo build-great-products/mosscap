@@ -9,8 +9,6 @@ type Counts struct {
 	RequestRecords int64 `json:"request_records"`
 }
 
-// PiDeliveryStatus is bounded gateway-owned delivery state. It deliberately
-// excludes task bodies, diagnostics, paths, and session internals.
 // FileTransferStatus is payload-free lifecycle inventory. It intentionally
 // excludes names, paths, hashes, URLs, and file contents.
 type FileTransferStatus struct {
@@ -21,15 +19,6 @@ type FileTransferStatus struct {
 	IncomingByState        map[string]int64 `json:"incoming_by_state"`
 	OutgoingByState        map[string]int64 `json:"outgoing_by_state"`
 	UnsafeTemporaryEntries int64            `json:"unsafe_temporary_entries"`
-}
-
-type PiDeliveryStatus struct {
-	ActivePiSessionID string `json:"active_pi_session_id,omitempty"`
-	Pending           int64  `json:"pending"`
-	Inserting         int64  `json:"inserting"`
-	Persisted         int64  `json:"persisted"`
-	Uncertain         int64  `json:"uncertain"`
-	Rejected          int64  `json:"rejected"`
 }
 
 // Snapshot is the stable gateway_status result. It contains identities and
@@ -51,8 +40,6 @@ type Snapshot struct {
 	Health                 string             `json:"health"`
 	EffectsCapability      string             `json:"effects_capability"`
 	SlackCapability        string             `json:"slack_capability"`
-	PiCapability           string             `json:"pi_capability"`
-	PiDelivery             PiDeliveryStatus   `json:"pi_delivery"`
 	FileTransfer           FileTransferStatus `json:"file_transfer"`
 	// Slack is the current operational state. It is populated by server without
 	// carrying tokens, headers, message bodies, or file bytes.

@@ -10,8 +10,8 @@ import (
 )
 
 // taskTyped binds Cobra's already-parsed task leaves directly to protocol DTOs.
-// It intentionally retains the legacy task request IDs, text-file safety, and
-// mutation JSON envelope while avoiding a second flag.FlagSet parse.
+// It retains the established task request IDs, text-file safety, and
+// mutation JSON envelope.
 func (a App) taskTyped(command, selector, text, textFile string, textSet, textFileSet, stdin bool, state string, all bool, limit int, note string, done bool, requestID, cursor string, jsonOut bool) error {
 	mutation := command == "create" || command == "update" || command == "open" || command == "working" || command == "done" || command == "reply"
 	var params any

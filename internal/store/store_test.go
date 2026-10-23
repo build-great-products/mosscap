@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -82,7 +83,7 @@ func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=8 WHERE version=2"); err != nil {
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=? WHERE version=2", SchemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -556,7 +557,7 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.DB().Exec("PRAGMA user_version=8"); err != nil {
+		if _, err := s.DB().Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion+1)); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {

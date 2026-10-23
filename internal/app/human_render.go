@@ -39,7 +39,7 @@ func renderHumanValue(out *bytes.Buffer, v any) {
 	if requestID, ok := m["request_id"].(string); ok {
 		fmt.Fprintf(out, "Request: %s\n", present(requestID))
 		renderWarnings(out, m)
-		for _, key := range []string{"result", "effect", "delivery"} {
+		for _, key := range []string{"result", "effect"} {
 			if nested, exists := m[key]; exists {
 				renderHumanValue(out, nested)
 				return
@@ -73,12 +73,8 @@ func renderHumanValue(out *bytes.Buffer, v any) {
 		}
 	case m["effects"] != nil:
 		renderRows(out, "Effects", m["effects"].([]any), []string{"effect_id", "kind", "state", "related_task_id", "diagnostic_code"})
-	case m["deliveries"] != nil:
-		renderRows(out, "Deliveries", m["deliveries"].([]any), []string{"delivery_id", "task_id", "task_version", "state", "diagnostic_code"})
 	case m["effect_id"] != nil:
 		renderRows(out, "Effect", []any{m}, []string{"effect_id", "kind", "state", "related_task_id", "target_message_ts", "thread_ts", "diagnostic_code"})
-	case m["delivery_id"] != nil:
-		renderRows(out, "Delivery", []any{m}, []string{"delivery_id", "task_id", "task_version", "state", "diagnostic_code"})
 	case m["task"] != nil && m["thread"] != nil && m["effects"] != nil:
 		renderTaskContext(out, m)
 	case m["text"] != nil && m["task_id"] != nil:
@@ -130,9 +126,6 @@ func renderTaskContext(out *bytes.Buffer, context map[string]any) {
 		if count := present(effects["non_confirmed_count"]); count != "" && count != "0" {
 			fmt.Fprintf(out, "Related effects requiring attention: %s\n", count)
 		}
-	}
-	if delivery, ok := context["delivery"].(map[string]any); ok {
-		fmt.Fprintf(out, "Current-version delivery: %s  %s\n", present(delivery["delivery_id"]), present(delivery["state"]))
 	}
 }
 

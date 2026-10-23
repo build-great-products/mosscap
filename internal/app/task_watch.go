@@ -43,8 +43,8 @@ type taskWatchOptions struct {
 }
 
 // taskWatcher is the long-running harness-neutral consumer of task.changes.
-// It owns no delivery evidence: printing a line is not an acknowledgement and
-// does not change task, delivery, or Slack state.
+// Printing a line is not an acknowledgement and does not change task or
+// Slack state.
 type taskWatcher struct {
 	app          App
 	config       config.Config

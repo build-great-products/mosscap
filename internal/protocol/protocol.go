@@ -40,9 +40,6 @@ const (
 	CapabilitySQLitePagination    = "sqlite_pagination_v1"
 	CapabilityTaskContext         = "task_context_v1"
 	CapabilityTaskChanges         = "task_changes_v1"
-	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
-	// the gateway owns every delivery route and disconnect cleanup (T1).
-	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
 var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext, CapabilityTaskChanges}
@@ -112,7 +109,6 @@ type PurgeCountsDTO struct {
 	TaskStateEvents        int64 `json:"task_state_events"`
 	SlackSourceEvents      int64 `json:"slack_source_events"`
 	SlackTaskSources       int64 `json:"slack_task_sources"`
-	PiDeliveries           int64 `json:"pi_deliveries"`
 	SlackEffects           int64 `json:"slack_effects"`
 	Files                  int64 `json:"files"`
 	FileTemporaryTransfers int64 `json:"file_temporary_transfers"`
@@ -217,19 +213,11 @@ type TaskContextEffectsDTO struct {
 	NonConfirmedCount int64            `json:"non_confirmed_count"`
 	Truncated         bool             `json:"effects_truncated"`
 }
-type TaskContextDeliveryDTO struct {
-	DeliveryID     string `json:"delivery_id"`
-	TaskVersion    int64  `json:"task_version"`
-	State          string `json:"state"`
-	DiagnosticCode string `json:"diagnostic_code,omitempty"`
-	ActionRequired bool   `json:"action_required"`
-}
 type TaskContextDTO struct {
-	Task     TaskDTO                 `json:"task"`
-	Thread   TaskContextThreadDTO    `json:"thread"`
-	Effects  TaskContextEffectsDTO   `json:"effects"`
-	Delivery *TaskContextDeliveryDTO `json:"delivery,omitempty"`
-	Warnings []string                `json:"warnings,omitempty"`
+	Task     TaskDTO               `json:"task"`
+	Thread   TaskContextThreadDTO  `json:"thread"`
+	Effects  TaskContextEffectsDTO `json:"effects"`
+	Warnings []string              `json:"warnings,omitempty"`
 }
 
 // SlackHistoryParams and SlackThreadParams deliberately contain no workspace
@@ -292,109 +280,6 @@ type FileGetParams struct {
 }
 type FileReleaseParams struct {
 	TransferID string `json:"transfer_id"`
-}
-
-// DeliveryObservation is exact persisted-session evidence. It intentionally
-// contains neither session paths nor visible message contents.
-type DeliveryObservation struct {
-	DeliveryID  string `json:"delivery_id"`
-	DeliveryKey string `json:"delivery_key"`
-}
-type DeliveryOpenParams struct {
-	PiSessionID string                `json:"pi_session_id"`
-	Observed    []DeliveryObservation `json:"observed,omitempty"`
-}
-type DeliveryInsertingParams struct {
-	DeliveryID  string `json:"delivery_id"`
-	DeliveryKey string `json:"delivery_key"`
-}
-type DeliveryPersistedParams struct {
-	DeliveryID  string `json:"delivery_id"`
-	DeliveryKey string `json:"delivery_key"`
-}
-type DeliveryRejectedParams struct {
-	DeliveryID     string `json:"delivery_id"`
-	DeliveryKey    string `json:"delivery_key"`
-	DiagnosticCode string `json:"diagnostic_code"`
-}
-type DeliveryListParams struct {
-	State  *string `json:"state,omitempty"`
-	Task   string  `json:"task,omitempty"`
-	Limit  int     `json:"limit,omitempty"`
-	Cursor string  `json:"cursor,omitempty"`
-}
-type DeliverySelector struct {
-	Delivery string `json:"delivery"`
-}
-type DeliveryRequeueParams struct {
-	Delivery string `json:"delivery"`
-	Reason   string `json:"reason"`
-}
-
-type DeliveryDTO struct {
-	DeliveryID            string  `json:"delivery_id"`
-	TaskID                string  `json:"task_id"`
-	TaskVersion           int64   `json:"task_version"`
-	PiSessionID           string  `json:"pi_session_id"`
-	DeliveryKey           string  `json:"delivery_key"`
-	PredecessorDeliveryID string  `json:"predecessor_delivery_id,omitempty"`
-	State                 string  `json:"state"`
-	DiagnosticCode        string  `json:"diagnostic_code,omitempty"`
-	RequeueReason         string  `json:"requeue_reason,omitempty"`
-	OfferedAt             *string `json:"offered_at,omitempty"`
-	InsertingAt           *string `json:"inserting_at,omitempty"`
-	CompletedAt           *string `json:"completed_at,omitempty"`
-	CreatedAt             string  `json:"created_at"`
-	UpdatedAt             string  `json:"updated_at"`
-}
-type DeliveryCountsDTO struct {
-	EligibleBacklogCount int64 `json:"eligible_backlog_count"`
-	UncertainCount       int64 `json:"uncertain_count"`
-	RejectedCount        int64 `json:"rejected_count"`
-}
-type DeliveryOpenDTO struct {
-	PiSessionID string `json:"pi_session_id"`
-	DeliveryCountsDTO
-}
-type DeliveryWorkDTO struct {
-	DeliveryID    string                    `json:"delivery_id"`
-	DeliveryKey   string                    `json:"delivery_key"`
-	TaskID        string                    `json:"task_id"`
-	TaskSelector  string                    `json:"task_selector"`
-	TaskVersion   int64                     `json:"task_version"`
-	TaskState     string                    `json:"task_state"`
-	TaskText      string                    `json:"task_text"`
-	SourceKind    string                    `json:"source_kind"`
-	SlackSource   *DeliverySlackSourceDTO   `json:"slack_source,omitempty"`
-	AttachedFiles []DeliveryAttachedFileDTO `json:"attached_files,omitempty"`
-}
-type DeliverySlackSourceDTO struct {
-	AuthorUserID string `json:"author_user_id"`
-	MessageTS    string `json:"message_ts"`
-	ThreadTS     string `json:"thread_ts"`
-}
-
-// DeliveryAttachedFileDTO is the deliberately narrow attachment projection for
-// Pi work. It is incoming metadata only: no URLs, paths, bytes, hashes, or
-// outgoing/detached records are ever represented here.
-type DeliveryAttachedFileDTO struct {
-	FileID            string  `json:"file_id"`
-	OriginalName      string  `json:"original_name"`
-	DeclaredMIME      *string `json:"declared_mime"`
-	DeclaredSizeBytes *int64  `json:"declared_size_bytes"`
-	TransferState     string  `json:"transfer_state"`
-}
-type DeliveryPollDTO struct {
-	Work *DeliveryWorkDTO `json:"work,omitempty"`
-	DeliveryCountsDTO
-}
-type DeliveryListDTO struct {
-	Deliveries []DeliveryDTO `json:"deliveries"`
-	NextCursor string        `json:"next_cursor,omitempty"`
-}
-type DeliveryRequeueDTO struct {
-	Delivery                   DeliveryDTO `json:"delivery"`
-	DuplicateInsertionPossible bool        `json:"duplicate_insertion_possible"`
 }
 
 // TaskDTO deliberately represents current task text only; mutation results omit text.
@@ -616,7 +501,7 @@ func (r Request) Validate() error {
 	if !identity.ValidRequestID(r.RequestID) {
 		return errors.New("protocol: invalid request_id")
 	}
-	if r.ClientKind != "cli" && r.ClientKind != "extension" {
+	if r.ClientKind != "cli" {
 		return errors.New("protocol: invalid client_kind")
 	}
 	if r.ClientVersion == "" || len(r.ClientVersion) > 128 {
@@ -687,7 +572,7 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	switch command {
 	case "hello":
 		target = &HelloParams{}
-	case "status.get", "doctor.run", "config.reload", "delivery.poll", "delivery.close":
+	case "status.get", "doctor.run", "config.reload":
 		target = &EmptyParams{}
 	case "trust.list":
 		target = &TrustedUserListParams{}
@@ -719,20 +604,6 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &FileGetParams{}
 	case "file.release":
 		target = &FileReleaseParams{}
-	case "delivery.open":
-		target = &DeliveryOpenParams{}
-	case "delivery.inserting":
-		target = &DeliveryInsertingParams{}
-	case "delivery.persisted":
-		target = &DeliveryPersistedParams{}
-	case "delivery.rejected":
-		target = &DeliveryRejectedParams{}
-	case "delivery.list":
-		target = &DeliveryListParams{}
-	case "delivery.inspect":
-		target = &DeliverySelector{}
-	case "delivery.requeue":
-		target = &DeliveryRequeueParams{}
 	case "trust.add", "trust.remove":
 		target = &TrustMutationParams{}
 	case "task.create":
@@ -879,41 +750,6 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		if !validTransferSelector(p.TransferID) {
 			return errors.New("invalid transfer selector")
 		}
-	case *DeliveryOpenParams:
-		if !validPiSessionID(p.PiSessionID) || len(p.Observed) > 256 {
-			return errors.New("invalid delivery open")
-		}
-		seen := make(map[string]bool, len(p.Observed))
-		for _, o := range p.Observed {
-			if !validDeliveryID(o.DeliveryID) || !validDeliveryKey(o.DeliveryKey) || seen[o.DeliveryID+"\x00"+o.DeliveryKey] {
-				return errors.New("invalid delivery observation")
-			}
-			seen[o.DeliveryID+"\x00"+o.DeliveryKey] = true
-		}
-	case *DeliveryInsertingParams:
-		if !validDeliveryID(p.DeliveryID) || !validDeliveryKey(p.DeliveryKey) {
-			return errors.New("invalid delivery inserting")
-		}
-	case *DeliveryPersistedParams:
-		if !validDeliveryID(p.DeliveryID) || !validDeliveryKey(p.DeliveryKey) {
-			return errors.New("invalid delivery persisted")
-		}
-	case *DeliveryRejectedParams:
-		if !validDeliveryID(p.DeliveryID) || !validDeliveryKey(p.DeliveryKey) || !validDeliveryDiagnostic(p.DiagnosticCode) {
-			return errors.New("invalid delivery rejected")
-		}
-	case *DeliveryListParams:
-		if p.Limit < 0 || p.Limit > 100 || (p.State != nil && !validDeliveryState(*p.State)) || (p.Task != "" && !validTaskSelector(p.Task)) || (p.Cursor != "" && !validDeliveryID(p.Cursor)) {
-			return errors.New("invalid delivery list")
-		}
-	case *DeliverySelector:
-		if !validDeliverySelector(p.Delivery) {
-			return errors.New("invalid delivery selector")
-		}
-	case *DeliveryRequeueParams:
-		if !validDeliverySelector(p.Delivery) || !validReason(p.Reason) {
-			return errors.New("invalid delivery requeue")
-		}
 	}
 	return nil
 }
@@ -966,7 +802,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.changes", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.changes", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release":
 		return true
 	}
 	return false
@@ -1056,37 +892,6 @@ func validPaths(values []string) bool {
 	}
 	return true
 }
-func validDeliveryID(value string) bool {
-	return (len(value) == 22 && validSelectorSuffix(value)) || (len(value) == 26 && strings.HasPrefix(value, "dlv_") && validSelectorSuffix(value[4:]))
-}
-func validDeliverySelector(value string) bool { return validTypedSelector(value, "dlv_") }
-func validDeliveryKey(value string) bool {
-	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
-		return false
-	}
-	for _, r := range value[7:] {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
-			return false
-		}
-	}
-	return true
-}
-func validPiSessionID(value string) bool {
-	return value != "" && len(value) <= 256 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
-}
-func validDeliveryDiagnostic(value string) bool {
-	// This is intentionally an allowlist; diagnostic text is never an
-	// extension-to-gateway transport channel.
-	switch value {
-	case "oversized_task", "invalid_delivery_work", "invalid_visible_message":
-		return true
-	}
-	return false
-}
-func validDeliveryState(value string) bool {
-	return value == "pending" || value == "inserting" || value == "persisted" || value == "uncertain" || value == "rejected"
-}
-
 func validEffectState(value string) bool {
 	switch value {
 	case "prepared", "submitted", "confirmed", "ambiguous", "failed":

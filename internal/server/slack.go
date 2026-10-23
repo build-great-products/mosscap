@@ -21,7 +21,6 @@ import (
 	"github.com/stayradiated/mosscap/internal/slackops"
 	"github.com/stayradiated/mosscap/internal/slackruntime"
 	"github.com/stayradiated/mosscap/internal/store"
-	"github.com/stayradiated/mosscap/internal/task"
 )
 
 // Options controls the Slack runtime. Disabled is intended only for direct
@@ -75,8 +74,8 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 		}
 		result, handleErr := coordinator.Handle(ctx, e)
 		s.logSlackAdmission(e, result)
-		if (result.AdmissionResult == store.SlackAdmitted || result.AdmissionResult == store.SlackUpdated) && result.Changed {
-			if reactionErr := s.queueTaskReaction(ctx, result.TaskID, result.TaskVersion); reactionErr != nil && s.Log != nil {
+		if result.AdmissionResult == store.SlackAdmitted {
+			if reactionErr := s.queueTaskReaction(ctx, result.TaskID); reactionErr != nil && s.Log != nil {
 				s.Log.Warn("automatic queued-task reaction did not confirm", "task_id", result.TaskID, "task_version", result.TaskVersion, "error", reactionErr)
 			}
 		}
@@ -118,19 +117,12 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 	target := store.SlackEffectTarget{TeamID: snapshot.TeamID, ChannelID: snapshot.ChannelID}
 	coordinator = slackingest.NewWithOptions(ledger, policy, nil, slackingest.Options{
 		BeforeAcknowledge: func(ctx context.Context, event store.SlackSourceEvent, result store.SlackEventResult) error {
-			if (result.AdmissionResult == store.SlackAdmitted || result.AdmissionResult == store.SlackUpdated) && result.Changed {
+			if result.AdmissionResult == store.SlackAdmitted {
 				source, err := ledger.GetSlackSource(ctx, result.TaskID)
 				if err != nil {
 					return err
 				}
-				if source.TaskState == task.Done {
-					return nil
-				}
-				stage, err := activeMarkerStageIn(ctx, ledger, result.TaskID, "queued")
-				if err != nil {
-					return err
-				}
-				_, err = s.prepareTaskReactionIn(ctx, ledger, source, result.TaskVersion, stage, store.SlackEffectReact, queuedTaskReaction)
+				_, err = s.prepareTaskReactionIn(ctx, ledger, source, 1, queuedStage, store.SlackEffectReact, queuedTaskReaction)
 				return err
 			}
 			if result.AdmissionResult != store.SlackIgnoredUntrusted {

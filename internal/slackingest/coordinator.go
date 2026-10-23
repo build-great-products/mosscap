@@ -164,7 +164,7 @@ func normalize(e slackapi.Envelope, receivedAt time.Time) store.SlackSourceEvent
 }
 
 // taskText keeps forwarded content in the durable task body, the same field
-// delivered to Pi and returned by task context. Identifiers are rendered only
+// printed by task watch and returned by task context. Identifiers are rendered only
 // as opaque provenance, never as URLs.
 func taskText(e slackapi.Envelope) string {
 	text := e.Text

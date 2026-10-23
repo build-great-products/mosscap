@@ -17,7 +17,6 @@ func TestGeneratorIDsArePrefixFreeAndHaveEntropy(t *testing.T) {
 		{"task", generator.NewTaskID, ""},
 		{"state event", generator.NewStateEventID, ""},
 		{"effect", generator.NewEffectID, ""},
-		{"delivery", generator.NewDeliveryID, ""},
 		{"file", generator.NewFileID, ""},
 		{"request", generator.NewRequestID, ""},
 	} {

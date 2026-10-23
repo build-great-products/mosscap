@@ -36,9 +36,6 @@ type Config struct {
 	SlackAppToken                 string   `toml:"slack_app_token" json:"-"`
 	SlackBotToken                 string   `toml:"slack_bot_token" json:"-"`
 	SlackChannelID                string   `toml:"slack_channel_id" json:"slack_channel_id"`
-	DeliveryLease                 string   `toml:"delivery_lease" json:"delivery_lease"`
-	LeaderHeartbeat               string   `toml:"leader_heartbeat" json:"leader_heartbeat"`
-	LeaderExpiry                  string   `toml:"leader_expiry" json:"leader_expiry"`
 	SlackReconnectInitialBackoff  string   `toml:"slack_reconnect_initial_backoff" json:"slack_reconnect_initial_backoff"`
 	SlackReconnectMaxBackoff      string   `toml:"slack_reconnect_max_backoff" json:"slack_reconnect_max_backoff"`
 	SlackReconnectJitter          bool     `toml:"slack_reconnect_jitter" json:"slack_reconnect_jitter"`
@@ -178,9 +175,6 @@ func Default(loc Location) (Config, error) {
 	}
 	return Config{
 		Version:                       1,
-		DeliveryLease:                 "60s",
-		LeaderHeartbeat:               "10s",
-		LeaderExpiry:                  "30s",
 		SlackReconnectInitialBackoff:  "1s",
 		SlackReconnectMaxBackoff:      "60s",
 		SlackReconnectJitter:          true,
@@ -311,6 +305,9 @@ func unknownKeyError(key string) error {
 	if key == "trusted_user_ids" || strings.HasSuffix(key, ".trusted_user_ids") {
 		return fmt.Errorf("decode config: obsolete %q: trust lives in SQLite; use `mosscap trust add`", key)
 	}
+	if key == "delivery_lease" || key == "leader_heartbeat" || key == "leader_expiry" {
+		return fmt.Errorf("decode config: obsolete %q: Pi delivery was removed; remove it", key)
+	}
 	if key == "secrets_file" || strings.HasSuffix(key, ".secrets_file") {
 		return fmt.Errorf("decode config: obsolete %q: put Slack tokens in config.toml", key)
 	}
@@ -319,7 +316,7 @@ func unknownKeyError(key string) error {
 
 var configKeys = []string{
 	"version", "slack_app_token", "slack_bot_token", "slack_channel_id",
-	"delivery_lease", "leader_heartbeat", "leader_expiry", "slack_reconnect_initial_backoff",
+	"slack_reconnect_initial_backoff",
 	"slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size",
 	"maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame",
 }
@@ -347,24 +344,6 @@ func Validate(c Config) error {
 	}
 	if c.SlackChannelID != "" && (!slackID.MatchString(c.SlackChannelID) || (c.SlackChannelID[0] != 'C' && c.SlackChannelID[0] != 'G')) {
 		return errors.New("slack_channel_id must be an empty Slack channel ID or begin with C/G")
-	}
-	lease, err := positiveDuration("delivery_lease", c.DeliveryLease)
-	if err != nil {
-		return err
-	}
-	heartbeat, err := positiveDuration("leader_heartbeat", c.LeaderHeartbeat)
-	if err != nil {
-		return err
-	}
-	expiry, err := positiveDuration("leader_expiry", c.LeaderExpiry)
-	if err != nil {
-		return err
-	}
-	if heartbeat >= expiry {
-		return errors.New("leader_heartbeat must be less than leader_expiry")
-	}
-	if lease <= 0 { // retained for clarity if duration parsing changes.
-		return errors.New("delivery_lease must be positive")
 	}
 	initial, err := positiveDuration("slack_reconnect_initial_backoff", c.SlackReconnectInitialBackoff)
 	if err != nil {
@@ -490,11 +469,6 @@ slack_bot_token = %q
 # One configured channel (C... or G...). Workspace and bot user IDs are derived from auth.test.
 slack_channel_id = %q
 
-# Delivery leader lease and heartbeat timings.
-delivery_lease = %q
-leader_heartbeat = %q
-leader_expiry = %q
-
 # Slack reconnect uses exponential backoff in this inclusive range.
 slack_reconnect_initial_backoff = %q
 slack_reconnect_max_backoff = %q
@@ -507,7 +481,7 @@ maximum_files_per_slack_operation = %d
 temporary_download_lifetime = %q
 local_protocol_maximum_frame = %d
 `, c.Version, c.SlackAppToken, c.SlackBotToken, c.SlackChannelID,
-		c.DeliveryLease, c.LeaderHeartbeat, c.LeaderExpiry, c.SlackReconnectInitialBackoff, c.SlackReconnectMaxBackoff,
+		c.SlackReconnectInitialBackoff, c.SlackReconnectMaxBackoff,
 		c.SlackReconnectJitter, c.SQLiteBusyTimeout, c.MaximumFileSize.String(), c.MaximumFilesPerSlackOperation,
 		c.TemporaryDownloadLifetime, c.LocalProtocolMaximumFrame))
 }
@@ -515,7 +489,7 @@ local_protocol_maximum_frame = %d
 var setMu sync.Mutex
 
 var settable = map[string]bool{
-	"slack_channel_id": true, "delivery_lease": true, "leader_heartbeat": true, "leader_expiry": true,
+	"slack_channel_id":                true,
 	"slack_reconnect_initial_backoff": true, "slack_reconnect_max_backoff": true, "slack_reconnect_jitter": true,
 	"sqlite_busy_timeout": true, "maximum_file_size": true, "maximum_files_per_slack_operation": true,
 	"temporary_download_lifetime": true, "local_protocol_maximum_frame": true,
@@ -617,12 +591,6 @@ func setValue(c *Config, key, input string) ([]byte, error) {
 		return stringValue(&c.SlackBotToken)
 	case "slack_channel_id":
 		return stringValue(&c.SlackChannelID)
-	case "delivery_lease":
-		return durationValue(&c.DeliveryLease)
-	case "leader_heartbeat":
-		return durationValue(&c.LeaderHeartbeat)
-	case "leader_expiry":
-		return durationValue(&c.LeaderExpiry)
 	case "slack_reconnect_initial_backoff":
 		return durationValue(&c.SlackReconnectInitialBackoff)
 	case "slack_reconnect_max_backoff":
@@ -827,9 +795,6 @@ type View struct {
 	SlackBotTokenPresent          bool   `json:"slack_bot_token_present"`
 	SlackChannelID                string `json:"slack_channel_id"`
 	SlackIdentitySource           string `json:"slack_identity_source"`
-	DeliveryLease                 string `json:"delivery_lease"`
-	LeaderHeartbeat               string `json:"leader_heartbeat"`
-	LeaderExpiry                  string `json:"leader_expiry"`
 	SlackReconnectInitialBackoff  string `json:"slack_reconnect_initial_backoff"`
 	SlackReconnectMaxBackoff      string `json:"slack_reconnect_max_backoff"`
 	SlackReconnectJitter          bool   `json:"slack_reconnect_jitter"`
@@ -843,7 +808,7 @@ type View struct {
 // Redact returns a structurally token-free configuration view.
 func Redact(c Config) View {
 	return View{c.Version, c.Paths, c.SlackAppToken != "", c.SlackBotToken != "", c.SlackChannelID, "verified_at_runtime",
-		c.DeliveryLease, c.LeaderHeartbeat, c.LeaderExpiry, c.SlackReconnectInitialBackoff,
+		c.SlackReconnectInitialBackoff,
 		c.SlackReconnectMaxBackoff, c.SlackReconnectJitter, c.SQLiteBusyTimeout, int64(c.MaximumFileSize),
 		c.MaximumFilesPerSlackOperation, c.TemporaryDownloadLifetime, c.LocalProtocolMaximumFrame}
 }

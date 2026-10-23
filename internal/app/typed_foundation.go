@@ -18,8 +18,8 @@ import (
 	"github.com/stayradiated/mosscap/internal/slackruntime"
 )
 
-// The typed methods below are the Cobra entry points for the first cutover
-// family. Legacy methods retain their flag.FlagSet adapters for the old path.
+// The typed methods below are the Cobra entry points for setup, config, and
+// gateway leaves.
 func (a App) setupTyped(jsonOut bool) error {
 	loc, err := config.DefaultLocation()
 	if err != nil {

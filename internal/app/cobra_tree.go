@@ -11,9 +11,8 @@ import (
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
-// CommandMetadata describes properties the Cobra cutover must retain. It is
-// deliberately separate from the legacy parser while both implementations are
-// present, so no command family is released with mixed parsing behavior.
+// CommandMetadata describes the read-only, capability, and handler properties
+// recorded on every leaf as Cobra annotations.
 type CommandMetadata struct {
 	ReadOnly          bool
 	GatewayCapability string
@@ -26,9 +25,7 @@ const (
 	annotationHandler    = "mosscap.handler"
 )
 
-// NewCommandTree returns the complete, not-yet-active Cobra command tree.
-// App.Execute intentionally continues to use the legacy parser until every
-// command family can switch in one atomic release.
+// NewCommandTree returns the complete Cobra command tree that App.Execute runs.
 func (a App) NewCommandTree() *cobra.Command {
 	root := &cobra.Command{
 		Use:                        "mosscap",
@@ -51,7 +48,7 @@ func (a App) NewCommandTree() *cobra.Command {
 		_, err := fmt.Fprintln(cmd.OutOrStdout(), a.Version)
 		return err
 	}})
-	root.AddCommand(commandBranch("config", "Inspect or stage configuration."), commandBranch("gateway", "Run or inspect the local gateway."), commandBranch("trust", "Manage trusted Slack users."), commandBranch("task", "Manage durable tasks."), commandBranch("slack", "Read and operate in the configured Slack channel."), commandBranch("effect", "Inspect durable Slack effects."), commandBranch("file", "Inspect or retrieve admitted Slack files."), commandBranch("delivery", "Inspect and recover Pi delivery attempts."))
+	root.AddCommand(commandBranch("config", "Inspect or stage configuration."), commandBranch("gateway", "Run or inspect the local gateway."), commandBranch("trust", "Manage trusted Slack users."), commandBranch("task", "Manage durable tasks."), commandBranch("slack", "Read and operate in the configured Slack channel."), commandBranch("effect", "Inspect durable Slack effects."), commandBranch("file", "Inspect or retrieve admitted Slack files."))
 	findCommand(root, []string{"config"}).AddCommand(commandBranch("secret", "Manage private Slack credentials."))
 	root.AddCommand(a.cobraLeaf([]string{"setup"}, "Create private local configuration and state directories.", "mosscap setup [--json]", true, "", "setup", []flagSpec{boolFlag("json", "Render the result as JSON.")}, nil))
 	root.AddCommand(a.cobraLeaf([]string{"doctor"}, "Run non-destructive local and gateway diagnostics.", "mosscap doctor [--json]", true, protocol.CapabilityDoctor, "doctor", []flagSpec{boolFlag("json", "Render the report as JSON.")}, nil))
@@ -195,27 +192,19 @@ func (a App) cobraLeaf(path []string, short, use string, readOnly bool, capabili
 	if gatewayCallingHandler(handler) {
 		cmd.Flags().String("timeout", "10s", "Maximum total time for gateway dial, handshake, and request.")
 	}
-	if isTypedCobraHandler(handler) {
-		// Keep migrated leaves structurally separate from the compatibility
-		// bridge: their execution can never reach a legacy flag.FlagSet parser.
-		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			handlerApp := a
-			handlerApp.ctx = cmd.Context()
-			handlerApp.budget = &gatewayBudget{}
-			if gatewayCallingHandler(handler) {
-				value, _ := cmd.Flags().GetString("timeout")
-				parsed, err := time.ParseDuration(value)
-				if err != nil || parsed <= 0 {
-					return usage("--timeout must be a positive duration")
-				}
-				handlerApp.timeout = parsed
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		handlerApp := a
+		handlerApp.ctx = cmd.Context()
+		handlerApp.budget = &gatewayBudget{}
+		if gatewayCallingHandler(handler) {
+			value, _ := cmd.Flags().GetString("timeout")
+			parsed, err := time.ParseDuration(value)
+			if err != nil || parsed <= 0 {
+				return usage("--timeout must be a positive duration")
 			}
-			return handlerApp.runtimeJSONError(cmd, handlerApp.runTypedCobraHandler(handler, cmd, args))
+			handlerApp.timeout = parsed
 		}
-	} else {
-		cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			return a.runtimeJSONError(cmd, a.runCobraHandler(handler, canonicalArgs(cmd, args)))
-		}
+		return handlerApp.runtimeJSONError(cmd, handlerApp.runTypedCobraHandler(handler, cmd, args))
 	}
 	for _, f := range flags {
 		switch {
@@ -270,7 +259,7 @@ func leafDescription(short, handler string) string {
 		description += "\n\nProvide --before and exactly one of --dry-run or --confirm. Warning: confirmed removal is irreversible."
 	case "slack.file":
 		description += "\n\nProvide at least one --file PATH."
-	case "slack.delete", "effect.retry", "delivery.requeue":
+	case "slack.delete", "effect.retry":
 		description += "\n\nProvide a non-empty --reason."
 	}
 	switch handler {
@@ -278,61 +267,15 @@ func leafDescription(short, handler string) string {
 		description += " Warning: --done completes the task only after Slack confirms the reply."
 	case "effect.retry":
 		description += " Warning: retrying an ambiguous effect requires --confirm-duplicate-risk and can duplicate external work."
-	case "delivery.requeue":
-		description += " Warning: requeueing can duplicate a prior Pi insertion."
 	}
 	return description
 }
 
-// canonicalArgs gives the business handlers flags-first input after Cobra has
-// performed all command selection and option parsing. Keeping positional values
-// separate is what permits options on either side of selectors.
-func canonicalArgs(cmd *cobra.Command, args []string) []string {
-	out := make([]string, 0, len(args)+cmd.Flags().NFlag()*2)
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		if !f.Changed {
-			return
-		}
-		if f.Value.Type() == "bool" {
-			out = append(out, "--"+f.Name+"="+f.Value.String())
-			return
-		}
-		if f.Value.Type() == "stringArray" {
-			values, _ := cmd.Flags().GetStringArray(f.Name)
-			for _, value := range values {
-				out = append(out, "--"+f.Name, value)
-			}
-			return
-		}
-		out = append(out, "--"+f.Name, f.Value.String())
-	})
-	if len(args) != 0 {
-		// The second-stage compatibility handlers use flag.FlagSet, whose parser
-		// must not reinterpret a positional value beginning with '-'. Cobra has
-		// already identified these as operands, including after a user-supplied
-		// end-of-options marker.
-		out = append(out, "--")
-	}
-	return append(out, args...)
-}
-
-// runTypedCobraHandler binds the first migrated family directly to typed
-// operations. These leaves must not pass through the legacy flag.FlagSet
-// adapters in runCobraHandler.
 // gatewayCallingHandler deliberately excludes local setup/configuration and
 // gateway run. Every leaf that opens the local protocol gets the shared bound.
 func gatewayCallingHandler(handler string) bool {
 	switch handler {
-	case "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
-		return true
-	default:
-		return false
-	}
-}
-
-func isTypedCobraHandler(handler string) bool {
-	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
 		return true
 	default:
 		return false
@@ -435,61 +378,8 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		task, _ := cmd.Flags().GetString("task")
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.slackFileTyped(thread, files, comment, task, requestID, jsonOut)
-	case "delivery.list":
-		state, _ := cmd.Flags().GetString("state")
-		task, _ := cmd.Flags().GetString("task")
-		limit, _ := cmd.Flags().GetInt("limit")
-		cursor, _ := cmd.Flags().GetString("cursor")
-		return a.deliveryTyped("list", "", state, task, limit, cursor, "", "", jsonOut)
-	case "delivery.inspect":
-		return a.deliveryTyped("inspect", args[0], "", "", 0, "", "", "", jsonOut)
-	case "delivery.requeue":
-		reason, _ := cmd.Flags().GetString("reason")
-		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.deliveryTyped("requeue", args[0], "", "", 0, "", reason, requestID, jsonOut)
 	default:
 		return fmt.Errorf("unbound typed Cobra handler %q", handler)
-	}
-}
-
-// runCobraHandler is the temporary compatibility bridge for command families
-// that have not yet been migrated to typed Cobra bindings.
-func (a App) runCobraHandler(handler string, args []string) error {
-	switch handler {
-	case "setup":
-		return a.setup("", args)
-	case "doctor":
-		return a.doctorCommand("", args)
-	case "purge":
-		return a.purge(args)
-	case "config.show":
-		return a.configShow("", args)
-	case "config.set":
-		return a.configSet("", args)
-	case "config.secret.set":
-		return a.configSecret("", append([]string{"set"}, args...))
-	case "gateway.run":
-		return a.gateway("", append([]string{"run"}, args...))
-	case "gateway.reload":
-		return a.gatewayReload(args)
-	case "gateway.status":
-		return a.gatewayStatus("", args)
-	case "trust.list", "trust.add", "trust.remove":
-		return a.trust(append([]string{strings.TrimPrefix(handler, "trust.")}, args...))
-	case "task.reply":
-		return a.taskReply(args)
-	case "task.create", "task.list", "task.show", "task.update", "task.open", "task.working", "task.done":
-		return a.task("", append([]string{strings.TrimPrefix(handler, "task.")}, args...))
-	case "effect.list", "effect.inspect", "effect.retry":
-		return a.effect(append([]string{strings.TrimPrefix(handler, "effect.")}, args...))
-	case "file.show":
-		return a.file(append([]string{"show"}, args...))
-	case "file.get":
-		return a.fileGet(args)
-	case "delivery.list", "delivery.inspect", "delivery.requeue":
-		return a.delivery(append([]string{strings.TrimPrefix(handler, "delivery.")}, args...))
-	default:
-		return fmt.Errorf("unbound Cobra handler %q", handler)
 	}
 }
 
@@ -503,7 +393,7 @@ func expectedArgs(handler string) int {
 			return 2
 		}
 		return 1
-	case "trust.add", "trust.remove", "task.show", "task.context", "task.update", "task.open", "task.working", "task.done", "task.reply", "slack.thread", "slack.edit", "slack.delete", "effect.inspect", "effect.retry", "file.show", "file.get", "delivery.inspect", "delivery.requeue":
+	case "trust.add", "trust.remove", "task.show", "task.context", "task.update", "task.open", "task.working", "task.done", "task.reply", "slack.thread", "slack.edit", "slack.delete", "effect.inspect", "effect.retry", "file.show", "file.get":
 		return 1
 	default:
 		return 0
@@ -543,9 +433,6 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"effect", "retry"}, "Create a successor for a failed or explicitly confirmed risky effect.", "mosscap effect retry EFFECT --reason TEXT [--confirm-duplicate-risk] [--request-id ID] [--json]", false, "slack_effects", "effect.retry", []flagSpec{stringFlag("reason", "Required retry reason."), boolFlag("confirm-duplicate-risk", "Acknowledge duplicate risk for ambiguous effects."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 	{[]string{"file", "show"}, "Show admitted Slack file metadata; use file get for bytes.", "mosscap file show FILE [--json]", true, "slack_source_metadata", "file.show", []flagSpec{boolFlag("json", "Render metadata as JSON.")}, nil},
 	{[]string{"file", "get"}, "Retrieve an admitted Slack file to a safe destination.", "mosscap file get FILE [--output PATH] [--force] [--request-id ID] [--json]", false, protocol.CapabilityFileTransfer, "file.get", []flagSpec{stringFlag("output", "Absolute destination path."), boolFlag("force", "Replace an existing regular destination file."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
-	{[]string{"delivery", "list"}, "List Pi delivery attempts.", "mosscap delivery list [--state STATE] [--task TASK] [--limit N] [--cursor DELIVERY_ID] [--json]", true, "pi_delivery_mvp", "delivery.list", []flagSpec{stringFlag("state", "Filter by delivery state."), stringFlag("task", "Filter by task."), intFlag("limit", "Maximum number of deliveries."), stringFlag("cursor", "Resume after this delivery ID."), boolFlag("json", "Render deliveries as JSON.")}, nil},
-	{[]string{"delivery", "inspect"}, "Inspect Pi delivery evidence.", "mosscap delivery inspect DELIVERY [--json]", true, "pi_delivery_mvp", "delivery.inspect", []flagSpec{boolFlag("json", "Render delivery evidence as JSON.")}, nil},
-	{[]string{"delivery", "requeue"}, "Create a new Pi delivery attempt; duplicate insertion is possible.", "mosscap delivery requeue DELIVERY --reason TEXT [--request-id ID] [--json]", false, "pi_delivery_mvp", "delivery.requeue", []flagSpec{stringFlag("reason", "Required requeue reason."), stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, []string{"reason"}},
 }
 
 func textFlags() []flagSpec {

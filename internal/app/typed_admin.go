@@ -12,8 +12,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
-// The typed methods below bind administrative Cobra leaves without routing
-// through the legacy flag.FlagSet adapters.
+// The typed methods below bind administrative Cobra leaves to their requests.
 func (a App) purgeTyped(before string, dryRun, confirm bool, beforeCount, dryRunCount, confirmCount int, requestID string, jsonOut bool) error {
 	if before == "" || beforeCount != 1 || dryRunCount+confirmCount != 1 || (!dryRun && !confirm) {
 		return usage("purge requires --before and exactly one of --dry-run or --confirm")

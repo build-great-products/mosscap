@@ -25,7 +25,6 @@ type TaskContextReadModel struct {
 	TaskReadModel
 	NonConfirmed      []SlackEffect
 	NonConfirmedCount int64
-	LatestDelivery    *Delivery
 }
 
 func (s *Store) GetTaskContextReadModel(ctx context.Context, selector string) (TaskContextReadModel, error) {
@@ -54,14 +53,6 @@ func (s *Store) GetTaskContextReadModel(ctx context.Context, selector string) (T
 	}
 	if len(out.NonConfirmed) == 11 {
 		out.NonConfirmed = out.NonConfirmed[:10]
-	}
-	var delivery Delivery
-	stored, err := scanDelivery(s.db.QueryRowContext(ctx, deliverySelect+` WHERE task_id=? AND task_version=? ORDER BY created_at_us DESC,delivery_id DESC LIMIT 1`, model.Task.ID, model.Task.Version))
-	if err == nil {
-		delivery = stored.Delivery
-		out.LatestDelivery = &delivery
-	} else if err != sql.ErrNoRows {
-		return out, err
 	}
 	return out, nil
 }

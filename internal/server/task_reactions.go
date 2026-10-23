@@ -12,13 +12,27 @@ import (
 )
 
 const (
-	queuedTaskReaction    = "hourglass_flowing_sand"
-	deliveredTaskReaction = "eyes"
+	queuedTaskReaction  = "hourglass_flowing_sand"
+	workingTaskReaction = "eyes"
 )
 
+// lifecycleReaction is the Slack marker that projects one task state onto the
+// source message: queued while open, eyes while working, none once done. It is
+// a projection only; SQLite task state stays authoritative.
+func lifecycleReaction(state task.State) string {
+	switch state {
+	case task.Open:
+		return queuedTaskReaction
+	case task.Working:
+		return workingTaskReaction
+	default:
+		return ""
+	}
+}
+
 // prepareTaskReaction records a fixed lifecycle action under a stable request
-// ID. The SQLite task/delivery mutation and the Slack effect intentionally are
-// separate transactions: Slack cannot participate in either transaction.
+// ID. The SQLite task mutation and the Slack effect intentionally are separate
+// transactions: Slack cannot participate in either transaction.
 func (s *Server) prepareTaskReaction(ctx context.Context, source store.SlackSource, version int64, stage string, kind store.SlackEffectKind, emoji string) (store.SlackEffect, error) {
 	return s.prepareTaskReactionIn(ctx, s.store, source, version, stage, kind, emoji)
 }
@@ -73,159 +87,85 @@ func taskReactionRequestID(stage, taskID string, version int64) string {
 	return "internal-task-reaction-" + hex.EncodeToString(sum[:])
 }
 
-func (s *Server) queueTaskReaction(ctx context.Context, taskID string, version int64) error {
-	source, ok, err := s.activeSlackTaskSource(ctx, taskID, version)
+// queuedStage is the stage of the admission marker. Admission always creates
+// version 1, so the request ID is stable across envelope redelivery.
+const queuedStage = "queued"
+
+// queueTaskReaction executes the queued marker that admission prepared before
+// acknowledging the Slack envelope.
+func (s *Server) queueTaskReaction(ctx context.Context, taskID string) error {
+	source, err := s.store.GetSlackSource(ctx, taskID)
+	if err != nil || source.TaskState != task.Open {
+		return err
+	}
+	_, err = s.executeTaskReaction(ctx, source, 1, queuedStage, store.SlackEffectReact, queuedTaskReaction)
+	return err
+}
+
+// transitionStages names the two lifecycle effects of one committed state
+// transition. Each transition has its own state event ID, so a later reopen
+// gets new intents instead of reusing a completed one.
+func transitionStages(event store.StateEvent) (add, remove string) {
+	return "enter-" + event.ID, "leave-" + event.ID
+}
+
+// projectTransition replaces the lifecycle marker after a committed state
+// change. The new marker is added first so a rejected or ambiguous removal
+// still leaves a visible signal; the replacement is not atomic. Failures are
+// logged and remain inspectable as durable effects.
+func (s *Server) projectTransition(ctx context.Context, mutation store.MutationResult) {
+	if !mutation.Changed {
+		return
+	}
+	if err := s.projectLatestTransition(ctx, mutation.TaskID); err != nil && s.Log != nil {
+		s.Log.Warn("automatic lifecycle reaction did not confirm", "task_id", mutation.TaskID, "task_state", mutation.State, "error", err)
+	}
+}
+
+func (s *Server) projectLatestTransition(ctx context.Context, taskID string) error {
+	source, event, ok, err := s.currentTransition(ctx, taskID)
 	if err != nil || !ok {
 		return err
 	}
-	// A new version replaces a previously delivered marker by adding the new
-	// queued marker first. Initial/no-op admissions only need this first action.
-	stage, err := s.activeMarkerStage(ctx, taskID, "queued")
-	if err != nil {
-		return err
-	}
-	if _, err = s.executeTaskReaction(ctx, source, version, stage, store.SlackEffectReact, queuedTaskReaction); err != nil {
-		return err
-	}
-	if version > 1 {
-		prior, err := s.hasPersistedVersion(ctx, taskID, version-1)
-		if err != nil {
+	addStage, removeStage := transitionStages(event)
+	if emoji := lifecycleReaction(event.NewState); emoji != "" {
+		if _, err := s.executeTaskReaction(ctx, source, 1, addStage, store.SlackEffectReact, emoji); err != nil {
 			return err
 		}
-		if prior {
-			_, err = s.executeTaskReaction(ctx, source, version, "updated-clear-delivered", store.SlackEffectUnreact, deliveredTaskReaction)
-		}
+	}
+	if emoji := lifecycleReaction(event.PriorState); emoji != "" {
+		_, err = s.executeTaskReaction(ctx, source, 1, removeStage, store.SlackEffectUnreact, emoji)
 	}
 	return err
 }
 
-func (s *Server) deliveredTaskReactions(ctx context.Context, taskID string, version int64) error {
-	// A persisted delivery can arrive after a newer source update or completion.
-	// Only the current, open Slack task version may change the projection.
-	source, ok, err := s.activeSlackTaskSource(ctx, taskID, version)
-	if err != nil || !ok {
-		return err
-	}
-	stage, err := s.activeMarkerStage(ctx, taskID, "delivered")
-	if err != nil {
-		return err
-	}
-	// This is deliberately two ordered effects, not an atomic replacement.
-	// Adding the new marker first retains a visible lifecycle signal if removal
-	// is rejected or becomes ambiguous.
-	if _, err = s.executeTaskReaction(ctx, source, version, stage, store.SlackEffectReact, deliveredTaskReaction); err != nil {
-		return err
-	}
-	_, err = s.executeTaskReaction(ctx, source, version, "delivered-unqueue", store.SlackEffectUnreact, queuedTaskReaction)
-	return err
-}
-
-func (s *Server) completedTaskReaction(ctx context.Context, taskID string, version int64) error {
-	source, ok, err := s.doneSlackTaskSource(ctx, taskID, version)
-	if err != nil || !ok {
-		return err
-	}
-	persisted, err := s.hasPersistedVersion(ctx, taskID, version)
-	if err != nil {
-		return err
-	}
-	emoji, baseStage := queuedTaskReaction, "completed-unqueue"
-	if persisted {
-		emoji, baseStage = deliveredTaskReaction, "completed"
-	}
-	stage, err := s.completedMarkerStage(ctx, taskID, baseStage)
-	if err != nil {
-		return err
-	}
-	_, err = s.executeTaskReaction(ctx, source, version, stage, store.SlackEffectUnreact, emoji)
-	return err
-}
-
-func (s *Server) hasPersistedVersion(ctx context.Context, taskID string, version int64) (bool, error) {
-	return s.store.HasPersistedDelivery(ctx, taskID, version)
-}
-
-func (s *Server) activeSlackTaskSource(ctx context.Context, taskID string, version int64) (store.SlackSource, bool, error) {
+// currentTransition returns the latest state event of a Slack task only while
+// the task is still in that event's state. A projection that races a newer
+// transition is skipped; the newer transition projects the final state.
+func (s *Server) currentTransition(ctx context.Context, taskID string) (store.SlackSource, store.StateEvent, bool, error) {
 	row, err := s.store.Get(ctx, taskID)
-	if err != nil {
-		return store.SlackSource{}, false, err
-	}
-	if row.SourceKind != "slack" || row.Version != version || row.State == "done" {
-		return store.SlackSource{}, false, nil
+	if err != nil || row.SourceKind != "slack" {
+		return store.SlackSource{}, store.StateEvent{}, false, err
 	}
 	source, err := s.store.GetSlackSource(ctx, taskID)
-	return source, err == nil, err
-}
-
-func (s *Server) doneSlackTaskSource(ctx context.Context, taskID string, version int64) (store.SlackSource, bool, error) {
-	row, err := s.store.Get(ctx, taskID)
 	if err != nil {
-		return store.SlackSource{}, false, err
+		return store.SlackSource{}, store.StateEvent{}, false, err
 	}
-	// A completion callback that races with a reopen must not remove the
-	// freshly restored marker.
-	if row.SourceKind != "slack" || row.Version != version || row.State != task.Done {
-		return store.SlackSource{}, false, nil
+	event, found, err := s.store.LatestStateEvent(ctx, taskID, nil, nil)
+	if err != nil || !found || event.NewState != source.TaskState {
+		return source, event, false, err
 	}
-	source, err := s.store.GetSlackSource(ctx, taskID)
-	return source, err == nil, err
-}
-
-func (s *Server) activeMarkerStage(ctx context.Context, taskID, base string) (string, error) {
-	return activeMarkerStageIn(ctx, s.store, taskID, base)
-}
-
-func activeMarkerStageIn(ctx context.Context, ledger *store.Store, taskID, base string) (string, error) {
-	done := task.Done
-	event, found, err := ledger.LatestStateEvent(ctx, taskID, &done, nil)
-	if err != nil || !found {
-		return base, err
-	}
-	return "reopened-" + base + "-" + event.ID, nil
-}
-
-func (s *Server) completedMarkerStage(ctx context.Context, taskID, base string) (string, error) {
-	done := task.Done
-	event, found, err := s.store.LatestStateEvent(ctx, taskID, nil, &done)
-	if err != nil || !found {
-		return base, err
-	}
-	return base + "-" + event.ID, nil
-}
-
-func (s *Server) restoreTaskReaction(ctx context.Context, taskID string, version int64) error {
-	source, ok, err := s.activeSlackTaskSource(ctx, taskID, version)
-	if err != nil || !ok {
-		return err
-	}
-	persisted, err := s.hasPersistedVersion(ctx, taskID, version)
-	if err != nil {
-		return err
-	}
-	if persisted {
-		stage, stageErr := s.activeMarkerStage(ctx, taskID, "delivered")
-		if stageErr != nil {
-			return stageErr
-		}
-		_, err = s.executeTaskReaction(ctx, source, version, stage, store.SlackEffectReact, deliveredTaskReaction)
-	} else {
-		stage, stageErr := s.activeMarkerStage(ctx, taskID, "queued")
-		if stageErr != nil {
-			return stageErr
-		}
-		_, err = s.executeTaskReaction(ctx, source, version, stage, store.SlackEffectReact, queuedTaskReaction)
-	}
-	return err
+	return source, event, true, nil
 }
 
 // reconcileTaskReactions closes the crash window between a durable local
 // transition and preparation of its Slack projection. It only prepares effects;
-// the normal startup effect recovery performs their single submissions.
+// the normal startup effect recovery performs their single submissions. Done
+// tasks are skipped: their only projection is a removal, and replaying it for
+// every historical task on upgrade would be noise rather than repair.
 func (s *Server) reconcileTaskReactions(ctx context.Context) error {
-	// Page tasks to completion. Persisted evidence is queried by exact task
-	// version, rather than inferred from the bounded operator delivery listing.
 	for cursor := ""; ; {
-		tasks, next, err := s.store.List(ctx, nil, true, 100, cursor)
+		tasks, next, err := s.store.List(ctx, nil, false, 100, cursor)
 		if err != nil {
 			return err
 		}
@@ -233,61 +173,8 @@ func (s *Server) reconcileTaskReactions(ctx context.Context) error {
 			if row.SourceKind != "slack" {
 				continue
 			}
-			source, err := s.store.GetSlackSource(ctx, row.ID)
-			if err != nil {
+			if err := s.reconcileTaskReaction(ctx, row.ID); err != nil {
 				return err
-			}
-			persisted, err := s.hasPersistedVersion(ctx, row.ID, row.Version)
-			if err != nil {
-				return err
-			}
-			if row.State == "done" {
-				emoji, baseStage := queuedTaskReaction, "completed-unqueue"
-				if persisted {
-					emoji, baseStage = deliveredTaskReaction, "completed"
-				}
-				stage, stageErr := s.completedMarkerStage(ctx, row.ID, baseStage)
-				if stageErr != nil {
-					return stageErr
-				}
-				if _, err = s.prepareTaskReaction(ctx, source, row.Version, stage, store.SlackEffectUnreact, emoji); err != nil {
-					return err
-				}
-				continue
-			}
-			baseStage, emoji := "queued", queuedTaskReaction
-			if persisted {
-				baseStage, emoji = "delivered", deliveredTaskReaction
-			}
-			stage, stageErr := s.activeMarkerStage(ctx, row.ID, baseStage)
-			if stageErr != nil {
-				return stageErr
-			}
-			// Prepare the remove half only after the add is confirmed. Startup
-			// invokes reconciliation again after recovery to converge safely.
-			add, err := s.prepareTaskReaction(ctx, source, row.Version, stage, store.SlackEffectReact, emoji)
-			if err != nil {
-				return err
-			}
-			if add.State != store.SlackEffectConfirmed {
-				continue
-			}
-			if persisted {
-				if _, err = s.prepareTaskReaction(ctx, source, row.Version, "delivered-unqueue", store.SlackEffectUnreact, queuedTaskReaction); err != nil {
-					return err
-				}
-				continue
-			}
-			if row.Version > 1 {
-				prior, err := s.hasPersistedVersion(ctx, row.ID, row.Version-1)
-				if err != nil {
-					return err
-				}
-				if prior {
-					if _, err = s.prepareTaskReaction(ctx, source, row.Version, "updated-clear-delivered", store.SlackEffectUnreact, deliveredTaskReaction); err != nil {
-						return err
-					}
-				}
 			}
 		}
 		if next == "" {
@@ -295,4 +182,37 @@ func (s *Server) reconcileTaskReactions(ctx context.Context) error {
 		}
 		cursor = next
 	}
+}
+
+func (s *Server) reconcileTaskReaction(ctx context.Context, taskID string) error {
+	source, err := s.store.GetSlackSource(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	event, found, err := s.store.LatestStateEvent(ctx, taskID, nil, nil)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if source.TaskState == task.Open {
+			_, err = s.prepareTaskReaction(ctx, source, 1, queuedStage, store.SlackEffectReact, queuedTaskReaction)
+		}
+		return err
+	}
+	if event.NewState != source.TaskState {
+		return nil
+	}
+	addStage, removeStage := transitionStages(event)
+	if emoji := lifecycleReaction(event.NewState); emoji != "" {
+		// Prepare the remove half only after the add is confirmed. Startup
+		// invokes reconciliation again after recovery to converge safely.
+		add, err := s.prepareTaskReaction(ctx, source, 1, addStage, store.SlackEffectReact, emoji)
+		if err != nil || add.State != store.SlackEffectConfirmed {
+			return err
+		}
+	}
+	if emoji := lifecycleReaction(event.PriorState); emoji != "" {
+		_, err = s.prepareTaskReaction(ctx, source, 1, removeStage, store.SlackEffectUnreact, emoji)
+	}
+	return err
 }

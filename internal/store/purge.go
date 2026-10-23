@@ -24,13 +24,12 @@ const (
 	PurgeRootLimit = 100
 )
 
-// PurgeCounts is deliberately keyed to the durable tables in schema version 5.
+// PurgeCounts is deliberately keyed to the durable task-graph tables.
 type PurgeCounts struct {
 	Tasks                  int64 `json:"tasks"`
 	TaskStateEvents        int64 `json:"task_state_events"`
 	SlackSourceEvents      int64 `json:"slack_source_events"`
 	SlackTaskSources       int64 `json:"slack_task_sources"`
-	PiDeliveries           int64 `json:"pi_deliveries"`
 	SlackEffects           int64 `json:"slack_effects"`
 	Files                  int64 `json:"files"`
 	FileTemporaryTransfers int64 `json:"file_temporary_transfers"`
@@ -71,9 +70,7 @@ func (s *Store) PreviewMetadataPurge(ctx context.Context, cutoff time.Time) (Pur
 }
 
 // ConfirmMetadataPurge removes one bounded, FK-safe batch. The cutoff is
-// strict: values equal to it remain. Persisted deliveries require a non-null
-// completed_at_us strictly before cutoff; updated_at_us is intentionally not a
-// fallback because it could make a delivery with unknown completion removable.
+// strict: values equal to it remain.
 func (s *Store) ConfirmMetadataPurge(ctx context.Context, requestID string, cutoff time.Time) (PurgeResult, error) {
 	if !identity.ValidRequestID(requestID) {
 		return PurgeResult{}, errors.New("invalid request ID")
@@ -210,14 +207,13 @@ func addCounts(dst *PurgeCounts, c PurgeCounts) {
 	dst.TaskStateEvents += c.TaskStateEvents
 	dst.SlackSourceEvents += c.SlackSourceEvents
 	dst.SlackTaskSources += c.SlackTaskSources
-	dst.PiDeliveries += c.PiDeliveries
 	dst.SlackEffects += c.SlackEffects
 	dst.Files += c.Files
 	dst.FileTemporaryTransfers += c.FileTemporaryTransfers
 	dst.MutationRequests += c.MutationRequests
 }
 func (c PurgeCounts) total() int64 {
-	return c.Tasks + c.TaskStateEvents + c.SlackSourceEvents + c.SlackTaskSources + c.PiDeliveries + c.SlackEffects + c.Files + c.FileTemporaryTransfers + c.MutationRequests
+	return c.Tasks + c.TaskStateEvents + c.SlackSourceEvents + c.SlackTaskSources + c.SlackEffects + c.Files + c.FileTemporaryTransfers + c.MutationRequests
 }
 func skipLive(out *PurgeResult, c PurgeCounts) {
 	addCounts(&out.SkippedLive, c)
@@ -304,17 +300,6 @@ func purgeTask(ctx context.Context, q purgeConn, taskID string, cutoff int64, bu
 		skipLive(out, PurgeCounts{Tasks: 1})
 		return nil
 	}
-	// Every task-owned delivery must be finalized using the deliberately
-	// conservative completed timestamp policy, and no retained delivery may
-	// depend on one selected for this task.
-	var live int64
-	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM pi_deliveries d WHERE d.task_id=? AND (d.state <> 'persisted' OR d.completed_at_us IS NULL OR d.completed_at_us >= ? OR EXISTS (SELECT 1 FROM pi_deliveries r WHERE r.predecessor_delivery_id=d.delivery_id AND r.task_id<>?))`, taskID, cutoff, taskID).Scan(&live); err != nil {
-		return err
-	}
-	if live != 0 {
-		skipLive(out, PurgeCounts{Tasks: 1})
-		return nil
-	}
 	var effects int64
 	// A successor is selected only when it belongs to this task. In particular,
 	// a NULL related_task_id is retained; SQLite's <> would silently miss it.
@@ -357,14 +342,13 @@ func taskGraphCounts(ctx context.Context, q purgeConn, taskID string) (PurgeCoun
 		(SELECT count(*) FROM task_state_events WHERE task_id=?),
 		(SELECT count(*) FROM slack_source_events WHERE task_id=?),
 		(SELECT count(*) FROM slack_task_sources WHERE task_id=?),
-		(SELECT count(*) FROM pi_deliveries WHERE task_id=?),
 		(SELECT count(*) FROM slack_effects WHERE related_task_id=?),
-		(SELECT count(*) FROM files f WHERE f.related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=?))`, taskID, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&c.Tasks, &c.TaskStateEvents, &c.SlackSourceEvents, &c.SlackTaskSources, &c.PiDeliveries, &c.SlackEffects, &c.Files)
+		(SELECT count(*) FROM files f WHERE f.related_task_id=? OR EXISTS (SELECT 1 FROM slack_effects e WHERE e.effect_id=f.related_effect_id AND e.related_task_id=?))`, taskID, taskID, taskID, taskID, taskID, taskID).Scan(&c.Tasks, &c.TaskStateEvents, &c.SlackSourceEvents, &c.SlackTaskSources, &c.SlackEffects, &c.Files)
 	return c, err
 }
 
 func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *PurgeResult) error {
-	// The child-before-parent order follows every schema-v5 RESTRICT edge.
+	// The child-before-parent order follows every RESTRICT edge.
 	// Outgoing upload files are owned through their task-owned effect, not
 	// directly through the task. Preflight retains any file with temporary-byte
 	// metadata, so every selected file can be deleted before its effect.
@@ -388,9 +372,6 @@ func deleteTaskGraph(ctx context.Context, q purgeConn, taskID string, out *Purge
 		return err
 	} else {
 		out.Removed.SlackSourceEvents += n
-	}
-	if err := deleteDeliveryLeaves(ctx, q, taskID, &out.Removed.PiDeliveries); err != nil {
-		return err
 	}
 	if err := deleteEffectLeaves(ctx, q, "related_task_id=?", []any{taskID}, &out.Removed.SlackEffects); err != nil {
 		return err
@@ -534,26 +515,6 @@ func deleteCount(ctx context.Context, q purgeConn, query string, args ...any) (i
 		}
 	}
 	return r.RowsAffected()
-}
-func deleteDeliveryLeaves(ctx context.Context, q purgeConn, taskID string, count *int64) error {
-	for {
-		n, err := deleteCount(ctx, q, "DELETE FROM pi_deliveries WHERE task_id=? AND NOT EXISTS (SELECT 1 FROM pi_deliveries child WHERE child.predecessor_delivery_id=pi_deliveries.delivery_id)", taskID)
-		if err != nil {
-			return err
-		}
-		*count += n
-		if n == 0 {
-			break
-		}
-	}
-	var remain int64
-	if err := q.QueryRowContext(ctx, "SELECT count(*) FROM pi_deliveries WHERE task_id=?", taskID).Scan(&remain); err != nil {
-		return err
-	}
-	if remain != 0 {
-		return errors.New("purge delivery predecessor cycle")
-	}
-	return nil
 }
 func deleteEffectLeaves(ctx context.Context, q purgeConn, where string, args []any, count *int64) error {
 	for {

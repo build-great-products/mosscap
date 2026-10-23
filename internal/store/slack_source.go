@@ -536,6 +536,14 @@ func validTypedSelector(selector, legacyPrefix string) bool {
 	return len(selector) > 0 && len(selector) <= 22 && validOpaqueIDSuffix(selector)
 }
 
+// validFullOpaqueID accepts current unprefixed IDs and durable legacy IDs.
+func validFullOpaqueID(value, legacyPrefix string) bool {
+	if len(value) == 22 {
+		return validOpaqueIDSuffix(value)
+	}
+	return strings.HasPrefix(value, legacyPrefix) && len(value) == len(legacyPrefix)+22 && validOpaqueIDSuffix(value[len(legacyPrefix):])
+}
+
 // FindSlackSource performs an exact immutable source-identity lookup.
 func (s *Store) FindSlackSource(ctx context.Context, teamID, channelID, messageTS string) (SlackSource, error) {
 	if slackapi.ValidateTeamID(teamID) != nil || slackapi.ValidateChannelID(channelID) != nil {

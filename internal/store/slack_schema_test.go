@@ -166,8 +166,11 @@ func TestSlackMigrationChecksumsAndColumns(t *testing.T) {
 	if MigrationChecksum(7) == "" || len(MigrationChecksum(7)) != 64 || MigrationChecksum(7) == MigrationChecksum(6) {
 		t.Fatalf("v7 checksum=%q", MigrationChecksum(7))
 	}
-	if MigrationChecksum(8) != "" {
-		t.Fatalf("unknown checksum=%q", MigrationChecksum(8))
+	if MigrationChecksum(8) == "" || len(MigrationChecksum(8)) != 64 || MigrationChecksum(8) == MigrationChecksum(7) {
+		t.Fatalf("v8 checksum=%q", MigrationChecksum(8))
+	}
+	if MigrationChecksum(SchemaVersion+1) != "" {
+		t.Fatalf("unknown checksum=%q", MigrationChecksum(SchemaVersion+1))
 	}
 
 	s := testStore(t)

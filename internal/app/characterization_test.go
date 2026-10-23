@@ -20,14 +20,13 @@ import (
 // leaves (apart from intentionally documented compatibility changes).
 func TestCommandTreeCharacterization(t *testing.T) {
 	branches := map[string][]string{
-		"config":   {"show", "set", "secret set"},
-		"gateway":  {"run", "reload", "status"},
-		"trust":    {"list", "add", "remove"},
-		"task":     {"create", "list", "show", "update", "open", "working", "done", "reply"},
-		"slack":    {"history", "thread", "send", "file", "edit", "delete", "react", "unreact"},
-		"effect":   {"list", "inspect", "retry"},
-		"file":     {"show", "get"},
-		"delivery": {"list", "inspect", "requeue"},
+		"config":  {"show", "set", "secret set"},
+		"gateway": {"run", "reload", "status"},
+		"trust":   {"list", "add", "remove"},
+		"task":    {"create", "list", "show", "update", "open", "working", "done", "reply"},
+		"slack":   {"history", "thread", "send", "file", "edit", "delete", "react", "unreact"},
+		"effect":  {"list", "inspect", "retry"},
+		"file":    {"show", "get"},
 	}
 	for branch, children := range branches {
 		t.Run(branch, func(t *testing.T) {
@@ -52,7 +51,6 @@ func TestCommandTreeCharacterization(t *testing.T) {
 		{"task", "create"}, {"task", "list"}, {"task", "show"}, {"task", "update"}, {"task", "open"}, {"task", "working"}, {"task", "done"}, {"task", "reply"},
 		{"slack", "history"}, {"slack", "thread"}, {"slack", "send"}, {"slack", "file"}, {"slack", "edit"}, {"slack", "delete"}, {"slack", "react"}, {"slack", "unreact"},
 		{"effect", "list"}, {"effect", "inspect"}, {"effect", "retry"}, {"file", "show"}, {"file", "get"},
-		{"delivery", "list"}, {"delivery", "inspect"}, {"delivery", "requeue"},
 	}
 	for _, leaf := range leaves {
 		t.Run(strings.Join(leaf, " "), func(t *testing.T) {
@@ -100,9 +98,6 @@ func TestGatewayRequestConstructionCharacterization(t *testing.T) {
 		{"effect list", []string{"effect", "list", "--state", "ambiguous"}, protocol.CapabilitySlackEffects, "effect.list", "req_effect_list", protocol.EffectListParams{State: stringPointer("ambiguous")}},
 		{"effect inspect", []string{"effect", "inspect", "eff_AbCdEfGhIjKlMnOpQrStUv"}, protocol.CapabilitySlackEffects, "effect.inspect", "req_effect_inspect", protocol.EffectSelector{Effect: "eff_AbCdEfGhIjKlMnOpQrStUv"}},
 		{"effect retry", []string{"effect", "retry", "eff_AbCdEfGhIjKlMnOpQrStUv", "--reason", "retry", "--confirm-duplicate-risk", "--request-id", "req_characterization_retry"}, protocol.CapabilitySlackEffects, "effect.retry", "req_characterization_retry", protocol.EffectRetryParams{Effect: "eff_AbCdEfGhIjKlMnOpQrStUv", Reason: "retry", ConfirmDuplicateRisk: true}},
-		{"delivery list", []string{"delivery", "list", "--state", "uncertain"}, protocol.CapabilityPiDeliveryMVP, "delivery.list", "req_delivery_list", protocol.DeliveryListParams{State: stringPointer("uncertain")}},
-		{"delivery inspect", []string{"delivery", "inspect", "dlv_AbCdEfGhIjKlMnOpQrSt"}, protocol.CapabilityPiDeliveryMVP, "delivery.inspect", "req_delivery_inspect", protocol.DeliverySelector{Delivery: "dlv_AbCdEfGhIjKlMnOpQrSt"}},
-		{"delivery requeue", []string{"delivery", "requeue", "dlv_AbCdEfGhIjKlMnOpQrSt", "--reason", "recovery", "--request-id", "req_characterization_requeue"}, protocol.CapabilityPiDeliveryMVP, "delivery.requeue", "req_characterization_requeue", protocol.DeliveryRequeueParams{Delivery: "dlv_AbCdEfGhIjKlMnOpQrSt", Reason: "recovery"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

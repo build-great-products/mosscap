@@ -29,7 +29,6 @@ func TestCobraTreeContainsEveryDocumentedLeafWithCutoverMetadata(t *testing.T) {
 		{"slack history", true, protocol.CapabilitySlackPagination, []string{"limit", "cursor", "json"}}, {"slack thread", true, protocol.CapabilitySlackPagination, []string{"limit", "cursor", "json"}}, {"slack send", false, "slack_effects", []string{"text", "text-file", "stdin", "thread", "task", "file", "request-id", "json"}}, {"slack file", false, "file_transfer_v1", []string{"thread", "file", "comment", "task", "request-id", "json"}}, {"slack edit", false, "slack_effects", []string{"text", "text-file", "stdin", "task", "request-id", "json"}}, {"slack delete", false, "slack_effects", []string{"reason", "task", "request-id", "json"}}, {"slack react", false, "slack_effects", []string{"task", "request-id", "json"}}, {"slack unreact", false, "slack_effects", []string{"task", "request-id", "json"}},
 		{"effect list", true, "slack_effects", []string{"state", "json"}}, {"effect inspect", true, "slack_effects", []string{"json"}}, {"effect retry", false, "slack_effects", []string{"reason", "confirm-duplicate-risk", "request-id", "json"}},
 		{"file show", true, "slack_source_metadata", []string{"json"}}, {"file get", false, "file_transfer_v1", []string{"output", "force", "request-id", "json"}},
-		{"delivery list", true, "pi_delivery_mvp", []string{"state", "json"}}, {"delivery inspect", true, "pi_delivery_mvp", []string{"json"}}, {"delivery requeue", false, "pi_delivery_mvp", []string{"reason", "request-id", "json"}},
 		{"purge", false, "metadata_purge_v1", []string{"before", "dry-run", "confirm", "request-id", "json"}},
 	}
 	for _, tc := range leaves {
@@ -146,27 +145,6 @@ func TestTaskReplyFramePreflightCoversLiteralAndFileText(t *testing.T) {
 		err := checkTaskFrame(config.Config{LocalProtocolMaximumFrame: 100}, "reply", "req_reply_frame", params, source, false, "test")
 		if err == nil || !strings.Contains(err.Error(), "request exceeds the protocol frame limit") {
 			t.Fatalf("textFile=%t frame error=%v", source, err)
-		}
-	}
-}
-
-func TestTypedLeavesBypassLegacyParserBridge(t *testing.T) {
-	tree := (App{}).NewCommandTree()
-	for _, path := range []string{
-		"setup", "config show", "config set", "config secret set",
-		"gateway run", "gateway reload", "gateway status", "doctor",
-		"trust list", "trust add", "trust remove", "purge",
-		"task create", "task list", "task show", "task update", "task open", "task working", "task done", "task reply",
-		"effect list", "effect inspect", "effect retry",
-		"file show", "file get", "slack history", "slack thread", "slack send", "slack file", "slack edit", "slack delete", "slack react", "slack unreact",
-		"delivery list", "delivery inspect", "delivery requeue",
-	} {
-		cmd := commandAt(tree, strings.Fields(path))
-		if cmd == nil {
-			t.Fatalf("missing %q", path)
-		}
-		if !isTypedCobraHandler(cmd.Annotations[annotationHandler]) {
-			t.Errorf("%s is still bound to the legacy parser bridge", path)
 		}
 	}
 }

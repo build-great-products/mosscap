@@ -10,8 +10,8 @@ import (
 )
 
 // slackTyped binds Cobra-parsed Slack leaves directly to protocol requests.
-// It deliberately shares the established frame check, durable mutation error,
-// and renderer behavior with the legacy implementation.
+// It shares the frame check, durable mutation error, and renderer behavior
+// with the other mutation leaves.
 func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error {
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	mutation := command != "history" && command != "thread"

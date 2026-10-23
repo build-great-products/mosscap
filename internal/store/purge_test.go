@@ -15,7 +15,6 @@ func TestConfirmMetadataPurgeDeletesOnlyFinalizedTaskGraphAndReplays(t *testing.
 	s := testStore(t)
 	ctx := context.Background()
 	const taskID = "tsk_purge_finalized"
-	const deliveryID = "dlv_abcdefghijklmnopqrstuv"
 	old := int64(1_700_000_000_000_000)
 	cutoff := time.UnixMicro(old + 10).UTC()
 	if _, err := s.DB().Exec(`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES(?,1,'done','done','local',?,?,?)`, taskID, old, old, old); err != nil {
@@ -24,15 +23,12 @@ func TestConfirmMetadataPurgeDeletesOnlyFinalizedTaskGraphAndReplays(t *testing.
 	if _, err := s.DB().Exec(`INSERT INTO task_state_events(event_id,task_id,prior_state,new_state,actor,request_id,committed_at) VALUES('evt_purge_finalized',?,'open','done','local','state-purge-finalized',?)`, taskID, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec(`INSERT INTO pi_deliveries(delivery_id,task_id,task_version,pi_session_id,delivery_key,state,completed_at_us,created_at_us,updated_at_us) VALUES(?,?,1,'session','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','persisted',?,?,?)`, deliveryID, taskID, old, old, old); err != nil {
-		t.Fatal(err)
-	}
 
 	got, err := s.ConfirmMetadataPurge(ctx, "purge-finalized", cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Removed.Tasks != 1 || got.Removed.TaskStateEvents != 1 || got.Removed.PiDeliveries != 1 {
+	if got.Removed.Tasks != 1 || got.Removed.TaskStateEvents != 1 {
 		t.Fatalf("removed = %#v", got.Removed)
 	}
 	replay, err := s.ConfirmMetadataPurge(ctx, "purge-finalized", cutoff)
@@ -45,46 +41,14 @@ func TestConfirmMetadataPurgeDeletesOnlyFinalizedTaskGraphAndReplays(t *testing.
 	assertPurgeIntegrity(t, s)
 }
 
-func TestConfirmMetadataPurgeRetainsNonFinalizedOrUnknownCompletionDelivery(t *testing.T) {
-	for _, state := range []string{"pending", "inserting", "uncertain", "rejected"} {
-		t.Run(state, func(t *testing.T) {
-			s := testStore(t)
-			const taskID = "tsk_purge_live"
-			old := int64(1_700_000_000_000_000)
-			if _, err := s.DB().Exec(`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES(?,1,'done','done','local',?,?,?)`, taskID, old, old, old); err != nil {
-				t.Fatal(err)
-			}
-			id := "dlv_abcdefghijklmnopqrst" + state[:2]
-			// Non-persisted states may have a nullable completion timestamp; neither
-			// form is purgeable. This freezes the no-updated_at fallback decision.
-			if _, err := s.DB().Exec(`INSERT INTO pi_deliveries(delivery_id,task_id,task_version,pi_session_id,delivery_key,state,created_at_us,updated_at_us) VALUES(?,?,1,'session','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',?,?,?)`, id, taskID, state, old, old); err != nil {
-				t.Fatal(err)
-			}
-			got, err := s.ConfirmMetadataPurge(context.Background(), "purge-live-"+state, time.UnixMicro(old+10).UTC())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.Removed.Tasks != 0 || got.Skipped.Tasks != 1 {
-				t.Fatalf("result = %#v", got)
-			}
-			var count int
-			if err := s.DB().QueryRow("SELECT count(*) FROM tasks WHERE task_id=?", taskID).Scan(&count); err != nil || count != 1 {
-				t.Fatalf("task count = %d, %v", count, err)
-			}
-			assertPurgeIntegrity(t, s)
-		})
-	}
-}
-
 func TestConfirmMetadataPurgeSkippedRootsConsumeCandidateBudget(t *testing.T) {
 	s := testStore(t)
 	old := int64(1_700_000_000_000_000)
 	for i := 0; i < PurgeRootLimit; i++ {
 		taskID := fmt.Sprintf("tsk_root_budget_skip_%03d", i)
 		insertPurgeTask(t, s, taskID, old)
-		if _, err := s.DB().Exec(`INSERT INTO pi_deliveries(delivery_id,task_id,task_version,pi_session_id,delivery_key,state,created_at_us,updated_at_us) VALUES(?,?,1,'session',?,'pending',?,?)`, fmt.Sprintf("dlv_%022d", i), taskID, fmt.Sprintf("sha256:%064x", i), old, old); err != nil {
-			t.Fatal(err)
-		}
+		// An unconfirmed related effect keeps each root referenced.
+		insertPurgeEffect(t, s, fmt.Sprintf("eff_%022d", i), taskID, "prepared", "", old)
 	}
 	if _, err := s.DB().Exec(`INSERT INTO slack_source_events(source_event_id,event_kind,received_at_us,committed_at_us,admission_result,task_version,changed,last_seen_at_us) VALUES('source-after-skipped-roots','message',?,?, 'duplicate',0,0,?)`, old, old, old); err != nil {
 		t.Fatal(err)
@@ -488,9 +452,7 @@ func TestPreviewMetadataPurgeUsesConfirmGraphClassification(t *testing.T) {
 	s := testStore(t)
 	old := int64(1_700_000_000_000_000)
 	insertPurgeTask(t, s, "tsk_preview_graph", old)
-	if _, err := s.DB().Exec(`INSERT INTO pi_deliveries(delivery_id,task_id,task_version,pi_session_id,delivery_key,state,created_at_us,updated_at_us) VALUES('dlv_abcdefghijklmnopqrstuv', 'tsk_preview_graph',1,'session','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','pending',?,?)`, old, old); err != nil {
-		t.Fatal(err)
-	}
+	insertPurgeEffect(t, s, "eff_abcdefghijklmnopqrstuv", "tsk_preview_graph", "prepared", "", old)
 	cutoff := time.UnixMicro(old + 1).UTC()
 	preview, err := s.PreviewMetadataPurge(context.Background(), cutoff)
 	if err != nil {
@@ -500,7 +462,7 @@ func TestPreviewMetadataPurgeUsesConfirmGraphClassification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Eligible != confirm.Eligible || preview.SkippedLive != confirm.SkippedLive || preview.SkippedReferenced != confirm.SkippedReferenced || preview.SkippedLive.Tasks != 1 {
+	if preview.Eligible != confirm.Eligible || preview.SkippedLive != confirm.SkippedLive || preview.SkippedReferenced != confirm.SkippedReferenced || preview.SkippedReferenced.Tasks != 1 {
 		t.Fatalf("preview %#v differs from confirm %#v", preview, confirm)
 	}
 }

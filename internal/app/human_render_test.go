@@ -37,13 +37,13 @@ func TestHumanRenderDoesNotSerializeJSONOrControls(t *testing.T) {
 func TestHumanRenderKeepsMutationRequestAndWarningVisible(t *testing.T) {
 	var out bytes.Buffer
 	input := map[string]any{
-		"request_id": "req_123", "warning": "duplicate insertion is possible",
-		"result": map[string]any{"delivery_id": "dlv_123", "task_id": "tsk_123", "task_version": 2, "state": "uncertain"},
+		"request_id": "req_123", "warning": "duplicate submission is possible",
+		"result": map[string]any{"effect_id": "eff_123", "kind": "send", "state": "ambiguous"},
 	}
 	if err := renderHuman(&out, input); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Request: req_123", "Warning: duplicate insertion is possible", "dlv_123", "uncertain"} {
+	for _, want := range []string{"Request: req_123", "Warning: duplicate submission is possible", "eff_123", "ambiguous"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("human mutation output missing %q: %q", want, out.String())
 		}
