@@ -157,7 +157,7 @@ func normalize(e slackapi.Envelope, receivedAt time.Time) store.SlackSourceEvent
 	}
 	return store.SlackSourceEvent{
 		SourceEventID: sourceEventID(e), EnvelopeID: e.EnvelopeID, EventKind: store.SlackSourceEventKind(e.Kind),
-		TeamID: e.TeamID, ChannelID: e.ChannelID, UserID: e.UserID, BotID: e.BotID, Subtype: e.Subtype,
+		TeamID: e.TeamID, ChannelID: e.ChannelID, UserID: e.UserID, UserTeamID: e.UserTeamID, BotID: e.BotID, Subtype: e.Subtype,
 		MessageTS: string(e.MessageTS), ThreadTS: string(e.ThreadIdentity()), Text: taskText(e), Permalink: e.Permalink,
 		SlackEventAtUS: eventMicroseconds(e.EventTS), ReceivedAt: receivedAt, Files: files,
 	}

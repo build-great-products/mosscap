@@ -23,12 +23,16 @@ func (k EventKind) Valid() bool {
 // EventTS orders edits and deletions. MessageTS remains the opaque source
 // identity used by subsequent Slack operations.
 type Envelope struct {
-	EnvelopeID string             `json:"envelope_id"`
-	EventID    string             `json:"event_id"`
-	Kind       EventKind          `json:"event_kind"`
-	TeamID     string             `json:"team_id"`
-	ChannelID  string             `json:"channel_id"`
-	UserID     string             `json:"user_id,omitempty"`
+	EnvelopeID string    `json:"envelope_id"`
+	EventID    string    `json:"event_id"`
+	Kind       EventKind `json:"event_kind"`
+	TeamID     string    `json:"team_id"`
+	ChannelID  string    `json:"channel_id"`
+	UserID     string    `json:"user_id,omitempty"`
+	// UserTeamID is the author's workspace as the event payload names it, or
+	// empty when it names none. It differs from TeamID for a Slack Connect
+	// (external) author.
+	UserTeamID string             `json:"user_team_id,omitempty"`
 	BotID      string             `json:"bot_id,omitempty"`
 	Subtype    string             `json:"subtype,omitempty"`
 	MessageTS  Timestamp          `json:"message_ts"`

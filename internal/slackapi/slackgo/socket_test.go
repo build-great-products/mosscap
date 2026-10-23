@@ -109,11 +109,17 @@ func TestSocketMapsMessageVariantsAndDerivesStableEventID(t *testing.T) {
 		wantUser    string
 		wantBot     string
 		wantSubtype string
+		wantTeam    string
 	}{
 		{
 			name:     "ordinary reply",
-			inner:    map[string]any{"type": "message", "user": "U012USR", "text": "reply", "ts": "1700000000.000003", "thread_ts": "1700000000.000001", "channel": "C012ABC", "event_ts": "1700000000.000004"},
-			wantKind: slackapi.EventMessage, wantMessage: "1700000000.000003", wantThread: "1700000000.000001", wantText: "reply", wantUser: "U012USR",
+			inner:    map[string]any{"type": "message", "user": "U012USR", "team": "T012ABC", "text": "reply", "ts": "1700000000.000003", "thread_ts": "1700000000.000001", "channel": "C012ABC", "event_ts": "1700000000.000004"},
+			wantKind: slackapi.EventMessage, wantMessage: "1700000000.000003", wantThread: "1700000000.000001", wantText: "reply", wantUser: "U012USR", wantTeam: "T012ABC",
+		},
+		{
+			name:     "Slack Connect mention",
+			inner:    map[string]any{"type": "app_mention", "user": "U999EXT", "user_team": "T999EXT", "source_team": "T999EXT", "text": "<@U012BOT> hi", "ts": "1700000000.000003", "channel": "C012ABC", "event_ts": "1700000000.000004"},
+			wantKind: slackapi.EventAppMention, wantMessage: "1700000000.000003", wantText: "<@U012BOT> hi", wantUser: "U999EXT", wantTeam: "T999EXT",
 		},
 		{
 			name:     "bot system message",
@@ -122,8 +128,8 @@ func TestSocketMapsMessageVariantsAndDerivesStableEventID(t *testing.T) {
 		},
 		{
 			name:     "changed",
-			inner:    map[string]any{"type": "message", "subtype": "message_changed", "channel": "C012ABC", "event_ts": "1700000000.000005", "message": map[string]any{"type": "message", "user": "U012USR", "text": "current", "ts": "1700000000.000003", "thread_ts": "1700000000.000001"}},
-			wantKind: slackapi.EventMessageChange, wantMessage: "1700000000.000003", wantThread: "1700000000.000001", wantText: "current", wantUser: "U012USR",
+			inner:    map[string]any{"type": "message", "subtype": "message_changed", "channel": "C012ABC", "event_ts": "1700000000.000005", "message": map[string]any{"type": "message", "user": "U012USR", "user_team": "T999EXT", "text": "current", "ts": "1700000000.000003", "thread_ts": "1700000000.000001"}},
+			wantKind: slackapi.EventMessageChange, wantMessage: "1700000000.000003", wantThread: "1700000000.000001", wantText: "current", wantUser: "U012USR", wantTeam: "T999EXT",
 		},
 		{
 			name:     "deleted",
@@ -151,13 +157,33 @@ func TestSocketMapsMessageVariantsAndDerivesStableEventID(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Receive: %v", err)
 			}
-			if envelope.Kind != test.wantKind || envelope.MessageTS != test.wantMessage || envelope.ThreadTS != test.wantThread || envelope.Text != test.wantText || envelope.UserID != test.wantUser || envelope.BotID != test.wantBot || envelope.Subtype != test.wantSubtype {
+			if envelope.Kind != test.wantKind || envelope.MessageTS != test.wantMessage || envelope.ThreadTS != test.wantThread || envelope.Text != test.wantText || envelope.UserID != test.wantUser || envelope.BotID != test.wantBot || envelope.Subtype != test.wantSubtype || envelope.UserTeamID != test.wantTeam {
 				t.Fatalf("envelope = %#v", envelope)
 			}
 			if !strings.HasPrefix(envelope.EventID, "sha256-") || len(envelope.EventID) != len("sha256-")+64 {
 				t.Fatalf("derived event ID = %q", envelope.EventID)
 			}
 		})
+	}
+}
+
+func TestSenderTeamPrefersUserTeamThenProfileThenTeam(t *testing.T) {
+	for _, tc := range []struct {
+		name, inner string
+		kind        slackapi.EventKind
+		want        string
+	}{
+		{"user_team wins", `{"user_team":"T999EXT","team":"T012ABC"}`, slackapi.EventMessage, "T999EXT"},
+		{"profile team", `{"user_profile":{"team":"T999EXT"},"team":"T012ABC"}`, slackapi.EventAppMention, "T999EXT"},
+		{"team only", `{"team":"T012ABC"}`, slackapi.EventMessage, "T012ABC"},
+		{"none", `{"user":"U012USR"}`, slackapi.EventMessage, ""},
+		{"edit reads the changed message", `{"team":"T012ABC","message":{"user_team":"T999EXT"}}`, slackapi.EventMessageChange, "T999EXT"},
+		{"deletion names none", `{"team":"T999EXT"}`, slackapi.EventMessageDelete, ""},
+		{"malformed", `[`, slackapi.EventMessage, ""},
+	} {
+		if got := senderTeam([]byte(tc.inner), tc.kind); got != tc.want {
+			t.Errorf("%s: senderTeam=%q want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

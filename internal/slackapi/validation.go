@@ -117,6 +117,12 @@ func ValidateEnvelope(envelope Envelope) error {
 	if err := ValidateChannelID(envelope.ChannelID); err != nil {
 		return err
 	}
+	if envelope.UserTeamID != "" {
+		// A workspace (T...) or an Enterprise Grid organization (E...).
+		if err := validatePrefixedID(envelope.UserTeamID, "TE"); err != nil {
+			return err
+		}
+	}
 	if envelope.UserID != "" {
 		if err := ValidateUserID(envelope.UserID); err != nil {
 			return err

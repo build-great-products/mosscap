@@ -98,3 +98,28 @@ func TestPrivateChannelMentionIsAdmittedAndChannelIsAlwaysNamed(t *testing.T) {
 		t.Fatalf("a refused target recorded %d sends", n)
 	}
 }
+
+// TestExternalSlackConnectMentionIsIgnored: a mention from a user whose event
+// names another workspace is acknowledged without a task or a reaction, while
+// a mention from any member of our workspace is admitted.
+func TestExternalSlackConnectMentionIsIgnored(t *testing.T) {
+	external, externalAck := mentionIn("external", mainChannel, "1700000300.000001", "<@U012BOT> do our work")
+	external.UserID, external.UserTeamID = "U0EXTERNAL", "T0EXTERNAL"
+	member, memberAck := mentionIn("member", mainChannel, mainMentionTS, "<@U012BOT> member work")
+	member.UserID, member.UserTeamID = "U0ANYONE1", harnessTeam
+	h := newSlackHarness(t, nil, []fake.ReceiveStep{{Envelope: external}, {Envelope: member}}, steps(
+		verificationSteps(),
+		reactionSteps(fake.AddReaction, mainChannel, mainMentionTS, "hourglass_flowing_sand"),
+	))
+	waitAcks(t, externalAck, memberAck)
+	h.waitWebDone()
+	if n := h.count("SELECT count(*) FROM slack_source_events WHERE admission_result='ignored_workspace' AND user_id='U0EXTERNAL'"); n != 1 {
+		t.Fatalf("external mention results=%d", n)
+	}
+	if n := h.count("SELECT count(*) FROM slack_task_sources WHERE author_user_id='U0ANYONE1'"); n != 1 {
+		t.Fatalf("member tasks=%d", n)
+	}
+	if ids := h.taskIDs(); len(ids) != 1 {
+		t.Fatalf("tasks=%v", ids)
+	}
+}

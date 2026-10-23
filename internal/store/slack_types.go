@@ -59,21 +59,24 @@ type SlackAdmissionPolicy struct {
 // identifiers. ReceivedAt may be zero, in which case the repository clock is
 // used.
 type SlackSourceEvent struct {
-	SourceEventID  string               `json:"source_event_id"`
-	EnvelopeID     string               `json:"envelope_id,omitempty"`
-	EventKind      SlackSourceEventKind `json:"event_kind"`
-	TeamID         string               `json:"team_id"`
-	ChannelID      string               `json:"channel_id"`
-	UserID         string               `json:"user_id,omitempty"`
-	BotID          string               `json:"bot_id,omitempty"`
-	Subtype        string               `json:"subtype,omitempty"`
-	MessageTS      string               `json:"message_ts"`
-	ThreadTS       string               `json:"thread_ts,omitempty"`
-	Text           string               `json:"text,omitempty"`
-	Permalink      string               `json:"permalink,omitempty"`
-	SlackEventAtUS int64                `json:"slack_event_at_us"`
-	ReceivedAt     time.Time            `json:"received_at,omitempty"`
-	Files          []SlackIncomingFile  `json:"files,omitempty"`
+	SourceEventID string               `json:"source_event_id"`
+	EnvelopeID    string               `json:"envelope_id,omitempty"`
+	EventKind     SlackSourceEventKind `json:"event_kind"`
+	TeamID        string               `json:"team_id"`
+	ChannelID     string               `json:"channel_id"`
+	UserID        string               `json:"user_id,omitempty"`
+	// UserTeamID is the author's workspace when the event names one. A value
+	// other than the policy's TeamID marks an external (Slack Connect) author.
+	UserTeamID     string              `json:"user_team_id,omitempty"`
+	BotID          string              `json:"bot_id,omitempty"`
+	Subtype        string              `json:"subtype,omitempty"`
+	MessageTS      string              `json:"message_ts"`
+	ThreadTS       string              `json:"thread_ts,omitempty"`
+	Text           string              `json:"text,omitempty"`
+	Permalink      string              `json:"permalink,omitempty"`
+	SlackEventAtUS int64               `json:"slack_event_at_us"`
+	ReceivedAt     time.Time           `json:"received_at,omitempty"`
+	Files          []SlackIncomingFile `json:"files,omitempty"`
 }
 
 // SlackIncomingFile contains metadata only. The repository never accepts file

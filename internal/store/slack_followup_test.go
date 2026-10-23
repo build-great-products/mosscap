@@ -162,3 +162,30 @@ func TestFollowUpsAndMentionsFromAnyWorkspaceMember(t *testing.T) {
 		t.Fatalf("follow-up source=%+v err=%v", source, err)
 	}
 }
+
+// A Slack Connect user from another workspace cannot send work: neither a
+// direct mention nor a reply in a tracked thread is admitted, and a member of
+// our own workspace whose event names our team is admitted as usual.
+func TestExternalSlackConnectSendersAreIgnored(t *testing.T) {
+	s := testStore(t)
+	root := sourceTestEvent("Ev-ext-root", SlackEventAppMention, 100)
+	root.MessageTS, root.ThreadTS, root.UserTeamID = followupRootTS, followupRootTS, sourceTestPolicy.TeamID
+	if got := commitFollowupEvent(t, s, root); got.AdmissionResult != SlackAdmitted {
+		t.Fatalf("member mention=%+v", got)
+	}
+	mention := sourceTestEvent("Ev-ext-mention", SlackEventAppMention, 101)
+	mention.MessageTS, mention.UserID, mention.UserTeamID = "1700000700.000001", "U77777777", "T99999999"
+	reply := followupEvent("Ev-ext-reply", "1700000001.000001", followupRootTS, "U77777777", "ship it", 102)
+	reply.UserTeamID = "T99999999"
+	mentionedReply := followupEvent("Ev-ext-mentioned-reply", "1700000002.000001", followupRootTS, "U77777777", "<@U99999999> ship it", 103)
+	mentionedReply.UserTeamID = "T99999999"
+	for _, event := range []SlackSourceEvent{mention, reply, mentionedReply} {
+		if got := commitFollowupEvent(t, s, event); got.AdmissionResult != SlackIgnoredWorkspace || got.TaskID != "" {
+			t.Errorf("%s result=%+v, want ignored_workspace", event.SourceEventID, got)
+		}
+	}
+	var tasks int
+	if err := s.DB().QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil || tasks != 1 {
+		t.Fatalf("tasks=%d err=%v", tasks, err)
+	}
+}

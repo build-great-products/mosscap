@@ -312,6 +312,12 @@ func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy Slack
 	if event.BotID != "" || !humanSubtype(event.Subtype) || event.UserID == policy.BotUserID {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredBot, "", "", committedAtUS)
 	}
+	// Only members of the authenticated workspace may send work. An author
+	// from another workspace (a Slack Connect external user) is ignored like
+	// an event from another workspace, whatever the message says.
+	if event.UserTeamID != "" && event.UserTeamID != policy.TeamID {
+		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredWorkspace, "", "", committedAtUS)
+	}
 	reply := event.ThreadTS != "" && event.ThreadTS != event.MessageTS
 	var thread slackThread
 	if reply {

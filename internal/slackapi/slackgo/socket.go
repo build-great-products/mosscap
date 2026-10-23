@@ -359,6 +359,9 @@ func (stream *envelopeStream) normalize(request socketmode.Request) (envelope sl
 	if err != nil {
 		return slackapi.Envelope{}, invalidResponse()
 	}
+	if callback.InnerEvent != nil {
+		envelope.UserTeamID = senderTeam(*callback.InnerEvent, envelope.Kind)
+	}
 	if envelope.EventID == "" {
 		envelope.EventID = deriveEventID(envelope)
 	}
@@ -426,6 +429,50 @@ func normalizeMessageEvent(envelope *slackapi.Envelope, event *slackevents.Messa
 		envelope.Forwarded = normalizeForwardedAttachments(current.Attachments)
 	}
 	return nil
+}
+
+// senderTeamFields are the Events API fields that name the workspace of a
+// message's author. Slack sets user_team (and the user_profile team) on
+// messages in Slack Connect channels, and team on ordinary user messages.
+type senderTeamFields struct {
+	UserTeam    string `json:"user_team"`
+	Team        string `json:"team"`
+	UserProfile *struct {
+		Team string `json:"team"`
+	} `json:"user_profile"`
+}
+
+func (f senderTeamFields) team() string {
+	profileTeam := ""
+	if f.UserProfile != nil {
+		profileTeam = f.UserProfile.Team
+	}
+	return firstNonEmpty(f.UserTeam, profileTeam, f.Team)
+}
+
+// senderTeam returns the author's workspace from the inner event payload, or
+// "" when the payload names none. An edit names it on the changed message. A
+// deletion carries no author team; it only ever affects an admitted source.
+// This reads the payload Slack already delivered: no users.info call is made.
+func senderTeam(inner json.RawMessage, kind slackapi.EventKind) string {
+	var event struct {
+		senderTeamFields
+		Message *senderTeamFields `json:"message"`
+	}
+	if json.Unmarshal(inner, &event) != nil {
+		return ""
+	}
+	switch kind {
+	case slackapi.EventMessageChange:
+		if event.Message == nil {
+			return ""
+		}
+		return event.Message.team()
+	case slackapi.EventMessageDelete:
+		return ""
+	default:
+		return event.team()
+	}
 }
 
 func normalizeForwardedAttachments(attachments []slack.Attachment) []slackapi.ForwardedMessage {
