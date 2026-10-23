@@ -58,7 +58,7 @@ Start the gateway in the foreground:
 ./bin/mosscap gateway run
 ```
 
-Upgrading from a release with Pi delivery or a single channel: remove `delivery_lease`, `leader_heartbeat`, and `leader_expiry` from `config.toml`, and replace `slack_channel_id = "C..."` with `slack_channel_allowlist = "C..."` (same ID keeps single-channel admission) or `slack_channel_allowlist = ""` (every member channel). The gateway names each obsolete key it finds. The ledger migrates on first start and drops its Pi delivery records; existing tasks and effects already record their channel, so nothing is backfilled.
+Upgrading from a release with Pi delivery or a single channel (schema migrations 8 and 9 run automatically; they are one-way): remove `delivery_lease`, `leader_heartbeat`, and `leader_expiry` from `config.toml`, and replace `slack_channel_id = "C..."` with `slack_channel_allowlist = "C..."` (same ID keeps single-channel admission) or `slack_channel_allowlist = ""` (every member channel). The gateway names each obsolete key it finds. The ledger migrates on first start and drops its Pi delivery records; existing tasks and effects already record their channel, so nothing is backfilled.
 
 ## Trust and tasks
 
@@ -71,6 +71,16 @@ mosscap trust remove U01234567
 ```
 
 Admission also requires the authenticated workspace, a channel the bot is a member of (and that passes the allowlist, when one is set), a human sender, and a literal direct mention of the bot. Messages that do not mention the bot are ignored without a reaction, whoever sends them; a mention from an untrusted user gets `:no_entry:`. A trusted Slack user can direct a fully capable local agent; these checks are authorization gates, not a sandbox.
+
+### Thread follow-ups
+
+People usually answer in the thread without mentioning the bot again ("Perfect", "it's out of sync"). A new reply from a trusted user in a tracked thread is admitted without a mention, as its own **follow-up task**. A thread is tracked when it already holds an admitted task, or when the bot posted its root or a reply in it (a confirmed `slack send`, `task reply`, or upload). Each follow-up:
+
+- is a separate task with the reply's text, so nothing overwrites earlier text, and gets its own lifecycle reaction on the reply;
+- records the thread (`thread_ts`, the thread root) and `parent_task_id`, the thread's original task: the task from the root message, else the task the bot's root post was for, else the earliest task in the thread;
+- is replied to in the same thread by `task reply`, and `task context` shows the whole thread.
+
+Untrusted replies, the bot's own messages, and edits of replies that were never admitted do not create follow-ups. A reply that also mentions the bot is admitted the same way and gets the same link. Edits of an admitted follow-up update it like any other task. A reply with files but no text is admitted with the text `(attachment without message text)`. Replies with the `thread_broadcast` and `file_share` subtypes count as human messages.
 
 Task state remains locally authoritative. Slack-origin tasks also show a lifecycle reaction on their source message that mirrors task state:
 
@@ -107,11 +117,13 @@ Default output is compact human-readable cards, rows, and labelled details; use 
 `mosscap task watch` is how an agent receives work. It stays connected to the gateway and prints one line per task event on stdout until interrupted:
 
 ```text
-cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=slack channel=C0BAQM6JEAJ text=<@U012BOT> review the release\nthanks
+cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=slack channel=C0BAQM6JEAJ thread=1700000000.000001 parent= text=<@U012BOT> review the release\nthanks
+cursor=9 change=created task=ZyXwVuTsRqPoNmLkJiHgFe version=1 state=open source=slack channel=C0BAQM6JEAJ thread=1700000000.000001 parent=AbCdEfGhIjKlMnOpQrStUv text=Perfect
 ```
 
 - `change` is `created`, `edited` (content version changed, for example a Slack edit), or `state` (the task re-entered `open`).
-- `channel` is the task's Slack channel ID, empty for local tasks.
+- `channel` is the task's Slack channel ID and `thread` its reply thread (the root message timestamp); both are empty for local tasks.
+- `parent` is set on a thread follow-up and names the thread's original task; it is empty otherwise.
 - `text` is the last field, never truncated, with backslash, newlines, tabs, and other control characters escaped so one event is always one line.
 - `--json` prints one JSON object per line instead: `{"change_seq":7,"change":"created","task":{...}}`, where `task` is the same DTO as `task show --json`.
 - `--state-changes` also reports transitions to `working` and `done`.
@@ -129,7 +141,7 @@ Run the watcher under Claude Code's Monitor tool (or any background runner that 
 mosscap task watch --cursor-file "$HOME/.local/state/mosscap-watch.cursor"
 ```
 
-For each notification, the agent claims and handles the task, then replies (Slack-origin tasks; use `task done` for local ones):
+For each notification, the agent claims and handles the task, then replies (Slack-origin tasks; use `task done` for local ones). A line with `parent=` is a follow-up in an existing thread: `task context` shows the conversation it answers, and its reply lands in the same thread.
 
 ```sh
 mosscap task working AbCdEfGhIjKlMnOpQrStUv

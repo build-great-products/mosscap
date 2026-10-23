@@ -32,7 +32,7 @@ The gateway is the only normal SQLite writer. CLI commands other than setup and 
 
 SQLite is authoritative for coordination state: tasks, source events, trust, effects, files, and request outcomes. Slack is an external persistence domain and cannot share a transaction with SQLite.
 
-The gateway upgrades an intact older ledger atomically on open and refuses a newer or altered one. Upgrades are one-way. Schema version 8 drops the table of the removed Pi delivery feature without archiving it.
+The gateway upgrades an intact older ledger atomically on open and refuses a newer or altered one. Upgrades are one-way. Schema version 8 drops the table of the removed Pi delivery feature without archiving it. Schema version 9 adds the nullable `parent_task_id` follow-up link to Slack task sources and thread lookup indexes; existing sources get no parent.
 
 Every gateway mutation must carry a client-generated request ID. A replay with the same operation and canonical input must return the original typed outcome without repeating the mutation. Reuse for different input must fail as a conflict. Stored request outcomes must not become a hidden archive of task text or credentials.
 
@@ -75,6 +75,15 @@ An initial Slack message is admitted only when all of these hold:
 
 Every task records its channel. The same message timestamp in two channels is two distinct sources.
 
+A new message (not an edit) is also admitted without a mention as a **follow-up** when all of these hold:
+
+- it is a reply (its thread timestamp differs from its message timestamp) in an admissible channel;
+- its thread is tracked: an admitted task's source is in that thread, or a confirmed `send` or `file_upload` effect posted the thread's root or a reply in it;
+- the sender is a non-bot user in the current trusted-user set; and
+- it has text or attached files.
+
+A follow-up is a new task, never a change to an earlier one. Its source records the thread root as `thread_ts` and `parent_task_id`: the task admitted from the root message, else the related task of a confirmed root `send`, else the earliest task in the thread, else the related task of the earliest confirmed post in the thread, else none. `parent_task_id` is provenance only: it is not a foreign key and may name a purged task. Any admitted reply, mentioned or not, gets the same link. An untrusted reply that does not mention the bot is `ignored_unmentioned` and gets no reaction. Messages from the bot, or with a subtype other than `thread_broadcast` or `file_share`, are `ignored_bot`. An attachment-only follow-up has the task text `(attachment without message text)`. Admission, deduplication, commit-before-ack, edits, and deletion are otherwise exactly as for mentioned messages.
+
 For each identifiable envelope, the gateway must deduplicate and commit the admission result before acknowledging Slack. A commit failure must not be acknowledged. Mosscap makes no receipt claim while disconnected from Socket Mode.
 
 An admitted message creates at most one task. A meaningful newer source edit replaces current text/attachment metadata and increments version. Stale edits must not roll content backward. Source deletion preserves task text and state while recording deletion metadata. Incoming attachments are metadata-only until explicitly retrieved.
@@ -104,10 +113,10 @@ Each event is the task's current snapshot at its latest change sequence. Changes
 The default line is:
 
 ```text
-cursor=SEQ change=created|edited|state task=TASK_ID version=N state=open|working|done source=local|slack channel=CHANNEL_ID text=ESCAPED
+cursor=SEQ change=created|edited|state task=TASK_ID version=N state=open|working|done source=local|slack channel=CHANNEL_ID thread=THREAD_TS parent=TASK_ID text=ESCAPED
 ```
 
-`channel` is the Slack channel of a Slack task and empty for a local task. `text` is the last field and is never truncated. It escapes backslash as `\\`, newline as `\n`, carriage return as `\r`, tab as `\t`, and every other control character and U+2028/U+2029 as `\uXXXX`; other printable Unicode is retained. With `--json`, each line is one `TaskChangeDTO` object (`change_seq`, `change`, and a `task` with the `TaskDTO` shape including `slack_source` for Slack tasks), and the cursor is `change_seq`.
+`channel` and `thread` are the Slack channel and reply thread root of a Slack task and are empty for a local task. `parent` is the source's `parent_task_id`, empty when absent. `text` is the last field and is never truncated. It escapes backslash as `\\`, newline as `\n`, carriage return as `\r`, tab as `\t`, and every other control character and U+2028/U+2029 as `\uXXXX`; other printable Unicode is retained. With `--json`, each line is one `TaskChangeDTO` object (`change_seq`, `change`, and a `task` with the `TaskDTO` shape including `slack_source` for Slack tasks), and the cursor is `change_seq`.
 
 By default a live event is emitted when a task is created, when its content version changes, or when it enters `open`. `--state-changes` also emits transitions to `working` and `done`. Filtered changes still advance the cursor.
 

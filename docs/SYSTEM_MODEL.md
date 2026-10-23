@@ -41,7 +41,7 @@ A watcher writes nothing: printing a line proves nothing about what an agent did
 
 ### Slack
 
-Mosscap serves one workspace and every channel its bot is a member of, optionally narrowed by a configured allowlist. Workspace and bot identity are derived from Slack authentication. Work is admitted only when a non-bot sender in the live trusted-user set directly mentions the bot in an admitted channel. Each task, effect, and watch line carries its channel, and every Slack command names one channel (explicitly, from its task, or from a single-entry allowlist).
+Mosscap serves one workspace and every channel its bot is a member of, optionally narrowed by a configured allowlist. Workspace and bot identity are derived from Slack authentication. Work is admitted when a non-bot sender in the live trusted-user set directly mentions the bot in an admitted channel, or replies, without a mention, in a thread the bot already tracks (one holding an admitted task, or one the bot posted in). Such a follow-up is its own task linked to the thread and to the thread's original task, so each reply is a separate unit of work and no earlier text is overwritten. Each task, effect, and watch line carries its channel, and every Slack command names one channel (explicitly, from its task, or from a single-entry allowlist).
 
 Slack reads and writes are explicit. Each write records a durable intent before network submission. Slack content and task state are independent, except for the explicit `task reply --done` composition, which marks done only after a confirmed reply.
 
@@ -65,7 +65,7 @@ State transitions do not post Slack content; they only move the lifecycle reacti
 
 An eligible Slack envelope follows this path:
 
-1. The gateway validates workspace, channel, sender, trust, and direct mention.
+1. The gateway validates workspace, channel, sender, and trust, and requires a direct mention or a reply in a tracked thread.
 2. In SQLite it deduplicates the source and creates or updates the task, and prepares the queued reaction for a new task.
 3. Only after commit does it acknowledge the Slack envelope, then submits the reaction.
 4. Every `task watch` client sees the change on its next poll.
