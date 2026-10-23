@@ -1,10 +1,10 @@
 # Mosscap
 
-**Durable Slack work for a Pi session that stays yours.**
+**Durable Slack work for a long-running agent session.**
 
-Mosscap connects one trusted Slack channel to an interactive [Pi](https://github.com/earendil-works/pi-coding-agent) session. Eligible Slack mentions and local requests become durable tasks in SQLite. An explicitly enabled Pi extension inserts those tasks as visible messages and starts model processing.
+Mosscap connects one trusted Slack channel to an agent session such as Claude Code. Eligible Slack mentions and local requests become durable tasks in SQLite. The agent follows them with `mosscap task watch`, which prints one line per task event, and handles each task with explicit CLI commands.
 
-Mosscap does not start, supervise, select, or reset Pi. A person starts Pi and runs `/mosscap` in the session that should receive work.
+Mosscap does not start, supervise, or prompt the agent. A person (or a supervisor) runs the agent and points its background monitor at `task watch`.
 
 ```text
 Slack ───────┐
@@ -12,10 +12,10 @@ Slack ───────┐
 Go CLI ──────┘              │
                             │ private local protocol
                             ▼
-                    TypeScript Pi extension
+                 mosscap task watch (one line per event)
                             │
                             ▼
-                   human-owned Pi session
+                     agent session
 ```
 
 ## What is implemented
@@ -25,18 +25,16 @@ The current v1 workflow includes:
 - single-workspace, single-channel Slack Socket Mode admission;
 - a live SQLite-backed allowlist of trusted Slack user IDs;
 - local and Slack-origin tasks with `open`, `working`, and `done` states;
+- `task watch`, a one-line-per-event task stream with a durable resume cursor;
 - explicit Slack reads, replies, edits, deletes, reactions, and file uploads;
+- Slack lifecycle reactions that mirror task state;
 - lazy incoming file download and private temporary-file handling;
-- explicit Pi opt-in, visible delivery, persisted delivery evidence, and recovery;
-- `task watch`, a one-line-per-event task stream for any agent harness;
-- durable ambiguous/uncertain outcomes that are never retried automatically; and
+- durable ambiguous outcomes that are never retried automatically; and
 - explicit metadata purge with dry-run and confirmation modes.
-
-The previous numbered milestones described implementation order. They are complete history, not current product modes or an active roadmap.
 
 ## Install and configure
 
-Requirements are Go, Node/pnpm for extension development, and Pi `0.84.1` for the source-loaded extension.
+Requirements are Go and `just`.
 
 ```sh
 just build
@@ -54,23 +52,11 @@ Start the gateway in the foreground:
 ./bin/mosscap gateway run
 ```
 
-Then start a persisted interactive Pi session with the checked-out extension:
-
-```sh
-pi -e /absolute/path/to/mosscap/pi-extension
-```
-
-In Pi, opt in explicitly:
-
-```text
-/mosscap
-```
-
-Use `/mosscap status` to inspect the connection and `/mosscap off` to stop delivery without stopping Pi.
+Upgrading from a release with Pi delivery: remove `delivery_lease`, `leader_heartbeat`, and `leader_expiry` from `config.toml` (the gateway names each obsolete key it finds). The ledger migrates on first start and drops its Pi delivery records.
 
 ## Trust and tasks
 
-An empty trust set admits no Slack work. Add immutable Slack user IDs only for people authorized to trigger the local Pi session:
+An empty trust set admits no Slack work. Add immutable Slack user IDs only for people authorized to give the agent work:
 
 ```sh
 mosscap trust list
@@ -78,9 +64,17 @@ mosscap trust add U01234567
 mosscap trust remove U01234567
 ```
 
-Admission also requires the configured workspace and channel, a human sender, and a literal direct mention of the bot. A trusted Slack user can trigger a fully capable local Pi while `/mosscap` is active; these checks are authorization gates, not a sandbox.
+Admission also requires the configured workspace and channel, a human sender, and a literal direct mention of the bot. A trusted Slack user can direct a fully capable local agent; these checks are authorization gates, not a sandbox.
 
-Task state remains locally authoritative. Slack-origin tasks also show a durable lifecycle projection: `:hourglass_flowing_sand:` while queued, then `:eyes:` after Pi has durably persisted the current version; completion removes `:eyes:`. These are separately recorded Slack effects, so an interrupted or ambiguous Slack call remains inspectable rather than being silently retried or atomically replaced.
+Task state remains locally authoritative. Slack-origin tasks also show a lifecycle reaction on their source message that mirrors task state:
+
+| Task state | Reaction |
+| --- | --- |
+| `open` (queued) | `:hourglass_flowing_sand:` |
+| `working` (claimed with `task working`) | `:eyes:` |
+| `done` | none |
+
+Each transition adds the new marker before removing the old one. These are separately recorded Slack effects, so an interrupted or ambiguous Slack call remains inspectable rather than being silently retried or atomically replaced. Edits to the source message change the task text, not the reaction.
 
 ```sh
 mosscap task create --text "review the release"
@@ -102,9 +96,9 @@ Every command that contacts the gateway accepts `--timeout DURATION` (default `1
 
 Default output is compact human-readable cards, rows, and labelled details; use `--json` for the unchanged command DTOs. Message cards preserve full multiline Unicode text and visibly escape terminal control bytes. Colors require a TTY and are disabled by `NO_COLOR`.
 
-## Watching tasks from any harness
+## Watching tasks
 
-Agents that cannot load the Pi extension can consume tasks with `mosscap task watch`. It stays connected to the gateway and prints one line per task event on stdout until interrupted:
+`mosscap task watch` is how an agent receives work. It stays connected to the gateway and prints one line per task event on stdout until interrupted:
 
 ```text
 cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=slack text=<@U012BOT> review the release\nthanks
@@ -118,7 +112,7 @@ cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=
 - `--cursor-file PATH` makes restarts resume where the last run stopped. The file is updated after each printed line, so a crash can repeat at most one line and never skips one. `--since CURSOR` resumes from an explicit cursor instead.
 - If the gateway restarts, the watcher reconnects with backoff and says so on stderr; stdout carries events only.
 
-Watching is read-only. It records no delivery evidence, adds no Slack reactions, and does not claim the Pi delivery slot, so claim work explicitly with `task working` and finish it with `task reply --done` or `task done`.
+Watching is read-only. It changes no task state and adds no Slack reactions, so claim work explicitly with `task working` and finish it with `task reply --done` or `task done`.
 
 ### Claude Code
 
@@ -150,14 +144,12 @@ mosscap slack file --file ./result.bin
 
 Mosscap retains file metadata and transfer outcomes, not permanent copies of transferred bytes.
 
-SQLite is authoritative for tasks, Slack effects, and delivery outcomes. Pi JSONL records what one Pi session has seen. Mosscap does not claim exactly-once execution across SQLite, Pi, or Slack:
+SQLite is authoritative for tasks and Slack effects. Mosscap does not claim exactly-once execution across SQLite and Slack:
 
-- a delivery that may have reached Pi becomes `uncertain` and requires inspection before requeue;
 - a Slack operation that may have reached Slack becomes `ambiguous` and requires inspection before retry; and
 - retries preserve the previous attempt and make duplicate risk explicit.
 
 ```sh
-mosscap delivery list --state uncertain --json
 mosscap effect list --state ambiguous --json
 mosscap gateway status --json
 mosscap doctor --json
@@ -180,14 +172,12 @@ Every mutation has a request ID. When the CLI generates one, it reports it in th
 
 ## Documentation
 
-- [`pi-extension/README.md`](pi-extension/README.md) — Pi extension installation and behavior
-- [`docs/SYSTEM_MODEL.md`](docs/SYSTEM_MODEL.md) — architecture and authority boundaries
-- [`docs/SPEC.md`](docs/SPEC.md) — normative v1 product contract
+- [`docs/SYSTEM_MODEL.md`](docs/SYSTEM_MODEL.md): architecture and authority boundaries
+- [`docs/SPEC.md`](docs/SPEC.md): normative v1 product contract
 
 ## Development
 
 ```sh
-just check
+just check   # gofmt check, go test ./..., go vet ./...
 just build
-cd pi-extension && pnpm install --frozen-lockfile && pnpm test && pnpm typecheck
 ```

@@ -15,23 +15,24 @@ Mosscap must provide:
 - admission of direct bot mentions from a live SQLite-backed trusted-user set;
 - local and Slack-origin tasks with explicit state transitions;
 - commit-before-ack Slack source deduplication;
-- one explicitly opted-in persisted Pi TUI session at a time;
-- visible task delivery that triggers model processing;
-- a harness-neutral task event stream (`task watch`) with a durable resume cursor;
+- a harness-neutral task event stream (`task watch`) with a durable resume cursor, which is the only way work reaches an agent;
 - explicit Slack reads, writes, reactions, and file operations;
-- durable Slack intents and Pi delivery outcomes with honest uncertainty;
+- Slack lifecycle reactions that project task state;
+- durable Slack intents with honest uncertainty;
 - temporary, bounded file transfer without permanent byte storage;
 - validated, atomic configuration reload;
 - a private versioned local protocol; and
-- explicit inspection, retry/requeue, and metadata purge operations.
+- explicit inspection, retry, and metadata purge operations.
 
-Mosscap does not need to start or supervise Pi, support more than one Slack destination, retain historical task text, archive file bytes, infer task state from conversation, retry uncertain external work automatically, provide a browser UI, or guarantee end-to-end exactly-once execution.
+Mosscap does not need to start, supervise, or prompt an agent, support more than one Slack destination, retain historical task text, archive file bytes, infer task state from conversation, retry uncertain external work automatically, provide a browser UI, or guarantee end-to-end exactly-once execution.
 
 ## 2. Authority and persistence
 
 The gateway is the only normal SQLite writer. CLI commands other than setup and offline-safe configuration edits must use the gateway.
 
-SQLite is authoritative for coordination state: tasks, source events, trust, deliveries, effects, files, and request outcomes. Pi JSONL is authoritative only for what that Pi session has persisted. Slack and Pi are external persistence domains and cannot share a transaction with SQLite.
+SQLite is authoritative for coordination state: tasks, source events, trust, effects, files, and request outcomes. Slack is an external persistence domain and cannot share a transaction with SQLite.
+
+The gateway upgrades an intact older ledger atomically on open and refuses a newer or altered one. Upgrades are one-way. Schema version 8 drops the table of the removed Pi delivery feature without archiving it.
 
 Every gateway mutation must carry a client-generated request ID. A replay with the same operation and canonical input must return the original typed outcome without repeating the mutation. Reuse for different input must fail as a conflict. Stored request outcomes must not become a hidden archive of task text or credentials.
 
@@ -48,7 +49,9 @@ $XDG_STATE_HOME/mosscap/tmp/
 
 Fallbacks are `~/.config` and `~/.local/state`. Configuration and state roots must be owner-only directories. Sensitive files must be owner-only regular files; unsafe ownership, modes, symlinks, hard links, or escaped state paths must fail closed.
 
-`config.toml` contains Slack app and bot tokens, the channel ID, and all scalar limits/timeouts. Workspace/team and bot-user IDs are derived and verified through Slack authentication, not configured manually. Tokens must be set through the private config file, redacted from output, and excluded from SQLite, logs, protocol results, and Pi messages.
+`config.toml` contains Slack app and bot tokens, the channel ID, and all scalar limits/timeouts. Workspace/team and bot-user IDs are derived and verified through Slack authentication, not configured manually. Tokens must be set through the private config file, redacted from output, and excluded from SQLite, logs, and protocol results.
+
+Keys of removed features (for example `delivery_lease`, `leader_heartbeat`, and `leader_expiry`) must be rejected with guidance to remove them.
 
 `config set` must update one known non-secret value atomically while preserving unrelated comments and formatting. `config secret set` must accept only known Slack token fields and avoid printing their values. Editing stages a candidate; it does not change the running snapshot.
 
@@ -62,7 +65,7 @@ A task has a unique opaque ID, positive monotonic content version, current text,
 
 Every task also carries a durable change sequence and the kind of its latest change (`created`, `edited`, or `state`). The ledger must assign each creation, content-version change, and state change the next value of one monotonic counter inside the writing transaction, so sequence order equals commit order. Sequence values are never reused, including after purge. No-op edits and same-state transitions must not advance the counter. Only the latest change of each task is retained; it is not an event history.
 
-Creation yields `open`. Explicit transitions may move between all three states; same-state transitions are idempotent. Entering `done` sets `done_at`; leaving it clears `done_at`. State-only changes do not increment content version. For Slack-origin tasks, entering `done` removes the current lifecycle reaction and reopening restores the reaction implied by durable delivery evidence; state transitions do not otherwise post or alter Slack content.
+Creation yields `open`. Explicit transitions may move between all three states; same-state transitions are idempotent. Entering `done` sets `done_at`; leaving it clears `done_at`. State-only changes do not increment content version. For Slack-origin tasks, each committed state change replaces the lifecycle reaction (section 4a); state transitions do not otherwise post or alter Slack content.
 
 An initial Slack message is admitted only when all of these hold:
 
@@ -76,34 +79,21 @@ An admitted message creates at most one task. A meaningful newer source edit rep
 
 Configured-channel events rejected as untrusted must prepare a deduplicated `no_entry` reaction before acknowledgement. Failure or ambiguity of that reaction must remain inspectable and must not admit the event.
 
-An admitted Slack task version prepares an `hourglass_flowing_sand` queued reaction before acknowledgement. Once that exact latest version is durably recorded as `persisted` by Pi, Mosscap prepares ordered effects to add `eyes` and then remove the queued reaction; entering `done` removes whichever current lifecycle marker applies, and each later reopening restores the appropriate marker with a distinct durable intent. A meaningful edit invalidates an older persisted version by adding its new queued marker before removing `eyes`. These are Slack projections, not task-state transactions: duplicate delivery/restart reuses an intent, and a failed or ambiguous submission is inspectable and is never automatically retried. The remove/add replacement is explicitly not atomic.
+## 4a. Lifecycle reactions
 
-## 5. Pi delivery
+A Slack-origin task's source message carries one lifecycle reaction that projects its current state:
 
-The extension must remain inactive until a human runs `/mosscap` in a persisted interactive TUI session. `/mosscap off` must disconnect without changing tasks or stopping Pi. Runtime opt-in must not be silently restored by a prior session file.
+| State | Reaction |
+| --- | --- |
+| `open` | `hourglass_flowing_sand` |
+| `working` | `eyes` |
+| `done` | none |
 
-The gateway grants one active extension connection/session slot. A second session must be refused rather than silently replacing the first. Disconnect releases the slot after reconciling any in-progress insertion.
+Admission prepares the `open` reaction before acknowledgement and submits it afterwards. Each later committed state change prepares, in order, an add of the new state's reaction and then a removal of the prior state's reaction, each under a durable intent keyed by that transition's state event, so a reopened task gets fresh intents. The removal is submitted only after the add is confirmed; a transition into `done` has no add and only removes. Content edits and source deletion do not change the reaction. The replacement is explicitly not atomic. A failed or ambiguous submission remains inspectable and is never automatically retried. Adding a reaction that is already present, or removing one that is absent, is a confirmed outcome because the requested end state holds.
 
-Before polling work, the extension must scan persisted Mosscap custom-message entries and reconcile observed delivery IDs/keys for its Pi session. A task delivery must:
+On startup the gateway re-prepares any missing lifecycle intent for the latest transition of each `open` or `working` Slack task before effect recovery runs, so a crash between a transition commit and its projection converges. `done` tasks are not reconciled at startup.
 
-- be a visible custom message with clearly delimited user-provided text;
-- include its delivery key in structured details;
-- trigger a model turn immediately when idle or as a follow-up when busy; and
-- be reported persisted only after the matching message is observed in Pi session entries.
-
-Delivery states are:
-
-```text
-pending → inserting → persisted
-              ├────→ uncertain
-              └────→ rejected
-```
-
-A disconnect after insertion starts must become `uncertain`, never silently pending. Uncertain and rejected attempts must not be automatically repeated. `delivery requeue` creates a new attempt, preserves predecessor evidence, requires a reason, and warns that duplicate insertion is possible.
-
-The extension must not connect to Slack, write SQLite, add hidden model-callable Mosscap tools, infer task state from prose, or manage the Pi process/model.
-
-## 5a. Task watch
+## 5. Task watch
 
 `task watch` is a read-only, long-running client of the `task_changes_v1` capability. It must poll the gateway over the private local protocol and write each selected task change to stdout as exactly one complete line, flushed per line, until interrupted. Stdout must contain only events. Reconnect and other diagnostics go to stderr.
 
@@ -123,7 +113,7 @@ The cursor is the change sequence. `--since CURSOR` resumes after that value. `-
 
 When the gateway is unavailable, the watcher must retry with capped exponential backoff, report each failure and the eventual reconnection on stderr, and resume from its in-memory cursor. Typed refusals (unsupported capability, invalid or ahead cursor) end the command with their normal exit category. `--timeout` bounds each dial/handshake and each poll separately. A `--json` fatal error is the shared runtime error object on stdout, which callers distinguish from events by its `code` field.
 
-Watching is not delivery. It must not claim the Pi delivery slot, create delivery records, change task state, or add Slack reactions. A watcher should claim work explicitly, for example with `task working`, and complete it with `task reply --done` or `task done`. Several watchers, and a Pi extension, may observe the same tasks; coordination between them is the caller's responsibility.
+Watching must not change task state or add Slack reactions. A watcher should claim work explicitly, for example with `task working` (which moves the lifecycle reaction to `eyes`), and complete it with `task reply --done` or `task done`. Several watchers may observe the same tasks; coordination between them is the caller's responsibility.
 
 ## 6. Slack operations and effects
 
@@ -157,11 +147,11 @@ Temporary files must use generated owner-only paths under the state root. Expire
 
 ## 8. Purge and diagnostics
 
-Purge requires an absolute RFC 3339 cutoff and exactly one of `--dry-run` or `--confirm`. Dry-run must not mutate state. Confirmed purge may remove eligible finalized history but must preserve open/working tasks, current delivery ownership, unresolved deliveries/effects, live request outcomes, trust, configuration, and every record required by retained state.
+Purge requires an absolute RFC 3339 cutoff and exactly one of `--dry-run` or `--confirm`. Dry-run must not mutate state. Confirmed purge may remove eligible finalized history but must preserve open/working tasks, unresolved effects, live request outcomes, trust, configuration, and every record required by retained state.
 
-`gateway status` must distinguish process health from outcomes requiring operator action and report bounded task, Slack, delivery, effect, database, and temporary-file state. `doctor` must be non-destructive: it must not send Slack messages, acknowledge events, transfer bytes, or claim Pi ownership.
+`gateway status` must distinguish process health from outcomes requiring operator action and report bounded task, Slack, effect, database, and temporary-file state. `doctor` must be non-destructive: it must not send Slack messages, acknowledge events, or transfer bytes.
 
-Logs and diagnostics must exclude credentials, authorization headers, raw Slack envelopes, and full message bodies. Local paths and ordinary diagnostics are not redacted and may appear in opted-in Pi/model context.
+Logs and diagnostics must exclude credentials, authorization headers, raw Slack envelopes, and full message bodies. Local paths and ordinary diagnostics are not redacted and may appear in agent context.
 
 ## 9. Commands and compatibility
 
@@ -177,21 +167,18 @@ mosscap task create|list|show|context|watch|update|open|working|done|reply
 mosscap slack history|thread|send|file|edit|delete|react|unreact
 mosscap effect list|inspect|retry
 mosscap file show|get
-mosscap delivery list|inspect|requeue
 mosscap purge
 ```
 
-Pi provides `/mosscap`, `/mosscap status`, and `/mosscap off`.
+SQLite-backed `task list`, `effect list`, and `trust list` accept bounded `--limit`/`--cursor` pages (effects also accept composable `--task`). Tasks are oldest-created-first; effects newest-created-first; trust is lexical. Resource cursors are full IDs and a purged anchor returns typed `cursor_expired` conflict guidance to restart without `--cursor`; trust cursors remain valid after removal. `slack history` and `slack thread` likewise accept `--limit` and `--cursor`; both default to and cap at 50 messages, preserve Slack's native order, and pass the opaque Slack cursor unchanged.
 
-SQLite-backed `task list`, `effect list`, `delivery list`, and `trust list` accept bounded `--limit`/`--cursor` pages (effects and deliveries also accept composable `--task`). Tasks are oldest-created-first; effects and deliveries newest-created-first; trust is lexical. Resource cursors are full IDs and a purged anchor returns typed `cursor_expired` conflict guidance to restart without `--cursor`; trust cursors remain valid after removal. `slack history` and `slack thread` likewise accept `--limit` and `--cursor`; both default to and cap at 50 messages, preserve Slack's native order, and pass the opaque Slack cursor unchanged.
+The private Unix-socket protocol uses bounded 32-bit-length-prefixed JSON frames, a versioned handshake, typed command/results, and capability negotiation. The only client kind is `cli`. Unknown incompatible envelopes or enum values must fail safe. Slow clients must be disconnected without discarding durable work. Same-user authentication is not protection from compromise of that OS account.
 
-The private Unix-socket protocol uses bounded 32-bit-length-prefixed JSON frames, a versioned handshake, typed command/results, and capability negotiation. Unknown incompatible envelopes or enum values must fail safe. Slow clients must be disconnected without discarding durable work. Same-user authentication is not protection from compromise of that OS account.
-
-Every CLI leaf that contacts the gateway accepts a positive shared `--timeout` duration, defaulting to 10 seconds. For `task watch` it applies to each connection attempt and each poll (section 5a); for every other leaf its deadline begins immediately before gateway contact and covers dial, hello, calls, and frame I/O; an earlier application/caller deadline wins. Explicit body stdin and local validation occur before this deadline. Cancellation before a Slack/Pi external boundary leaves work unsubmitted; after a boundary, the gateway durably records a confirmed, failed, or ambiguous outcome using a non-cancelled commit context. Timeout, cancellation, or disconnect after submission is ambiguous and is never retried automatically.
+Every CLI leaf that contacts the gateway accepts a positive shared `--timeout` duration, defaulting to 10 seconds. For `task watch` it applies to each connection attempt and each poll (section 5); for every other leaf its deadline begins immediately before gateway contact and covers dial, hello, calls, and frame I/O; an earlier application/caller deadline wins. Explicit body stdin and local validation occur before this deadline. Cancellation before a Slack external boundary leaves work unsubmitted; after a boundary, the gateway durably records a confirmed, failed, or ambiguous outcome using a non-cancelled commit context. Timeout, cancellation, or disconnect after submission is ambiguous and is never retried automatically.
 
 Cobra help is the complete command-discovery interface. Running the root or a command branch without a leaf prints help and exits successfully; every leaf documents its syntax, flags, examples, and applicable irreversible or duplicate-risk warnings. Help performs no configuration, gateway, or mutation work. Unknown commands and flags print usage for the relevant command and exit 2. Only unambiguous close command or flag misspellings may be suggested; positional values are never rewritten or suggested. Shell-completion and machine-readable help commands are not exposed.
 
-`task context TASK [--thread-limit N]` is a read-only bounded task workflow view. It includes the current durable task/source attachment metadata, latest reply effect, at most ten newest non-confirmed related effects and their total, and the latest delivery for the current task version. For Slack tasks it makes one best-effort live thread-page read (default 20, maximum 100); `thread.status` is `available`, `unavailable`, or `not_applicable`. An unavailable live thread is a successful partial result with a warning; missing tasks remain not-found. It never downloads files or returns live-reply file metadata, file bytes, private URLs, effect body text, or operator reasons.
+`task context TASK [--thread-limit N]` is a read-only bounded task workflow view. It includes the current durable task/source attachment metadata, latest reply effect, and at most ten newest non-confirmed related effects and their total. For Slack tasks it makes one best-effort live thread-page read (default 20, maximum 100); `thread.status` is `available`, `unavailable`, or `not_applicable`. An unavailable live thread is a successful partial result with a warning; missing tasks remain not-found. It never downloads files or returns live-reply file metadata, file bytes, private URLs, effect body text, or operator reasons.
 
 `task create`, `task update`, `task reply`, `slack send`, and `slack edit` require exactly one text source: `--text`, `--text-file`, or `--stdin`. `--text` is exact literal text and must not decode escapes: a supplied `\\n` is a backslash followed by `n`. `--text-file` and explicit stdin preserve exact multiline UTF-8 bodies; stdin reads its complete bounded body (including trailing newlines) before gateway interaction. Empty, NUL-containing, malformed UTF-8, and over-limit bodies fail locally. This body stdin is independent from `config secret set --stdin` credential input.
 
@@ -217,17 +204,14 @@ Stable process exit categories are:
 
 1. An identifiable Slack envelope is acknowledged only after its admission/deduplication result commits.
 2. One admitted Slack source maps to at most one task.
-3. Task state and Slack activity remain independent except for the explicit confirmed-reply composition.
+3. Task state and Slack content remain independent except for the explicit confirmed-reply composition; lifecycle reactions only project state.
 4. SQLite is the sole coordination authority.
-5. Only one Pi extension connection owns delivery at a time.
-6. Persisted delivery requires a visible matching Pi session entry.
-7. Possibly inserted work becomes uncertain and is never automatically repeated.
-8. Slack intent commits before submission; possibly submitted work becomes ambiguous and is never automatically retried.
-9. Durable records contain file metadata and outcomes, not permanent transfer bytes.
-10. Purge preserves live work and unresolved evidence.
-11. Mosscap never starts or owns Pi.
-12. Watching tasks never records delivery evidence or changes task or Slack state.
-13. Tokens never enter SQLite, logs, protocol output, or Pi messages.
-14. Configuration reload either activates one complete verified snapshot or leaves the previous snapshot active.
+5. Slack intent commits before submission; possibly submitted work becomes ambiguous and is never automatically retried.
+6. Durable records contain file metadata and outcomes, not permanent transfer bytes.
+7. Purge preserves live work and unresolved evidence.
+8. Mosscap never starts or owns an agent.
+9. Watching tasks never changes task or Slack state.
+10. Tokens never enter SQLite, logs, or protocol output.
+11. Configuration reload either activates one complete verified snapshot or leaves the previous snapshot active.
 
-The automated Go and extension suites are the repeatable release gate. Future work belongs in issues or scoped proposals, not numbered implementation milestones in this specification.
+The automated Go suite (`just check`) is the repeatable release gate. Future work belongs in issues or scoped proposals, not numbered implementation milestones in this specification.
