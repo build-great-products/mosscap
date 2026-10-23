@@ -17,6 +17,7 @@ Mosscap must provide:
 - commit-before-ack Slack source deduplication;
 - one explicitly opted-in persisted Pi TUI session at a time;
 - visible task delivery that triggers model processing;
+- a harness-neutral task event stream (`task watch`) with a durable resume cursor;
 - explicit Slack reads, writes, reactions, and file operations;
 - durable Slack intents and Pi delivery outcomes with honest uncertainty;
 - temporary, bounded file transfer without permanent byte storage;
@@ -59,6 +60,8 @@ The trusted-user set lives in SQLite, may be empty, and changes immediately afte
 
 A task has a unique opaque ID, positive monotonic content version, current text, `open`/`working`/`done` state, timestamps, and a local or Slack source. Previous text is not retained.
 
+Every task also carries a durable change sequence and the kind of its latest change (`created`, `edited`, or `state`). The ledger must assign each creation, content-version change, and state change the next value of one monotonic counter inside the writing transaction, so sequence order equals commit order. Sequence values are never reused, including after purge. No-op edits and same-state transitions must not advance the counter. Only the latest change of each task is retained; it is not an event history.
+
 Creation yields `open`. Explicit transitions may move between all three states; same-state transitions are idempotent. Entering `done` sets `done_at`; leaving it clears `done_at`. State-only changes do not increment content version. For Slack-origin tasks, entering `done` removes the current lifecycle reaction and reopening restores the reaction implied by durable delivery evidence; state transitions do not otherwise post or alter Slack content.
 
 An initial Slack message is admitted only when all of these hold:
@@ -99,6 +102,28 @@ pending → inserting → persisted
 A disconnect after insertion starts must become `uncertain`, never silently pending. Uncertain and rejected attempts must not be automatically repeated. `delivery requeue` creates a new attempt, preserves predecessor evidence, requires a reason, and warns that duplicate insertion is possible.
 
 The extension must not connect to Slack, write SQLite, add hidden model-callable Mosscap tools, infer task state from prose, or manage the Pi process/model.
+
+## 5a. Task watch
+
+`task watch` is a read-only, long-running client of the `task_changes_v1` capability. It must poll the gateway over the private local protocol and write each selected task change to stdout as exactly one complete line, flushed per line, until interrupted. Stdout must contain only events. Reconnect and other diagnostics go to stderr.
+
+Each event is the task's current snapshot at its latest change sequence. Changes committed between polls (or while no watcher runs) are coalesced: a watcher observes the newest version and state, not every intermediate value.
+
+The default line is:
+
+```text
+cursor=SEQ change=created|edited|state task=TASK_ID version=N state=open|working|done source=local|slack text=ESCAPED
+```
+
+`text` is the last field and is never truncated. It escapes backslash as `\\`, newline as `\n`, carriage return as `\r`, tab as `\t`, and every other control character and U+2028/U+2029 as `\uXXXX`; other printable Unicode is retained. With `--json`, each line is one `TaskChangeDTO` object (`change_seq`, `change`, and a `task` with the `TaskDTO` shape), and the cursor is `change_seq`.
+
+By default a live event is emitted when a task is created, when its content version changes, or when it enters `open`. `--state-changes` also emits transitions to `working` and `done`. Filtered changes still advance the cursor.
+
+The cursor is the change sequence. `--since CURSOR` resumes after that value. `--cursor-file PATH` reads the cursor at startup if the file exists and atomically replaces it after each processed change, only after that change's line was written; a crash can therefore repeat at most the last line and never skips one. Consumers that need exactly-once handling must deduplicate on `task`, `version`, and `state`. A cursor newer than the ledger head fails with `cursor_ahead` (exit 4). Without a cursor, the watcher first emits every currently `open` task, then streams live changes; `--no-backlog` starts at the current head instead.
+
+When the gateway is unavailable, the watcher must retry with capped exponential backoff, report each failure and the eventual reconnection on stderr, and resume from its in-memory cursor. Typed refusals (unsupported capability, invalid or ahead cursor) end the command with their normal exit category. `--timeout` bounds each dial/handshake and each poll separately. A `--json` fatal error is the shared runtime error object on stdout, which callers distinguish from events by its `code` field.
+
+Watching is not delivery. It must not claim the Pi delivery slot, create delivery records, change task state, or add Slack reactions. A watcher should claim work explicitly, for example with `task working`, and complete it with `task reply --done` or `task done`. Several watchers, and a Pi extension, may observe the same tasks; coordination between them is the caller's responsibility.
 
 ## 6. Slack operations and effects
 
@@ -148,7 +173,7 @@ mosscap config show|set|secret set
 mosscap gateway run|reload|status
 mosscap doctor
 mosscap trust list|add|remove
-mosscap task create|list|show|context|update|open|working|done|reply
+mosscap task create|list|show|context|watch|update|open|working|done|reply
 mosscap slack history|thread|send|file|edit|delete|react|unreact
 mosscap effect list|inspect|retry
 mosscap file show|get
@@ -162,7 +187,7 @@ SQLite-backed `task list`, `effect list`, `delivery list`, and `trust list` acce
 
 The private Unix-socket protocol uses bounded 32-bit-length-prefixed JSON frames, a versioned handshake, typed command/results, and capability negotiation. Unknown incompatible envelopes or enum values must fail safe. Slow clients must be disconnected without discarding durable work. Same-user authentication is not protection from compromise of that OS account.
 
-Every CLI leaf that contacts the gateway accepts a positive shared `--timeout` duration, defaulting to 10 seconds. Its deadline begins immediately before gateway contact and covers dial, hello, calls, and frame I/O; an earlier application/caller deadline wins. Explicit body stdin and local validation occur before this deadline. Cancellation before a Slack/Pi external boundary leaves work unsubmitted; after a boundary, the gateway durably records a confirmed, failed, or ambiguous outcome using a non-cancelled commit context. Timeout, cancellation, or disconnect after submission is ambiguous and is never retried automatically.
+Every CLI leaf that contacts the gateway accepts a positive shared `--timeout` duration, defaulting to 10 seconds. For `task watch` it applies to each connection attempt and each poll (section 5a); for every other leaf its deadline begins immediately before gateway contact and covers dial, hello, calls, and frame I/O; an earlier application/caller deadline wins. Explicit body stdin and local validation occur before this deadline. Cancellation before a Slack/Pi external boundary leaves work unsubmitted; after a boundary, the gateway durably records a confirmed, failed, or ambiguous outcome using a non-cancelled commit context. Timeout, cancellation, or disconnect after submission is ambiguous and is never retried automatically.
 
 Cobra help is the complete command-discovery interface. Running the root or a command branch without a leaf prints help and exits successfully; every leaf documents its syntax, flags, examples, and applicable irreversible or duplicate-risk warnings. Help performs no configuration, gateway, or mutation work. Unknown commands and flags print usage for the relevant command and exit 2. Only unambiguous close command or flag misspellings may be suggested; positional values are never rewritten or suggested. Shell-completion and machine-readable help commands are not exposed.
 
@@ -170,7 +195,7 @@ Cobra help is the complete command-discovery interface. Running the root or a co
 
 `task create`, `task update`, `task reply`, `slack send`, and `slack edit` require exactly one text source: `--text`, `--text-file`, or `--stdin`. `--text` is exact literal text and must not decode escapes: a supplied `\\n` is a backslash followed by `n`. `--text-file` and explicit stdin preserve exact multiline UTF-8 bodies; stdin reads its complete bounded body (including trailing newlines) before gateway interaction. Empty, NUL-containing, malformed UTF-8, and over-limit bodies fail locally. This body stdin is independent from `config secret set --stdin` credential input.
 
-For every syntactically valid leaf invocation whose parsed `--json` flag is true, success and runtime failure write exactly one JSON object followed by one newline to stdout and nothing to stderr. Successful objects retain each command's existing DTO shape. Runtime failures use a shared error object with `code`, `category`, `message`, `retriable`, and optional safe `details`, `progress`, `request_id`, and guidance; doctor gateway failures additionally contain only the completed diagnostic report in `partial_result`. Parse and usage failures remain text on stderr with exit 2.
+For every syntactically valid leaf invocation other than `task watch` whose parsed `--json` flag is true, success and runtime failure write exactly one JSON object followed by one newline to stdout and nothing to stderr. Successful objects retain each command's existing DTO shape. Runtime failures use a shared error object with `code`, `category`, `message`, `retriable`, and optional safe `details`, `progress`, `request_id`, and guidance; doctor gateway failures additionally contain only the completed diagnostic report in `partial_result`. Parse and usage failures remain text on stderr with exit 2.
 
 Without `--json`, each command uses a compact purpose-specific human view: task and Slack reads retain complete multiline text in cards, lists use rows, and mutations display resource state and request IDs. Presentation escapes terminal control characters while retaining printable Unicode; it never changes stored text or JSON output. Color is only enabled for a TTY and is disabled by `NO_COLOR` or `TERM=dumb`.
 
@@ -201,7 +226,8 @@ Stable process exit categories are:
 9. Durable records contain file metadata and outcomes, not permanent transfer bytes.
 10. Purge preserves live work and unresolved evidence.
 11. Mosscap never starts or owns Pi.
-12. Tokens never enter SQLite, logs, protocol output, or Pi messages.
-13. Configuration reload either activates one complete verified snapshot or leaves the previous snapshot active.
+12. Watching tasks never records delivery evidence or changes task or Slack state.
+13. Tokens never enter SQLite, logs, protocol output, or Pi messages.
+14. Configuration reload either activates one complete verified snapshot or leaves the previous snapshot active.
 
 The automated Go and extension suites are the repeatable release gate. Future work belongs in issues or scoped proposals, not numbered implementation milestones in this specification.

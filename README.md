@@ -28,6 +28,7 @@ The current v1 workflow includes:
 - explicit Slack reads, replies, edits, deletes, reactions, and file uploads;
 - lazy incoming file download and private temporary-file handling;
 - explicit Pi opt-in, visible delivery, persisted delivery evidence, and recovery;
+- `task watch`, a one-line-per-event task stream for any agent harness;
 - durable ambiguous/uncertain outcomes that are never retried automatically; and
 - explicit metadata purge with dry-run and confirmation modes.
 
@@ -100,6 +101,42 @@ For exact multiline or piped bodies, `task create`, `task update`, `task reply`,
 Every command that contacts the gateway accepts `--timeout DURATION` (default `10s`). The budget starts only immediately before dialing the gateway, covers dial, handshake, request, and frame I/O, and never extends an earlier caller deadline. Stdin and local input validation happen before that budget begins.
 
 Default output is compact human-readable cards, rows, and labelled details; use `--json` for the unchanged command DTOs. Message cards preserve full multiline Unicode text and visibly escape terminal control bytes. Colors require a TTY and are disabled by `NO_COLOR`.
+
+## Watching tasks from any harness
+
+Agents that cannot load the Pi extension can consume tasks with `mosscap task watch`. It stays connected to the gateway and prints one line per task event on stdout until interrupted:
+
+```text
+cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=slack text=<@U012BOT> review the release\nthanks
+```
+
+- `change` is `created`, `edited` (content version changed, for example a Slack edit), or `state` (the task re-entered `open`).
+- `text` is the last field, never truncated, with backslash, newlines, tabs, and other control characters escaped so one event is always one line.
+- `--json` prints one JSON object per line instead: `{"change_seq":7,"change":"created","task":{...}}`, where `task` is the same DTO as `task show --json`.
+- `--state-changes` also reports transitions to `working` and `done`.
+- Without a cursor it first prints every task that is currently `open`; `--no-backlog` skips them.
+- `--cursor-file PATH` makes restarts resume where the last run stopped. The file is updated after each printed line, so a crash can repeat at most one line and never skips one. `--since CURSOR` resumes from an explicit cursor instead.
+- If the gateway restarts, the watcher reconnects with backoff and says so on stderr; stdout carries events only.
+
+Watching is read-only. It records no delivery evidence, adds no Slack reactions, and does not claim the Pi delivery slot, so claim work explicitly with `task working` and finish it with `task reply --done` or `task done`.
+
+### Claude Code
+
+Run the watcher under Claude Code's Monitor tool (or any background runner that turns stdout lines into notifications):
+
+```sh
+mosscap task watch --cursor-file "$HOME/.local/state/mosscap-watch.cursor"
+```
+
+For each notification, the agent claims and handles the task, then replies (Slack-origin tasks; use `task done` for local ones):
+
+```sh
+mosscap task working AbCdEfGhIjKlMnOpQrStUv
+mosscap task context AbCdEfGhIjKlMnOpQrStUv
+mosscap task reply AbCdEfGhIjKlMnOpQrStUv --stdin --done <<'REPLY'
+Done: the release checklist passes.
+REPLY
+```
 
 ## Files and exceptional outcomes
 

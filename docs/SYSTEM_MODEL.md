@@ -44,6 +44,14 @@ The TypeScript extension integrates only with the Pi process in which it is load
 
 It does not connect to Slack, write SQLite, infer task completion from prose, add model-callable tools, or manage Pi's process. A second extension cannot silently replace the active one; the current session must opt out or disconnect first.
 
+### Task watchers
+
+`mosscap task watch` is a harness-neutral consumer for agents that cannot load the Pi extension, such as Claude Code running it under a background monitor. It is an ordinary CLI client that polls the `task.changes` read over the local protocol and prints one line per selected task change.
+
+SQLite triggers stamp every task creation, content-version change, and state change with the next value of a durable counter in the same transaction, so the counter orders changes exactly as they committed and is never reused after purge. The watcher's cursor is that counter. Because only each task's latest change is kept, a watcher that falls behind sees coalesced current snapshots rather than a history.
+
+A watcher owns no delivery slot and writes no delivery evidence: printing a line proves nothing about what an agent did with it. Agents make their handling visible through ordinary explicit commands (`task working`, `task reply --done`).
+
 ### Slack
 
 Mosscap is configured for exactly one channel. Workspace and bot identity are derived from Slack authentication. Work is admitted only when a non-bot sender is in the live trusted-user set and directly mentions the bot in the configured channel.
@@ -71,8 +79,8 @@ An eligible Slack envelope follows this path:
 1. The gateway validates workspace, channel, sender, trust, and direct mention.
 2. In SQLite it deduplicates the source and creates or updates the task.
 3. Only after commit does it acknowledge the Slack envelope.
-4. An opted-in extension polls eligible task versions, inserts one visible message, and triggers a turn.
-5. The extension reports insertion start and then confirms that the delivery key is present in persisted Pi session entries.
+4. An opted-in extension polls eligible task versions, inserts one visible message, and triggers a turn; independently, any `task watch` client sees the change on its next poll.
+5. The extension reports insertion start and then confirms that the delivery key is present in persisted Pi session entries. A watcher reports nothing back.
 6. Pi or a human uses ordinary CLI commands for explicit replies and task transitions.
 
 Tasks remain durable while Pi is absent or opted out. Slack Socket Mode does not guarantee indefinite retention while the gateway itself is offline.
