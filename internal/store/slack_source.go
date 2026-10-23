@@ -307,20 +307,52 @@ func validIncomingFiles(files []SlackIncomingFile) bool {
 	return true
 }
 
+// humanSubtype reports whether a message subtype is still an ordinary human
+// message: a reply also sent to the channel, or a message sharing files.
+func humanSubtype(subtype string) bool {
+	return subtype == "" || subtype == "thread_broadcast" || subtype == "file_share"
+}
+
+// attachmentOnlyText is the task text of an admitted follow-up that carries
+// files but no message text, because task text must not be empty.
+const attachmentOnlyText = "(attachment without message text)"
+
 func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy SlackAdmissionPolicy, event normalizedSlackSourceEvent, committedAtUS int64) (SlackEventResult, error) {
-	if event.BotID != "" || event.Subtype != "" || event.UserID == policy.BotUserID {
+	if event.BotID != "" || !humanSubtype(event.Subtype) || event.UserID == policy.BotUserID {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredBot, "", "", committedAtUS)
+	}
+	reply := event.ThreadTS != "" && event.ThreadTS != event.MessageTS
+	var thread slackThread
+	if reply {
+		var err error
+		if thread, err = lookupSlackThreadTx(ctx, tx, event.TeamID, event.ChannelID, event.ThreadTS); err != nil {
+			return SlackEventResult{}, err
+		}
 	}
 	// Mention is checked before trust: only a message addressed to the bot is
 	// a request, so only an addressed untrusted message is ignored_untrusted
 	// (which earns the no_entry reaction). Ordinary channel chatter is
-	// ignored_unmentioned regardless of sender.
-	if !strings.Contains(event.Text, "<@"+policy.BotUserID+">") {
+	// ignored_unmentioned regardless of sender. A new reply in a tracked
+	// thread is addressed to the bot without a mention: it is a follow-up.
+	mentioned := strings.Contains(event.Text, "<@"+policy.BotUserID+">")
+	followUp := !mentioned && reply && thread.tracked && event.EventKind == SlackEventMessage
+	if !mentioned && !followUp {
+		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
+	}
+	text := event.text
+	if text == "" && len(event.Files) != 0 {
+		text = attachmentOnlyText
+	}
+	if text == "" {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
 	}
 	var trusted bool
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM trusted_users WHERE slack_user_id=?)", event.UserID).Scan(&trusted); err != nil {
 		return SlackEventResult{}, err
+	}
+	if !trusted && !mentioned {
+		// Untrusted replies in a tracked thread are conversation, not requests.
+		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
 	}
 	if !trusted {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUntrusted, "", "", committedAtUS)
@@ -329,14 +361,14 @@ func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy Slack
 	if err != nil {
 		return SlackEventResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES(?,1,'open',?,'slack',?,?,NULL)", taskID, event.text, committedAtUS, committedAtUS); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES(?,1,'open',?,'slack',?,?,NULL)", taskID, text, committedAtUS, committedAtUS); err != nil {
 		return SlackEventResult{}, err
 	}
 	if err := insertSlackEvent(ctx, tx, event, SlackAdmitted, taskID, "", 1, true, committedAtUS); err != nil {
 		return SlackEventResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO slack_task_sources(task_id,initial_source_event_id,team_id,channel_id,author_user_id,message_ts,thread_ts,permalink,latest_event_at_us,source_deleted_at_us,created_at_us,updated_at_us)
-		VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?)`, taskID, event.SourceEventID, event.TeamID, event.ChannelID, event.UserID, event.MessageTS, event.threadTS, nullable(event.Permalink), event.SlackEventAtUS, committedAtUS, committedAtUS); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO slack_task_sources(task_id,initial_source_event_id,team_id,channel_id,author_user_id,message_ts,thread_ts,permalink,latest_event_at_us,source_deleted_at_us,created_at_us,updated_at_us,parent_task_id)
+		VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,?)`, taskID, event.SourceEventID, event.TeamID, event.ChannelID, event.UserID, event.MessageTS, event.threadTS, nullable(event.Permalink), event.SlackEventAtUS, committedAtUS, committedAtUS, nullable(thread.parentTaskID)); err != nil {
 		return SlackEventResult{}, err
 	}
 	if err := s.reconcileIncomingFiles(ctx, tx, taskID, event.Files, committedAtUS); err != nil {
@@ -346,6 +378,41 @@ func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy Slack
 		return SlackEventResult{}, err
 	}
 	return newSlackEventResult(event, SlackAdmitted, taskID, "", 1, true, committedAtUS), nil
+}
+
+// slackThread is what admission knows about a Slack thread. A thread is
+// tracked when it already holds an admitted task, or when the bot posted its
+// root or a reply in it. parentTaskID is the thread's original task: the task
+// admitted from the root message, else the task the bot's root post was
+// related to, else the earliest task admitted in the thread, else the task
+// related to the bot's earliest post in it. It may be empty.
+type slackThread struct {
+	tracked      bool
+	parentTaskID string
+}
+
+func lookupSlackThreadTx(ctx context.Context, tx *sql.Tx, teamID, channelID, threadTS string) (slackThread, error) {
+	var taskCount, postCount int64
+	var rootTask, rootPostTask, earliestTask, earliestPostTask sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM slack_task_sources WHERE team_id=?1 AND channel_id=?2 AND thread_ts=?3),
+		(SELECT count(*) FROM slack_effects WHERE team_id=?1 AND channel_id=?2 AND state='confirmed' AND kind IN ('send','file_upload') AND (thread_ts=?3 OR response_message_ts=?3)),
+		(SELECT task_id FROM slack_task_sources WHERE team_id=?1 AND channel_id=?2 AND message_ts=?3),
+		(SELECT related_task_id FROM slack_effects WHERE team_id=?1 AND channel_id=?2 AND state='confirmed' AND kind='send' AND response_message_ts=?3 AND thread_ts IS NULL ORDER BY created_at_us,effect_id LIMIT 1),
+		(SELECT task_id FROM slack_task_sources WHERE team_id=?1 AND channel_id=?2 AND thread_ts=?3 ORDER BY created_at_us,task_id LIMIT 1),
+		(SELECT related_task_id FROM slack_effects WHERE team_id=?1 AND channel_id=?2 AND state='confirmed' AND kind IN ('send','file_upload') AND thread_ts=?3 AND related_task_id IS NOT NULL ORDER BY created_at_us,effect_id LIMIT 1)`,
+		teamID, channelID, threadTS).Scan(&taskCount, &postCount, &rootTask, &rootPostTask, &earliestTask, &earliestPostTask)
+	if err != nil {
+		return slackThread{}, err
+	}
+	thread := slackThread{tracked: taskCount != 0 || postCount != 0}
+	for _, candidate := range []sql.NullString{rootTask, rootPostTask, earliestTask, earliestPostTask} {
+		if candidate.Valid && candidate.String != "" {
+			thread.parentTaskID = candidate.String
+			break
+		}
+	}
+	return thread, nil
 }
 
 func (s *Store) commitSlackEdit(ctx context.Context, tx *sql.Tx, event normalizedSlackSourceEvent, source SlackSource, committedAtUS int64) (SlackEventResult, error) {
@@ -564,7 +631,7 @@ func (s *Store) FindSlackSource(ctx context.Context, teamID, channelID, messageT
 	return findSlackSourceTx(ctx, s.db, teamID, channelID, messageTS)
 }
 
-const slackSourceSelect = `SELECT s.task_id,s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us,t.version,t.state,t.text,t.source_kind
+const slackSourceSelect = `SELECT s.task_id,s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.parent_task_id,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us,t.version,t.state,t.text,t.source_kind
 	FROM slack_task_sources s JOIN tasks t ON t.task_id=s.task_id`
 
 func findSlackSourceTx(ctx context.Context, q interface {
@@ -575,11 +642,11 @@ func findSlackSourceTx(ctx context.Context, q interface {
 
 func scanSlackSource(row *sql.Row) (SlackSource, error) {
 	var source SlackSource
-	var permalink sql.NullString
+	var permalink, parentTaskID sql.NullString
 	var deleted sql.NullInt64
 	var created, updated int64
 	var sourceKind string
-	err := row.Scan(&source.TaskID, &source.InitialSourceEventID, &source.TeamID, &source.ChannelID, &source.AuthorUserID, &source.MessageTS, &source.ThreadTS, &permalink, &source.LatestEventAtUS, &deleted, &created, &updated, &source.TaskVersion, &source.TaskState, &source.TaskText, &sourceKind)
+	err := row.Scan(&source.TaskID, &source.InitialSourceEventID, &source.TeamID, &source.ChannelID, &source.AuthorUserID, &source.MessageTS, &source.ThreadTS, &permalink, &parentTaskID, &source.LatestEventAtUS, &deleted, &created, &updated, &source.TaskVersion, &source.TaskState, &source.TaskText, &sourceKind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SlackSource{}, ErrNotFound
 	}
@@ -590,6 +657,7 @@ func scanSlackSource(row *sql.Row) (SlackSource, error) {
 		return SlackSource{}, ErrSlackInvariant
 	}
 	source.Permalink = permalink.String
+	source.ParentTaskID = parentTaskID.String
 	source.CreatedAt = time.UnixMicro(created).UTC()
 	source.UpdatedAt = time.UnixMicro(updated).UTC()
 	if deleted.Valid {

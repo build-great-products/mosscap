@@ -169,13 +169,16 @@ func TestSlackMigrationChecksumsAndColumns(t *testing.T) {
 	if MigrationChecksum(8) == "" || len(MigrationChecksum(8)) != 64 || MigrationChecksum(8) == MigrationChecksum(7) {
 		t.Fatalf("v8 checksum=%q", MigrationChecksum(8))
 	}
+	if MigrationChecksum(9) == "" || len(MigrationChecksum(9)) != 64 || MigrationChecksum(9) == MigrationChecksum(8) {
+		t.Fatalf("v9 checksum=%q", MigrationChecksum(9))
+	}
 	if MigrationChecksum(SchemaVersion+1) != "" {
 		t.Fatalf("unknown checksum=%q", MigrationChecksum(SchemaVersion+1))
 	}
 
 	s := testStore(t)
 	for table, want := range map[string][]string{
-		"slack_task_sources":       {"task_id", "initial_source_event_id", "team_id", "channel_id", "author_user_id", "message_ts", "thread_ts", "permalink", "latest_event_at_us", "source_deleted_at_us", "created_at_us", "updated_at_us"},
+		"slack_task_sources":       {"task_id", "initial_source_event_id", "team_id", "channel_id", "author_user_id", "message_ts", "thread_ts", "permalink", "latest_event_at_us", "source_deleted_at_us", "created_at_us", "updated_at_us", "parent_task_id"},
 		"slack_source_events":      {"source_event_id", "envelope_id", "event_kind", "team_id", "channel_id", "message_ts", "thread_ts", "user_id", "slack_event_at_us", "received_at_us", "committed_at_us", "admission_result", "task_id", "diagnostic_code", "task_version", "changed", "redelivery_count", "last_seen_at_us"},
 		"files":                    {"file_id", "direction", "slack_file_id", "permalink", "original_name", "declared_mime", "declared_size_bytes", "validated_size_bytes", "sha256", "related_task_id", "related_effect_id", "effect_ordinal", "source_attached", "source_detached_at_us", "source_path", "source_device", "source_inode", "source_mtime_ns", "transfer_state", "diagnostic_code", "created_at_us", "updated_at_us"},
 		"file_temporary_transfers": {"transfer_id", "file_id", "generated_name", "size_bytes", "sha256", "expires_at_us", "created_at_us"},

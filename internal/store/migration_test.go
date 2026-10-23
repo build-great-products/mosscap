@@ -19,7 +19,7 @@ func ledgerAtVersion(t *testing.T, version int, statements ...string) string {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008}
+	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009}
 	for i, migration := range migrations[:version] {
 		if _, err := db.Exec(string(migration)); err != nil {
 			t.Fatal(err)

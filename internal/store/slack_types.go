@@ -116,21 +116,24 @@ type SlackEventResult struct {
 
 // SlackSource is the durable source reference joined to its Slack task.
 type SlackSource struct {
-	TaskID               string     `json:"task_id"`
-	InitialSourceEventID string     `json:"initial_source_event_id"`
-	TeamID               string     `json:"team_id"`
-	ChannelID            string     `json:"channel_id"`
-	AuthorUserID         string     `json:"author_user_id"`
-	MessageTS            string     `json:"message_ts"`
-	ThreadTS             string     `json:"thread_ts"`
-	Permalink            string     `json:"permalink,omitempty"`
-	LatestEventAtUS      int64      `json:"latest_event_at_us"`
-	SourceDeletedAt      *time.Time `json:"source_deleted_at,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
-	TaskVersion          int64      `json:"task_version"`
-	TaskState            task.State `json:"task_state"`
-	TaskText             string     `json:"task_text"`
+	TaskID               string `json:"task_id"`
+	InitialSourceEventID string `json:"initial_source_event_id"`
+	TeamID               string `json:"team_id"`
+	ChannelID            string `json:"channel_id"`
+	AuthorUserID         string `json:"author_user_id"`
+	MessageTS            string `json:"message_ts"`
+	ThreadTS             string `json:"thread_ts"`
+	Permalink            string `json:"permalink,omitempty"`
+	// ParentTaskID is the earliest task already in this thread when this task
+	// was admitted, or empty. It is provenance only and may name a purged task.
+	ParentTaskID    string     `json:"parent_task_id,omitempty"`
+	LatestEventAtUS int64      `json:"latest_event_at_us"`
+	SourceDeletedAt *time.Time `json:"source_deleted_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	TaskVersion     int64      `json:"task_version"`
+	TaskState       task.State `json:"task_state"`
+	TaskText        string     `json:"task_text"`
 }
 
 // SlackFile is durable, byte-free file metadata. SizeBytes is retained as a

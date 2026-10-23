@@ -63,7 +63,7 @@ func (s *Store) GetTaskReadModel(ctx context.Context, selector string) (TaskRead
 		return TaskReadModel{}, ErrNotFound
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT t.task_id,t.version,t.state,t.text,t.source_kind,t.created_at,t.updated_at,t.done_at,
-		s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us
+		s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us,s.parent_task_id
 		FROM tasks t LEFT JOIN slack_task_sources s ON s.task_id=t.task_id
 		WHERE t.task_id=? OR substr(t.task_id,1,length(?))=?
 		ORDER BY t.task_id LIMIT 2`, canonical, canonical, canonical)
@@ -123,11 +123,11 @@ func latestSlackReplyEffect(ctx context.Context, q rowQueryer, taskID string, so
 func scanTaskReadModel(row rowsScanner) (TaskReadModel, error) {
 	var model TaskReadModel
 	var done sql.NullInt64
-	var initialEvent, teamID, channelID, authorUserID, messageTS, threadTS, permalink sql.NullString
+	var initialEvent, teamID, channelID, authorUserID, messageTS, threadTS, permalink, parentTaskID sql.NullString
 	var latestEvent, deletedAt, sourceCreated, sourceUpdated sql.NullInt64
 	var created, updated int64
 	if err := row.Scan(&model.Task.ID, &model.Task.Version, &model.Task.State, &model.Task.Text, &model.Task.SourceKind, &created, &updated, &done,
-		&initialEvent, &teamID, &channelID, &authorUserID, &messageTS, &threadTS, &permalink, &latestEvent, &deletedAt, &sourceCreated, &sourceUpdated); err != nil {
+		&initialEvent, &teamID, &channelID, &authorUserID, &messageTS, &threadTS, &permalink, &latestEvent, &deletedAt, &sourceCreated, &sourceUpdated, &parentTaskID); err != nil {
 		return TaskReadModel{}, err
 	}
 	model.Task.CreatedAt = time.UnixMicro(created).UTC()
@@ -145,7 +145,7 @@ func scanTaskReadModel(row rowsScanner) (TaskReadModel, error) {
 	source := &SlackSource{
 		TaskID: model.Task.ID, InitialSourceEventID: initialEvent.String,
 		TeamID: teamID.String, ChannelID: channelID.String, AuthorUserID: authorUserID.String,
-		MessageTS: messageTS.String, ThreadTS: threadTS.String, Permalink: permalink.String,
+		MessageTS: messageTS.String, ThreadTS: threadTS.String, Permalink: permalink.String, ParentTaskID: parentTaskID.String,
 		LatestEventAtUS: latestEvent.Int64, CreatedAt: time.UnixMicro(sourceCreated.Int64).UTC(), UpdatedAt: time.UnixMicro(sourceUpdated.Int64).UTC(),
 		TaskVersion: model.Task.Version, TaskState: model.Task.State, TaskText: model.Task.Text,
 	}
