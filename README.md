@@ -22,8 +22,7 @@ Go CLI ──────┘              │
 
 The current v1 workflow includes:
 
-- single-workspace Slack Socket Mode admission from every channel the bot is a member of, optionally narrowed by an allowlist;
-- a live SQLite-backed allowlist of trusted Slack user IDs;
+- single-workspace Slack Socket Mode admission from every channel the bot is a member of, for every member of that workspace;
 - local and Slack-origin tasks with `open`, `working`, and `done` states;
 - `task watch`, a one-line-per-event task stream with a durable resume cursor;
 - explicit Slack reads, replies, edits, deletes, reactions, and file uploads;
@@ -45,12 +44,7 @@ just build
 
 Import [`manifest.json`](manifest.json) into a Slack development app, create an app-level Socket Mode token with `connections:write`, install the app in the intended workspace, and invite it to each channel that should give it work. The manifest covers public (`message.channels`, `channels:read`, `channels:history`) and private (`message.groups`, `groups:read`, `groups:history`) channels; the gateway verifies every listed scope at startup. Do not add administrative, DM, slash-command, interactivity, or broad channel-join permissions.
 
-By default the gateway admits mentions from every channel the bot is a member of. To narrow that, set a comma-separated allowlist of channel IDs; each listed channel must be one the bot belongs to:
-
-```sh
-./bin/mosscap config set slack_channel_allowlist C0BAQM6JEAJ,C0CC6JQ4A2U
-./bin/mosscap config set slack_channel_allowlist ""   # every member channel
-```
+The gateway admits work from every channel the bot is a member of. Inviting the bot to a channel is how you give that channel's members a way to send it work, and removing it is how you take that away. There is no channel or user allowlist.
 
 Start the gateway in the foreground:
 
@@ -58,29 +52,30 @@ Start the gateway in the foreground:
 ./bin/mosscap gateway run
 ```
 
-Upgrading from a release with Pi delivery or a single channel (schema migrations 8 and 9 run automatically; they are one-way): remove `delivery_lease`, `leader_heartbeat`, and `leader_expiry` from `config.toml`, and replace `slack_channel_id = "C..."` with `slack_channel_allowlist = "C..."` (same ID keeps single-channel admission) or `slack_channel_allowlist = ""` (every member channel). The gateway names each obsolete key it finds. The ledger migrates on first start and drops its Pi delivery records; existing tasks and effects already record their channel, so nothing is backfilled.
+Upgrading from an earlier release (schema migrations 8 to 10 run automatically; they are one-way): remove `delivery_lease`, `leader_heartbeat`, `leader_expiry`, `slack_channel_id`, `slack_channel_allowlist`, and `trusted_user_ids` from `config.toml`. The gateway refuses to start while any of them is present and names every one it finds. The ledger migrates on first start: it drops its Pi delivery records and its trusted-user set (`mosscap trust` no longer exists). Existing tasks and effects already record their channel, so nothing is backfilled.
 
-## Trust and tasks
+## Admission and tasks
 
-An empty trust set admits no Slack work. Add immutable Slack user IDs only for people authorized to give the agent work:
+Anyone in the workspace may send the bot work. A Slack message becomes a task when all of these hold:
 
-```sh
-mosscap trust list
-mosscap trust add U01234567
-mosscap trust remove U01234567
-```
+- it arrives from a channel the bot is a member of in the authenticated workspace;
+- its sender is a human: not a bot, not the bot itself, and not a `bot_message` or other system subtype;
+- its sender is a member of the workspace, not a Slack Connect external user from another organization; and
+- it mentions the bot directly, or it is a reply in a thread the bot already tracks (see below).
 
-Admission also requires the authenticated workspace, a channel the bot is a member of (and that passes the allowlist, when one is set), a human sender, and a literal direct mention of the bot. Messages that do not mention the bot are ignored without a reaction, whoever sends them; a mention from an untrusted user gets `:no_entry:`. A trusted Slack user can direct a fully capable local agent; these checks are authorization gates, not a sandbox.
+Messages that neither mention the bot nor reply in a tracked thread are ignored without a reaction. A mention from an external Slack Connect user is ignored the same way, recorded as `ignored_workspace`. Mosscap reads the sender's workspace from the event Slack delivers (`user_team`, else `user_profile.team`, else `team`) and makes no per-message `users.info` call; an event that names no sender workspace is treated as a member's.
+
+Any member of the workspace can direct a fully capable local agent. Choose its working directory, model, and channels with that in mind: these checks decide who may send work, they are not a sandbox.
 
 ### Thread follow-ups
 
-People usually answer in the thread without mentioning the bot again ("Perfect", "it's out of sync"). A new reply from a trusted user in a tracked thread is admitted without a mention, as its own **follow-up task**. A thread is tracked when it already holds an admitted task, or when the bot posted its root or a reply in it (a confirmed `slack send`, `task reply`, or upload). Each follow-up:
+People usually answer in the thread without mentioning the bot again ("Perfect", "it's out of sync"). A new reply from any workspace member in a tracked thread is admitted without a mention, as its own **follow-up task**, whether or not that person started the thread. A thread is tracked when it already holds an admitted task, or when the bot posted its root or a reply in it (a confirmed `slack send`, `task reply`, or upload). Each follow-up:
 
 - is a separate task with the reply's text, so nothing overwrites earlier text, and gets its own lifecycle reaction on the reply;
 - records the thread (`thread_ts`, the thread root) and `parent_task_id`, the thread's original task: the task from the root message, else the task the bot's root post was for, else the earliest task in the thread;
 - is replied to in the same thread by `task reply`, and `task context` shows the whole thread.
 
-Untrusted replies, the bot's own messages, and edits of replies that were never admitted do not create follow-ups. A reply that also mentions the bot is admitted the same way and gets the same link. Edits of an admitted follow-up update it like any other task. A reply with files but no text is admitted with the text `(attachment without message text)`. Replies with the `thread_broadcast` and `file_share` subtypes count as human messages.
+Replies from external Slack Connect users, the bot's own messages, and edits of replies that were never admitted do not create follow-ups. A reply that also mentions the bot is admitted the same way and gets the same link. Edits of an admitted follow-up update it like any other task. A reply with files but no text is admitted with the text `(attachment without message text)`. Replies with the `thread_broadcast` and `file_share` subtypes count as human messages.
 
 Task state remains locally authoritative. Slack-origin tasks also show a lifecycle reaction on their source message that mirrors task state:
 
@@ -153,7 +148,7 @@ REPLY
 
 ## Slack commands and channels
 
-Every `mosscap slack ...` command works in one channel. Name it with `--channel C...`; otherwise the channel comes from `--task` (a Slack task's own channel), and failing that from a single-entry allowlist. With several possible channels and neither flag, the command fails with `channel_required`. A channel outside the allowlist fails with `channel_not_admitted`.
+Every `mosscap slack ...` command works in one channel. Name it with `--channel C...`, or pass `--task` to use a Slack task's own channel. With neither, the command fails with `channel_required`. A target that is not a public (`C...`) or private (`G...`) channel in the active workspace fails with `invalid_channel`; Slack itself refuses channels the bot is not a member of.
 
 ```sh
 mosscap slack history --channel C0BAQM6JEAJ --limit 20

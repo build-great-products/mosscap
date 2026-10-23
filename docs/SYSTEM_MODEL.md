@@ -29,7 +29,7 @@ The `mosscap` executable has two roles:
 
 ### SQLite ledger
 
-SQLite is authoritative for tasks, Slack source deduplication, Slack effect intents and outcomes, file metadata, trusted users, and mutation request deduplication. Logs, reactions, agent conversation text, and terminal output are projections, not task state. Human terminal renderers escape control characters only at presentation time; stored and JSON-protocol text remains exact.
+SQLite is authoritative for tasks, Slack source deduplication, Slack effect intents and outcomes, file metadata, and mutation request deduplication. Logs, reactions, agent conversation text, and terminal output are projections, not task state. Human terminal renderers escape control characters only at presentation time; stored and JSON-protocol text remains exact.
 
 ### Task watchers
 
@@ -41,7 +41,7 @@ A watcher writes nothing: printing a line proves nothing about what an agent did
 
 ### Slack
 
-Mosscap serves one workspace and every channel its bot is a member of, optionally narrowed by a configured allowlist. Workspace and bot identity are derived from Slack authentication. Work is admitted when a non-bot sender in the live trusted-user set directly mentions the bot in an admitted channel, or replies, without a mention, in a thread the bot already tracks (one holding an admitted task, or one the bot posted in). Such a follow-up is its own task linked to the thread and to the thread's original task, so each reply is a separate unit of work and no earlier text is overwritten. Each task, effect, and watch line carries its channel, and every Slack command names one channel (explicitly, from its task, or from a single-entry allowlist).
+Mosscap serves one workspace and every channel its bot is a member of; channel membership is the only channel control. Workspace and bot identity are derived from Slack authentication. Every human member of the workspace may send work: a message is admitted when it directly mentions the bot, or replies, without a mention, in a thread the bot already tracks (one holding an admitted task, or one the bot posted in). Such a follow-up is its own task linked to the thread and to the thread's original task, so each reply is a separate unit of work and no earlier text is overwritten. The one sender guard is workspace membership: a Slack Connect external user, whose event names another workspace, is ignored. Each task, effect, and watch line carries its channel, and every Slack command names one channel (explicitly, or from its task).
 
 Slack reads and writes are explicit. Each write records a durable intent before network submission. Slack content and task state are independent, except for the explicit `task reply --done` composition, which marks done only after a confirmed reply.
 
@@ -65,7 +65,7 @@ State transitions do not post Slack content; they only move the lifecycle reacti
 
 An eligible Slack envelope follows this path:
 
-1. The gateway validates workspace, channel, sender, and trust, and requires a direct mention or a reply in a tracked thread.
+1. The gateway validates workspace, channel, and sender (a human member of the workspace), and requires a direct mention or a reply in a tracked thread.
 2. In SQLite it deduplicates the source and creates or updates the task, and prepares the queued reaction for a new task.
 3. Only after commit does it acknowledge the Slack envelope, then submits the reaction.
 4. Every `task watch` client sees the change on its next poll.
@@ -95,7 +95,7 @@ Durable metadata is not deleted automatically. `mosscap purge` requires an absol
 
 ## Security boundary
 
-A trusted Slack user can direct a fully capable local agent. Workspace, channel, immutable user ID, bot exclusion, and direct mention are authorization checks, not a sandbox. Slack text, task text, filenames, and file bytes remain untrusted input.
+Any member of the workspace in a channel the bot belongs to can direct a fully capable local agent. Workspace membership, bot exclusion, and a direct mention or tracked-thread reply decide what is admitted; they are not a sandbox. Operators control exposure by choosing which channels the bot is invited to. Slack text, task text, filenames, and file bytes remain untrusted input.
 
 Tokens and authorization headers must not enter SQLite, protocol results, or logs. Local paths and ordinary diagnostics are not redacted and may enter agent context. Operators choose a safe working directory and model with that disclosure in mind.
 

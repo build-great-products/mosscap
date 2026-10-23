@@ -11,8 +11,8 @@ The former numbered phases were implementation milestones. They are not product 
 Mosscap must provide:
 
 - one foreground Go gateway and short-lived CLI clients;
-- one Slack Socket Mode workspace connection that admits work from every channel the bot is a member of, optionally narrowed by a channel allowlist;
-- admission of direct bot mentions from a live SQLite-backed trusted-user set;
+- one Slack Socket Mode workspace connection that admits work from every channel the bot is a member of;
+- admission of direct bot mentions and tracked-thread replies from every human member of that workspace;
 - local and Slack-origin tasks with explicit state transitions;
 - commit-before-ack Slack source deduplication;
 - a harness-neutral task event stream (`task watch`) with a durable resume cursor, which is the only way work reaches an agent;
@@ -30,9 +30,9 @@ Mosscap does not need to start, supervise, or prompt an agent, support more than
 
 The gateway is the only normal SQLite writer. CLI commands other than setup and offline-safe configuration edits must use the gateway.
 
-SQLite is authoritative for coordination state: tasks, source events, trust, effects, files, and request outcomes. Slack is an external persistence domain and cannot share a transaction with SQLite.
+SQLite is authoritative for coordination state: tasks, source events, effects, files, and request outcomes. Slack is an external persistence domain and cannot share a transaction with SQLite.
 
-The gateway upgrades an intact older ledger atomically on open and refuses a newer or altered one. Upgrades are one-way. Schema version 8 drops the table of the removed Pi delivery feature without archiving it. Schema version 9 adds the nullable `parent_task_id` follow-up link to Slack task sources and thread lookup indexes; existing sources get no parent.
+The gateway upgrades an intact older ledger atomically on open and refuses a newer or altered one. Upgrades are one-way. Schema version 8 drops the table of the removed Pi delivery feature without archiving it. Schema version 9 adds the nullable `parent_task_id` follow-up link to Slack task sources and thread lookup indexes; existing sources get no parent. Schema version 10 drops the `trusted_users` table of the removed trusted-user feature without archiving it.
 
 Every gateway mutation must carry a client-generated request ID. A replay with the same operation and canonical input must return the original typed outcome without repeating the mutation. Reuse for different input must fail as a conflict. Stored request outcomes must not become a hidden archive of task text or credentials.
 
@@ -49,15 +49,13 @@ $XDG_STATE_HOME/mosscap/tmp/
 
 Fallbacks are `~/.config` and `~/.local/state`. Configuration and state roots must be owner-only directories. Sensitive files must be owner-only regular files; unsafe ownership, modes, symlinks, hard links, or escaped state paths must fail closed.
 
-`config.toml` contains Slack app and bot tokens, the optional channel allowlist (`slack_channel_allowlist`, comma-separated `C...`/`G...` IDs, empty for every member channel), and all scalar limits/timeouts. Workspace/team and bot-user IDs are derived and verified through Slack authentication, not configured manually. Tokens must be set through the private config file, redacted from output, and excluded from SQLite, logs, and protocol results.
+`config.toml` contains Slack app and bot tokens and all scalar limits/timeouts. It configures no channels and no users. Workspace/team and bot-user IDs are derived and verified through Slack authentication, not configured manually. Tokens must be set through the private config file, redacted from output, and excluded from SQLite, logs, and protocol results.
 
-Keys of removed features (`delivery_lease`, `leader_heartbeat`, `leader_expiry`) must be rejected with guidance to remove them. The former `slack_channel_id` must be rejected with guidance to replace it with `slack_channel_allowlist`.
+Keys of removed features must be rejected with guidance to remove them: `delivery_lease`, `leader_heartbeat`, and `leader_expiry` (Pi delivery), `slack_channel_id` and `slack_channel_allowlist` (channel restrictions), and `trusted_user_ids` (trusted users). The gateway must refuse to start, and a reload must fail, while any of them is present, and the error must name every unknown or obsolete key found, not only the first.
 
 `config set` must update one known non-secret value atomically while preserving unrelated comments and formatting. `config secret set` must accept only known Slack token fields and avoid printing their values. Editing stages a candidate; it does not change the running snapshot.
 
-On startup and `gateway reload`, the gateway must validate the complete candidate and verify Slack identity, required scopes for both public and private channels, and access to every allowlisted channel before activation. An empty allowlist verifies no channel up front. Activation is all-or-nothing. Failed reload must leave the prior runtime and connection usable.
-
-The trusted-user set lives in SQLite, may be empty, and changes immediately after a successful `trust add` or `trust remove` commit. An empty set admits no Slack work.
+On startup and `gateway reload`, the gateway must validate the complete candidate and verify Slack identity and required scopes for both public and private channels before activation. No channel is verified up front. Activation is all-or-nothing. Failed reload must leave the prior runtime and connection usable.
 
 ## 4. Tasks and Slack admission
 
@@ -69,9 +67,14 @@ Creation yields `open`. Explicit transitions may move between all three states; 
 
 An initial Slack message is admitted only when all of these hold:
 
-- it belongs to the authenticated workspace and to a `C...` or `G...` channel that passes the allowlist (any channel Slack delivers events for when the allowlist is empty, which is every channel the bot is a member of);
-- its current text literally mentions the authenticated bot user; and
-- the sender is a non-bot user in the current trusted-user set.
+- it belongs to the authenticated workspace and to a `C...` or `G...` channel (any channel Slack delivers events for, which is every channel the bot is a member of);
+- its sender is a human: it has no bot ID, its sender is not the authenticated bot user, and its subtype is empty, `thread_broadcast`, or `file_share`;
+- its sender is a member of the authenticated workspace (see below); and
+- its current text literally mentions the authenticated bot user.
+
+There is no user or channel allowlist: every member of the workspace may send work.
+
+**External senders.** A sender is not a member when the event names a sender workspace that differs from the authenticated team: the first non-empty of the event's `user_team`, `user_profile.team`, and `team` fields (for an edit, those of the changed message). This is how Slack Connect external users appear in shared channels. Such a message is `ignored_workspace`, whether it mentions the bot or replies in a tracked thread, and gets no reaction. The check uses only the delivered payload; the gateway must not call `users.info` per message. A message whose event names no sender workspace is treated as a member's. A malformed sender workspace ID makes the event `malformed`.
 
 Every task records its channel. The same message timestamp in two channels is two distinct sources.
 
@@ -79,16 +82,16 @@ A new message (not an edit) is also admitted without a mention as a **follow-up*
 
 - it is a reply (its thread timestamp differs from its message timestamp) in an admissible channel;
 - its thread is tracked: an admitted task's source is in that thread, or a confirmed `send` or `file_upload` effect posted the thread's root or a reply in it;
-- the sender is a non-bot user in the current trusted-user set; and
+- its sender is a human member of the workspace, as for a mention (any member, not only the thread's original requester); and
 - it has text or attached files.
 
-A follow-up is a new task, never a change to an earlier one. Its source records the thread root as `thread_ts` and `parent_task_id`: the task admitted from the root message, else the related task of a confirmed root `send`, else the earliest task in the thread, else the related task of the earliest confirmed post in the thread, else none. `parent_task_id` is provenance only: it is not a foreign key and may name a purged task. Any admitted reply, mentioned or not, gets the same link. An untrusted reply that does not mention the bot is `ignored_unmentioned` and gets no reaction. Messages from the bot, or with a subtype other than `thread_broadcast` or `file_share`, are `ignored_bot`. An attachment-only follow-up has the task text `(attachment without message text)`. Admission, deduplication, commit-before-ack, edits, and deletion are otherwise exactly as for mentioned messages.
+A follow-up is a new task, never a change to an earlier one. Its source records the thread root as `thread_ts` and `parent_task_id`: the task admitted from the root message, else the related task of a confirmed root `send`, else the earliest task in the thread, else the related task of the earliest confirmed post in the thread, else none. `parent_task_id` is provenance only: it is not a foreign key and may name a purged task. Any admitted reply, mentioned or not, gets the same link. A message that neither mentions the bot nor is a follow-up is `ignored_unmentioned` and gets no reaction. Messages from the bot, or with a subtype other than `thread_broadcast` or `file_share`, are `ignored_bot`. An attachment-only follow-up has the task text `(attachment without message text)`. Admission, deduplication, commit-before-ack, edits, and deletion are otherwise exactly as for mentioned messages.
 
 For each identifiable envelope, the gateway must deduplicate and commit the admission result before acknowledging Slack. A commit failure must not be acknowledged. Mosscap makes no receipt claim while disconnected from Socket Mode.
 
 An admitted message creates at most one task. A meaningful newer source edit replaces current text/attachment metadata and increments version. Stale edits must not roll content backward. Source deletion preserves task text and state while recording deletion metadata. Incoming attachments are metadata-only until explicitly retrieved.
 
-Mention is evaluated before trust: a message that does not mention the bot is `ignored_unmentioned` whatever its sender. An admissible-channel event that mentions the bot but is rejected as untrusted must prepare a deduplicated `no_entry` reaction before acknowledgement. Failure or ambiguity of that reaction must remain inspectable and must not admit the event.
+An edit of an admitted source whose sender is not the source's author is ignored and recorded with the result value `ignored_untrusted`; the name is retained from the removed trusted-user feature because the ledger fixes the set of result values. The result `ignored_channel` is no longer produced; it remains only on events recorded by releases that had a channel allowlist, so their redelivery replays it. No admission outcome other than a new task adds a reaction.
 
 ## 4a. Lifecycle reactions
 
@@ -128,7 +131,7 @@ Watching must not change task state or add Slack reactions. A watcher should cla
 
 ## 6. Slack operations and effects
 
-Every Slack command targets the active workspace and exactly one channel. The channel is the explicit `--channel`, else the related `--task`'s source channel, else the only allowlisted channel; otherwise the command fails with `channel_required`. A channel outside a non-empty allowlist, or a non-`C`/`G` ID, fails with `channel_not_admitted` before any intent is recorded. No operation accepts an alternate workspace. Slack enforces bot membership. Targeted writes preflight the target message in that channel. Each effect records its channel, and recovery and retry use the effect's own channel, which must still be admitted. Clients must see `slack_channels_v1` before sending a channel.
+Every Slack command targets the active workspace and exactly one channel. The channel is the explicit `--channel`, else the related `--task`'s source channel; otherwise the command fails with `channel_required`. A target that is not a `C`/`G` ID, or a durable effect or source in a workspace other than the active one, fails with `invalid_channel` before any intent is recorded. No operation accepts an alternate workspace. Slack enforces bot membership. Targeted writes preflight the target message in that channel. Each effect records its channel, and recovery and retry use the effect's own channel, which must still be in the active workspace. Clients must see `slack_channels_v1` before sending a channel.
 
 Reads are bounded and do not create effects or change task state. Writes commit an exact effect intent before their single network submission.
 
@@ -158,7 +161,7 @@ Temporary files must use generated owner-only paths under the state root. Expire
 
 ## 8. Purge and diagnostics
 
-Purge requires an absolute RFC 3339 cutoff and exactly one of `--dry-run` or `--confirm`. Dry-run must not mutate state. Confirmed purge may remove eligible finalized history but must preserve open/working tasks, unresolved effects, live request outcomes, trust, configuration, and every record required by retained state.
+Purge requires an absolute RFC 3339 cutoff and exactly one of `--dry-run` or `--confirm`. Dry-run must not mutate state. Confirmed purge may remove eligible finalized history but must preserve open/working tasks, unresolved effects, live request outcomes, configuration, and every record required by retained state.
 
 `gateway status` must distinguish process health from outcomes requiring operator action and report bounded task, Slack, effect, database, and temporary-file state. `doctor` must be non-destructive: it must not send Slack messages, acknowledge events, or transfer bytes.
 
@@ -173,7 +176,6 @@ mosscap setup
 mosscap config show|set|secret set
 mosscap gateway run|reload|status
 mosscap doctor
-mosscap trust list|add|remove
 mosscap task create|list|show|context|watch|update|open|working|done|reply
 mosscap slack history|thread|send|file|edit|delete|react|unreact   (each accepts --channel; thread and writes accept --task)
 mosscap effect list|inspect|retry
@@ -181,7 +183,7 @@ mosscap file show|get
 mosscap purge
 ```
 
-SQLite-backed `task list`, `effect list`, and `trust list` accept bounded `--limit`/`--cursor` pages (effects also accept composable `--task`). Tasks are oldest-created-first; effects newest-created-first; trust is lexical. Resource cursors are full IDs and a purged anchor returns typed `cursor_expired` conflict guidance to restart without `--cursor`; trust cursors remain valid after removal. `slack history` and `slack thread` likewise accept `--limit` and `--cursor`; both default to and cap at 50 messages, preserve Slack's native order, and pass the opaque Slack cursor unchanged.
+SQLite-backed `task list` and `effect list` accept bounded `--limit`/`--cursor` pages (effects also accept composable `--task`). Tasks are oldest-created-first; effects newest-created-first. Resource cursors are full IDs and a purged anchor returns typed `cursor_expired` conflict guidance to restart without `--cursor`. `slack history` and `slack thread` likewise accept `--limit` and `--cursor`; both default to and cap at 50 messages, preserve Slack's native order, and pass the opaque Slack cursor unchanged.
 
 The private Unix-socket protocol uses bounded 32-bit-length-prefixed JSON frames, a versioned handshake, typed command/results, and capability negotiation. The only client kind is `cli`. Unknown incompatible envelopes or enum values must fail safe. Slow clients must be disconnected without discarding durable work. Same-user authentication is not protection from compromise of that OS account.
 
