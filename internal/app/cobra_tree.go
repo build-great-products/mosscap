@@ -264,6 +264,8 @@ func leafDescription(short, handler string) string {
 		description += "\n\nProvide exactly one of --text, --text-file, or --stdin. --text is literal and does not decode \\n; use --stdin or --text-file for exact multiline text."
 	case "task.list":
 		description += "\n\nUse either --state (open, working, or done) or --all."
+	case "task.watch":
+		description += "\n\nEach stdout line is one event: cursor=N change=created|edited|state task=ID version=N state=S source=local|slack text=ESCAPED, or one JSON object with --json. Without a cursor, currently open tasks are emitted first. Gateway reconnects are reported on stderr only. Watching never acknowledges or changes tasks."
 	case "purge":
 		description += "\n\nProvide --before and exactly one of --dry-run or --confirm. Warning: confirmed removal is irreversible."
 	case "slack.file":
@@ -321,7 +323,7 @@ func canonicalArgs(cmd *cobra.Command, args []string) []string {
 // gateway run. Every leaf that opens the local protocol gets the shared bound.
 func gatewayCallingHandler(handler string) bool {
 	switch handler {
-	case "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	default:
 		return false
@@ -330,7 +332,7 @@ func gatewayCallingHandler(handler string) bool {
 
 func isTypedCobraHandler(handler string) bool {
 	switch handler {
-	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "setup", "config.show", "config.set", "config.secret.set", "gateway.run", "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	default:
 		return false
@@ -393,6 +395,13 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 	case "task.context":
 		limit, _ := cmd.Flags().GetInt("thread-limit")
 		return a.taskContextTyped(args[0], limit, jsonOut)
+	case "task.watch":
+		since, _ := cmd.Flags().GetString("since")
+		cursorFile, _ := cmd.Flags().GetString("cursor-file")
+		noBacklog, _ := cmd.Flags().GetBool("no-backlog")
+		stateChanges, _ := cmd.Flags().GetBool("state-changes")
+		interval, _ := cmd.Flags().GetString("interval")
+		return a.taskWatchTyped(taskWatchOptions{since: since, sinceSet: cmd.Flags().Changed("since"), cursorFile: cursorFile, noBacklog: noBacklog, stateChanges: stateChanges, interval: interval, jsonOut: jsonOut})
 	case "task.open", "task.working", "task.done":
 		note, _ := cmd.Flags().GetString("note")
 		requestID, _ := cmd.Flags().GetString("request-id")
@@ -515,6 +524,7 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"task", "list"}, "List durable tasks.", "mosscap task list [--state open|working|done|--all] [--limit N] [--cursor TASK_ID] [--json]", true, "local_tasks", "task.list", []flagSpec{stringFlag("state", "Filter by open, working, or done state."), boolFlag("all", "Include completed tasks."), intFlag("limit", "Maximum number of tasks."), stringFlag("cursor", "Resume after this task ID."), boolFlag("json", "Render the list as JSON.")}, nil},
 	{[]string{"task", "show"}, "Show current durable task state.", "mosscap task show TASK [--json]", true, "local_tasks", "task.show", []flagSpec{boolFlag("json", "Render the task as JSON.")}, nil},
 	{[]string{"task", "context"}, "Show durable task state with one bounded live Slack thread page.", "mosscap task context TASK [--thread-limit N] [--json]", true, protocol.CapabilityTaskContext, "task.context", []flagSpec{intFlag("thread-limit", "Maximum live thread messages (default 20; maximum 100)."), boolFlag("json", "Render the context as JSON.")}, nil},
+	{[]string{"task", "watch"}, "Stream task events to stdout, one line each, until interrupted.", "mosscap task watch [--since CURSOR|--cursor-file PATH] [--no-backlog] [--state-changes] [--interval DURATION] [--json]", true, protocol.CapabilityTaskChanges, "task.watch", []flagSpec{stringFlag("since", "Resume after this change cursor."), stringFlag("cursor-file", "Absolute path that stores the cursor; read at start and replaced after each event."), boolFlag("no-backlog", "Without a cursor, skip currently open tasks and stream only new changes."), boolFlag("state-changes", "Also emit transitions to working and done."), stringFlag("interval", "Gateway poll interval (default 1s; 100ms to 10s)."), boolFlag("json", "Emit one JSON object per line.")}, nil},
 	{[]string{"task", "update"}, "Replace a task's text.", "mosscap task update TASK (--text TEXT|--text-file PATH|--stdin) [--request-id ID] [--json]", false, "local_tasks", "task.update", textFlags(), nil},
 	{[]string{"task", "open"}, "Move a task to open.", "mosscap task open TASK [--note TEXT] [--request-id ID] [--json]", false, "local_tasks", "task.open", transitionFlags(), nil},
 	{[]string{"task", "working"}, "Move a task to working.", "mosscap task working TASK [--note TEXT] [--request-id ID] [--json]", false, "local_tasks", "task.working", transitionFlags(), nil},
