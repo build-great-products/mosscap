@@ -76,10 +76,10 @@ func (s *Server) executeTaskReaction(ctx context.Context, source store.SlackSour
 		return effect, err
 	}
 	defer release()
-	if !op.MatchesTarget(source.TeamID, source.ChannelID) {
+	if !op.Allows(source.TeamID, source.ChannelID) {
 		return effect, slackops.ErrUnavailable
 	}
-	return op.Execute(ctx, taskReactionRequestID(stage, source.TaskID, version), store.SlackEffectIntent{Kind: kind, TargetMessageTS: source.MessageTS, Emoji: emoji, RelatedTaskID: source.TaskID})
+	return op.Execute(ctx, taskReactionRequestID(stage, source.TaskID, version), source.ChannelID, store.SlackEffectIntent{Kind: kind, TargetMessageTS: source.MessageTS, Emoji: emoji, RelatedTaskID: source.TaskID})
 }
 
 func taskReactionRequestID(stage, taskID string, version int64) string {

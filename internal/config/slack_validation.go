@@ -16,8 +16,10 @@ func ValidateSlackProduction(c Config) error {
 	if !tokens["slack_app_token"].MatchString(c.SlackAppToken) || !tokens["slack_bot_token"].MatchString(c.SlackBotToken) {
 		return errors.New("production Slack credentials are required and invalid credentials are rejected")
 	}
-	if slackapi.ValidateChannelID(c.SlackChannelID) != nil {
-		return errors.New("production Slack channel ID is required and invalid IDs are rejected")
+	for _, channelID := range ChannelAllowlist(c) {
+		if slackapi.ValidateChannelID(channelID) != nil {
+			return errors.New("production Slack channel allowlist contains an invalid ID")
+		}
 	}
 	return nil
 }

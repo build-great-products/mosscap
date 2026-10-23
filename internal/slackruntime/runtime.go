@@ -92,15 +92,18 @@ type Observations struct {
 // Snapshot is immutable except for its private drain accounting. Hold it for
 // the entire operation attempt, then Release exactly once.
 type Snapshot struct {
-	Config                       config.Config
-	TeamID, BotUserID, ChannelID string
-	Web                          slackapi.Web
-	stream                       slackapi.EnvelopeStream
-	done                         chan struct{}
-	mu                           sync.Mutex
-	refs                         int
-	retiring                     bool
-	closed                       bool
+	Config            config.Config
+	TeamID, BotUserID string
+	// Channels is the verified channel allowlist; empty admits every channel
+	// the bot is a member of.
+	Channels []string
+	Web      slackapi.Web
+	stream   slackapi.EnvelopeStream
+	done     chan struct{}
+	mu       sync.Mutex
+	refs     int
+	retiring bool
+	closed   bool
 }
 
 func (s *Snapshot) Release() {
@@ -301,7 +304,8 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 	if web == nil || socket == nil {
 		return nil, errors.New("Slack runtime factory returned incomplete clients")
 	}
-	verified, err := slackapi.Verify(ctx, web, slackapi.VerificationRequest{ChannelID: c.SlackChannelID, TrustedUserIDs: append([]string(nil), r.options.TrustedUserIDs...)})
+	channels := config.ChannelAllowlist(c)
+	verified, err := slackapi.Verify(ctx, web, slackapi.VerificationRequest{ChannelIDs: channels, TrustedUserIDs: append([]string(nil), r.options.TrustedUserIDs...)})
 	if err != nil {
 		return nil, safeError(err)
 	}
@@ -309,7 +313,7 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 	if err != nil {
 		return nil, safeError(err)
 	}
-	return &Snapshot{Config: c, TeamID: verified.Identity.TeamID, BotUserID: verified.Identity.BotUserID, ChannelID: c.SlackChannelID, Web: web, stream: stream, done: make(chan struct{})}, nil
+	return &Snapshot{Config: c, TeamID: verified.Identity.TeamID, BotUserID: verified.Identity.BotUserID, Channels: channels, Web: web, stream: stream, done: make(chan struct{})}, nil
 }
 func safeError(err error) error {
 	if diagnostic, ok := slackapi.VerificationDiagnosticFromError(err); ok {

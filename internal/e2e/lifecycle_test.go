@@ -14,7 +14,7 @@ func TestSlackLifecycleReactionsFollowTaskState(t *testing.T) {
 	const channel, ts = "C012ABC", "1700000000.000001"
 	ack, acks := fake.NewAckRecorder(nil)
 	mention := slackapi.Envelope{EnvelopeID: "env-1", EventID: "Ev-1", Kind: slackapi.EventAppMention, TeamID: harnessTeam, ChannelID: channel, UserID: harnessUser, MessageTS: ts, EventTS: ts, Text: "<@U012BOT> ship it", Ack: ack}
-	h := newSlackHarness(t, map[string]string{"slack_channel_id": channel}, []fake.ReceiveStep{{Envelope: mention}}, steps(
+	h := newSlackHarness(t, map[string]string{"slack_channel_allowlist": channel}, []fake.ReceiveStep{{Envelope: mention}}, steps(
 		verificationSteps(channel),
 		reactionSteps(fake.AddReaction, channel, ts, "hourglass_flowing_sand"),
 		reactionSteps(fake.AddReaction, channel, ts, "eyes"),

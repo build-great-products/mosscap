@@ -204,7 +204,8 @@ func TestSlackParamsStrictAndRoundTrip(t *testing.T) {
 		{"effect.list", `{"state":"unknown"}`}, {"effect.inspect", `{"effect":"invalid!"}`},
 		{"effect.retry", `{"effect":"eff_abc","reason":""}`}, {"file.show", `{"file":"/tmp/file"}`},
 		{"file.get", `{"file":"fil_abc","bytes":"forbidden"}`}, {"file.release", `{"transfer_id":"invalid!"}`},
-		{"slack.file", `{"file_path":"relative"}`}, {"slack.send", `{"text":"ok","file_paths":["/tmp/a"],"channel":"CINJECT"}`},
+		{"slack.file", `{"file_path":"relative"}`}, {"slack.send", `{"text":"ok","file_paths":["/tmp/a"],"channel":"D012DM"}`},
+		{"slack.history", `{"channel":"c012abc"}`}, {"slack.thread", `{"thread_ts":"1712345678.000001","channel":"C 1"}`}, {"slack.react", `{"message_ts":"1.000001","emoji":"eyes","channel":"T012ABC"}`},
 	} {
 		if err := ValidateParams(tc.command, []byte(tc.params)); err == nil {
 			t.Fatalf("accepted invalid %s %s", tc.command, tc.params)
@@ -226,8 +227,8 @@ func TestSlackCapabilitiesAndSafeDTOs(t *testing.T) {
 	}
 	// Effect list/mutation DTOs intentionally lack request text and reasons;
 	// inspect is the one explicit result type which can contain exact intent.
-	list := EffectListDTO{Effects: []SlackEffectDTO{{EffectID: "eff_abc", Kind: "send", State: "confirmed", PreparedAt: "2026-01-01T00:00:00Z"}}}
-	if got := mustJSON(t, list); got != `{"effects":[{"effect_id":"eff_abc","kind":"send","state":"confirmed","attempt_count":0,"prepared_at":"2026-01-01T00:00:00Z"}]}` {
+	list := EffectListDTO{Effects: []SlackEffectDTO{{EffectID: "eff_abc", ChannelID: "C012ABC", Kind: "send", State: "confirmed", PreparedAt: "2026-01-01T00:00:00Z"}}}
+	if got := mustJSON(t, list); got != `{"effects":[{"effect_id":"eff_abc","channel_id":"C012ABC","kind":"send","state":"confirmed","attempt_count":0,"prepared_at":"2026-01-01T00:00:00Z"}]}` {
 		t.Fatalf("effect list = %s", got)
 	}
 	inspect := EffectInspectDTO{Effect: list.Effects[0], Intent: SlackEffectIntentDTO{Text: "explicit body"}}

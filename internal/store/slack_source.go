@@ -93,7 +93,7 @@ func (s *Store) CommitSlackSourceEvent(ctx context.Context, policy SlackAdmissio
 	if event.TeamID != policy.TeamID {
 		return s.commitSlackEventOnly(ctx, tx, normalized, SlackIgnoredWorkspace, "", "", committedAtUS)
 	}
-	if event.ChannelID != policy.ChannelID {
+	if !policy.AllowsChannel(event.ChannelID) {
 		return s.commitSlackEventOnly(ctx, tx, normalized, SlackIgnoredChannel, "", "", committedAtUS)
 	}
 
@@ -217,8 +217,13 @@ func (s *Store) normalizeSlackSourceEvent(event SlackSourceEvent) (normalizedSla
 }
 
 func validateSlackPolicy(policy SlackAdmissionPolicy) error {
-	if slackapi.ValidateTeamID(policy.TeamID) != nil || slackapi.ValidateChannelID(policy.ChannelID) != nil || slackapi.ValidateUserID(policy.BotUserID) != nil {
+	if slackapi.ValidateTeamID(policy.TeamID) != nil || slackapi.ValidateUserID(policy.BotUserID) != nil {
 		return invalidInput("invalid Slack admission policy")
+	}
+	for _, channelID := range policy.Channels {
+		if slackapi.ValidateChannelID(channelID) != nil {
+			return invalidInput("invalid Slack admission policy")
+		}
 	}
 	return nil
 }

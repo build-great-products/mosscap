@@ -6,10 +6,9 @@ import (
 )
 
 func TestRequiredAndMissingScopes(t *testing.T) {
-	public := RequiredBotScopes(false)
-	private := RequiredBotScopes(true)
-	if len(public) != 10 || len(private) != 10 {
-		t.Fatalf("scope counts public=%d private=%d", len(public), len(private))
+	public := RequiredBotScopes()
+	if len(public) != 12 {
+		t.Fatalf("scope count=%d", len(public))
 	}
 	missing, err := MissingScopes(
 		[]Scope{ScopeChatWrite, ScopeAppMentionsRead, ScopeChannelsRead, "commands"},

@@ -17,6 +17,8 @@ import (
 
 var testTarget = store.SlackEffectTarget{TeamID: "T12345678", ChannelID: "C12345678"}
 
+var testScope = Scope{TeamID: testTarget.TeamID, Channels: []string{testTarget.ChannelID}}
+
 type cancelAfterPrepareStore struct {
 	EffectStore
 	cancel func()
@@ -35,7 +37,7 @@ func testService(t *testing.T, web slackapi.Web) (*Service, *store.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return New(s, web, testTarget), s
+	return New(s, web, testScope), s
 }
 
 func TestReadsUseConfiguredChannelAndBounds(t *testing.T) {
@@ -46,19 +48,19 @@ func TestReadsUseConfiguredChannelAndBounds(t *testing.T) {
 		fake.Step{Operation: fake.Replies, Request: slackapi.RepliesRequest{ChannelID: testTarget.ChannelID, ThreadTS: "1700000000.000001", Limit: 8, Cursor: "thread-next"}},
 	)
 	svc, _ := testService(t, web)
-	if _, err := svc.History(context.Background(), 0, ""); err != nil {
+	if _, err := svc.History(context.Background(), testTarget.ChannelID, 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Thread(context.Background(), "1700000000.000001", 0, ""); err != nil {
+	if _, err := svc.Thread(context.Background(), testTarget.ChannelID, "1700000000.000001", 0, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.History(context.Background(), 7, "history-next"); err != nil {
+	if _, err := svc.History(context.Background(), testTarget.ChannelID, 7, "history-next"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Thread(context.Background(), "1700000000.000001", 8, "thread-next"); err != nil {
+	if _, err := svc.Thread(context.Background(), testTarget.ChannelID, "1700000000.000001", 8, "thread-next"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.History(context.Background(), 51, ""); err == nil {
+	if _, err := svc.History(context.Background(), testTarget.ChannelID, 51, ""); err == nil {
 		t.Fatal("accepted oversized limit")
 	}
 	if err := web.AssertDone(); err != nil {
@@ -78,7 +80,7 @@ func TestExecuteMappingsAndSubmittedBeforeWrite(t *testing.T) {
 	svc, ledger := testService(t, web)
 	result := make(chan error, 1)
 	go func() {
-		_, err := svc.Execute(context.Background(), "send-request", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "hello"})
+		_, err := svc.Execute(context.Background(), "send-request", testTarget.ChannelID, store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "hello"})
 		result <- err
 	}()
 	select {
@@ -103,7 +105,7 @@ func TestExecuteMappingsAndSubmittedBeforeWrite(t *testing.T) {
 		{"react-request", store.SlackEffectIntent{Kind: store.SlackEffectReact, TargetMessageTS: "1700000002.000001", Emoji: ":eyes:"}},
 		{"unreact-request", store.SlackEffectIntent{Kind: store.SlackEffectUnreact, TargetMessageTS: "1700000002.000001", Emoji: "eyes"}},
 	} {
-		if _, err := svc.Execute(context.Background(), tc.id, tc.in); err != nil {
+		if _, err := svc.Execute(context.Background(), tc.id, testTarget.ChannelID, tc.in); err != nil {
 			t.Fatalf("%s: %v", tc.id, err)
 		}
 	}
@@ -154,13 +156,13 @@ func TestFileUploadPreparesOrderedIntentBeforeSlackAndConfirms(t *testing.T) {
 		fake.TransferStep{Operation: fake.ValidateUpload}, fake.TransferStep{Operation: fake.ValidateUpload},
 		fake.TransferStep{Operation: fake.CompleteUpload, Result: slackapi.UploadResult{Files: []slackapi.UploadedFile{{ID: "F12345678"}, {ID: "F23456789"}}}},
 	)
-	svc := NewWithFileTransfer(ledger, nil, transfer, testTarget, 1024, 2)
+	svc := NewWithFileTransfer(ledger, nil, transfer, testScope, 1024, 2)
 	result := make(chan struct {
 		effect store.SlackEffect
 		err    error
 	}, 1)
 	go func() {
-		effect, err := svc.ExecuteFileUpload(context.Background(), "file-upload", store.SlackFileUploadIntent{Text: "comment", Files: []store.SlackUploadFile{{SourcePath: one}, {SourcePath: two}}})
+		effect, err := svc.ExecuteFileUpload(context.Background(), "file-upload", testTarget.ChannelID, store.SlackFileUploadIntent{Text: "comment", Files: []store.SlackUploadFile{{SourcePath: one}, {SourcePath: two}}})
 		result <- struct {
 			effect store.SlackEffect
 			err    error
@@ -206,13 +208,13 @@ func TestFileUploadSameInodeSameSizeRewriteAfterStagingFailsWithoutCompletion(t 
 		fake.TransferStep{Operation: fake.ValidateUpload},
 		fake.TransferStep{Operation: fake.CompleteUpload, Result: slackapi.UploadResult{Files: []slackapi.UploadedFile{{ID: "F12345678"}}}},
 	)
-	svc := NewWithFileTransfer(ledger, nil, transfer, testTarget, 1024, 1)
+	svc := NewWithFileTransfer(ledger, nil, transfer, testScope, 1024, 1)
 	result := make(chan struct {
 		effect store.SlackEffect
 		err    error
 	}, 1)
 	go func() {
-		effect, err := svc.ExecuteFileUpload(context.Background(), "changed-upload", store.SlackFileUploadIntent{Files: []store.SlackUploadFile{{SourcePath: path}}})
+		effect, err := svc.ExecuteFileUpload(context.Background(), "changed-upload", testTarget.ChannelID, store.SlackFileUploadIntent{Files: []store.SlackUploadFile{{SourcePath: path}}})
 		result <- struct {
 			effect store.SlackEffect
 			err    error
@@ -285,7 +287,7 @@ func TestRecoverPreparedUploadMismatchFailsWithoutSlackCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	transfer := fake.NewFileTransfer()
-	svc := NewWithFileTransfer(ledger, fake.NewWeb(), transfer, testTarget, 1024, 1)
+	svc := NewWithFileTransfer(ledger, fake.NewWeb(), transfer, testScope, 1024, 1)
 	if _, err := svc.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -305,10 +307,10 @@ func TestReplayAndOutcomesDoNotDuplicateWrites(t *testing.T) {
 	)
 	svc, ledger := testService(t, web)
 	in := store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "hello"}
-	if _, err := svc.Execute(context.Background(), "replay", in); err != nil {
+	if _, err := svc.Execute(context.Background(), "replay", testTarget.ChannelID, in); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Execute(context.Background(), "replay", in); err != nil {
+	if _, err := svc.Execute(context.Background(), "replay", testTarget.ChannelID, in); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(web.Calls()); got != 1 {
@@ -316,8 +318,8 @@ func TestReplayAndOutcomesDoNotDuplicateWrites(t *testing.T) {
 	}
 	// Cancellation after prepare but before Claim leaves durable work prepared.
 	ctx, cancel := context.WithCancel(context.Background())
-	preSvc := New(cancelAfterPrepareStore{EffectStore: ledger, cancel: cancel}, web, testTarget)
-	_, err := preSvc.Execute(ctx, "pre-timeout", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "later"})
+	preSvc := New(cancelAfterPrepareStore{EffectStore: ledger, cancel: cancel}, web, testScope)
+	_, err := preSvc.Execute(ctx, "pre-timeout", testTarget.ChannelID, store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "later"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("pre-submit error=%v", err)
 	}
@@ -327,7 +329,7 @@ func TestReplayAndOutcomesDoNotDuplicateWrites(t *testing.T) {
 		t.Fatalf("prepared effects=%#v %v", prepared, err)
 	}
 	// The fake pre-call timeout occurs after the durable claim, hence uncertainty.
-	post, err := svc.Execute(context.Background(), "post-timeout", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "maybe"})
+	post, err := svc.Execute(context.Background(), "post-timeout", testTarget.ChannelID, store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "maybe"})
 	if err == nil || post.State != store.SlackEffectAmbiguous {
 		t.Fatalf("pre-call result=%#v %v", post, err)
 	}
@@ -343,7 +345,7 @@ func TestReplayAndOutcomesDoNotDuplicateWrites(t *testing.T) {
 
 	postWeb := fake.NewWeb(fake.Step{Operation: fake.PostMessage, PostCall: fake.CallScript{Fault: fake.Timeout}})
 	postSvc, _ := testService(t, postWeb)
-	post, err = postSvc.Execute(context.Background(), "after-timeout", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "maybe later"})
+	post, err = postSvc.Execute(context.Background(), "after-timeout", testTarget.ChannelID, store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "maybe later"})
 	if err == nil || post.State != store.SlackEffectAmbiguous {
 		t.Fatalf("post-call result=%#v %v", post, err)
 	}
@@ -355,5 +357,46 @@ func TestReplayAndOutcomesDoNotDuplicateWrites(t *testing.T) {
 	}
 	if got := len(postWeb.Calls()); got != 1 {
 		t.Fatalf("post recovery retried ambiguous write: %d", got)
+	}
+}
+
+func TestScopeRoutesEachOperationToItsChannelAndRejectsOthers(t *testing.T) {
+	ledger, err := store.Initialize(context.Background(), filepath.Join(t.TempDir(), "ledger.sqlite"), store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	web := fake.NewWeb(
+		fake.Step{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: "C0BAQM6JEAJ", MessageTS: "1700000001.000001"}},
+		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: "G0PRIVATE1", Limit: 50}},
+	)
+	// An empty allowlist admits every channel; Slack enforces membership.
+	open := New(ledger, web, Scope{TeamID: testTarget.TeamID})
+	if !open.Allows(testTarget.TeamID, "C0CC6JQ4A2U") || open.Allows("T99999999", "C0CC6JQ4A2U") || open.Allows(testTarget.TeamID, "D012DM") {
+		t.Fatal("open scope admission is wrong")
+	}
+	effect, err := open.Execute(context.Background(), "multi-channel-send", "C0BAQM6JEAJ", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "main"})
+	if err != nil || effect.ChannelID != "C0BAQM6JEAJ" || effect.State != store.SlackEffectConfirmed {
+		t.Fatalf("effect=%+v err=%v", effect, err)
+	}
+	if got := web.Calls()[0].Request.(slackapi.PostMessageRequest); got.ChannelID != "C0BAQM6JEAJ" {
+		t.Fatalf("post=%+v", got)
+	}
+	narrow := New(ledger, web, Scope{TeamID: testTarget.TeamID, Channels: []string{"C0BAQM6JEAJ", "G0PRIVATE1"}})
+	if _, err := narrow.Execute(context.Background(), "outside-allowlist", "C0CC6JQ4A2U", store.SlackEffectIntent{Kind: store.SlackEffectSend, Text: "no"}); !errors.Is(err, ErrInvalidTarget) {
+		t.Fatalf("outside allowlist err=%v", err)
+	}
+	if _, err := narrow.History(context.Background(), "C0CC6JQ4A2U", 0, ""); !errors.Is(err, ErrInvalidTarget) {
+		t.Fatalf("outside allowlist history err=%v", err)
+	}
+	if _, err := narrow.History(context.Background(), "G0PRIVATE1", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	effects, err := ledger.ListSlackEffects(context.Background(), nil, 10)
+	if err != nil || len(effects) != 1 {
+		t.Fatalf("a rejected channel must not prepare an effect: %+v err=%v", effects, err)
+	}
+	if err := web.AssertDone(); err != nil {
+		t.Fatal(err)
 	}
 }

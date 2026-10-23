@@ -36,14 +36,17 @@ const (
 	harnessUser = "U12345678"
 )
 
-// verificationSteps are the Web calls a gateway makes before it starts.
-func verificationSteps(channelID string) []fake.Step {
-	return []fake.Step{
+// verificationSteps are the Web calls a gateway makes before it starts: one
+// channel check per allowlisted channel.
+func verificationSteps(allowlist ...string) []fake.Step {
+	out := []fake.Step{
 		{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: harnessTeam, BotUserID: harnessBot}},
 		{Operation: fake.Team, Result: slackapi.Team{ID: harnessTeam}},
-		{Operation: fake.Channel, Result: slackapi.Channel{ID: channelID, TeamID: harnessTeam, Member: true, Accessible: true}},
-		{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
 	}
+	for _, channelID := range allowlist {
+		out = append(out, fake.Step{Operation: fake.Channel, Request: channelID, Result: slackapi.Channel{ID: channelID, TeamID: harnessTeam, Member: true, Accessible: true}})
+	}
+	return append(out, fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()})
 }
 
 // reactionSteps scripts the preflight read and write of one reaction effect.
@@ -156,6 +159,24 @@ func (h *slackHarness) call(id, command string, params any) protocol.Response {
 		h.t.Fatal(err)
 	}
 	return out
+}
+
+// runExit executes the built CLI and returns its combined output and exit code.
+func (h *slackHarness) runExit(stdin string, args ...string) ([]byte, int) {
+	h.t.Helper()
+	cmd := exec.Command(h.binary, args...)
+	cmd.Env = h.env
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	out, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); ok {
+		return out, exit.ExitCode()
+	}
+	if err != nil {
+		h.t.Fatalf("mosscap %s: %v", strings.Join(args, " "), err)
+	}
+	return out, 0
 }
 
 // run executes the built CLI and fails the test on a non-zero exit.

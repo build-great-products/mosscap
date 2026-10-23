@@ -14,12 +14,20 @@ func TestTaskWatchTextIsOneReversibleLine(t *testing.T) {
 		t.Fatalf("escaped=%q want %q", got, want)
 	}
 	var out bytes.Buffer
-	change := protocol.TaskChangeDTO{ChangeSeq: 7, Change: "edited", Task: protocol.TaskDTO{TaskID: "AbCdEfGhIjKlMnOpQrStUv", Version: 2, State: "open", SourceKind: "slack", Text: "x\ny"}}
+	change := protocol.TaskChangeDTO{ChangeSeq: 7, Change: "edited", Task: protocol.TaskDTO{TaskID: "AbCdEfGhIjKlMnOpQrStUv", Version: 2, State: "open", SourceKind: "slack", Text: "x\ny", SlackSource: &protocol.SlackSourceDTO{ChannelID: "C0CC6JQ4A2U"}}}
 	if err := writeTaskWatchLine(&out, change, false); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "cursor=7 change=edited task=AbCdEfGhIjKlMnOpQrStUv version=2 state=open source=slack text=x\\ny\n" {
+	if out.String() != "cursor=7 change=edited task=AbCdEfGhIjKlMnOpQrStUv version=2 state=open source=slack channel=C0CC6JQ4A2U text=x\\ny\n" {
 		t.Fatalf("line=%q", out.String())
+	}
+	out.Reset()
+	local := protocol.TaskChangeDTO{ChangeSeq: 8, Change: "created", Task: protocol.TaskDTO{TaskID: "LocalTaskIdLocalTaskId", Version: 1, State: "open", SourceKind: "local", Text: "local"}}
+	if err := writeTaskWatchLine(&out, local, false); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "cursor=8 change=created task=LocalTaskIdLocalTaskId version=1 state=open source=local channel= text=local\n" {
+		t.Fatalf("local line=%q", out.String())
 	}
 	out.Reset()
 	if err := writeTaskWatchLine(&out, change, true); err != nil {

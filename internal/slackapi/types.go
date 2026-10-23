@@ -118,7 +118,7 @@ type User struct {
 	Deactivated bool   `json:"deactivated"`
 }
 
-// Channel contains access facts needed to verify the configured channel.
+// Channel contains access facts needed to verify an allowlisted channel.
 type Channel struct {
 	ID         string `json:"id"`
 	TeamID     string `json:"team_id"`
@@ -132,12 +132,15 @@ type Channel struct {
 }
 
 // VerificationRequest is the immutable identity and authority expected by a
-// prepared runtime. TrustedUserIDs may be empty; when supplied each user must
-// be an active, non-bot member of the configured workspace.
+// prepared runtime. ChannelIDs is the optional channel allowlist; each listed
+// channel must be a writable member channel. An empty list admits every
+// channel the bot belongs to and verifies none up front. TrustedUserIDs may be
+// empty; when supplied each user must be an active, non-bot member of the
+// configured workspace.
 type VerificationRequest struct {
 	TeamID         string
 	BotUserID      string
-	ChannelID      string
+	ChannelIDs     []string
 	TrustedUserIDs []string
 }
 
@@ -145,7 +148,7 @@ type VerificationRequest struct {
 type VerificationResult struct {
 	Identity AuthIdentity
 	Team     Team
-	Channel  Channel
+	Channels []Channel
 	Scopes   []Scope
 	Users    []User
 }

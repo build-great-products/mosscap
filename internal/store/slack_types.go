@@ -41,12 +41,27 @@ const (
 var ErrSlackInvariant = errors.New("Slack repository invariant violated")
 
 // SlackAdmissionPolicy is the immutable configuration snapshot attached to an
-// event receipt. User trust is deliberately not included: it is read from the
-// current trusted_users table in the same transaction as admission.
+// event receipt. Channels is the optional allowlist; empty admits any channel
+// Slack delivers events for, which is every channel the bot is a member of.
+// User trust is deliberately not included: it is read from the current
+// trusted_users table in the same transaction as admission.
 type SlackAdmissionPolicy struct {
-	TeamID    string `json:"team_id"`
-	ChannelID string `json:"channel_id"`
-	BotUserID string `json:"bot_user_id"`
+	TeamID    string   `json:"team_id"`
+	Channels  []string `json:"channels,omitempty"`
+	BotUserID string   `json:"bot_user_id"`
+}
+
+// AllowsChannel reports whether channelID passes the channel allowlist.
+func (p SlackAdmissionPolicy) AllowsChannel(channelID string) bool {
+	if len(p.Channels) == 0 {
+		return true
+	}
+	for _, allowed := range p.Channels {
+		if allowed == channelID {
+			return true
+		}
+	}
+	return false
 }
 
 // SlackSourceEvent is an SDK-free, normalized event. SlackEventAtUS is used

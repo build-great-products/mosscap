@@ -279,7 +279,7 @@ func colorEnabled(w io.Writer) bool {
 
 // gatewayCall starts its timeout immediately before contacting the gateway, so
 // local parsing and stdin consumption never consume the gateway budget.
-func (a App) gatewayCall(c config.Config, command, requestID string, params any, requiredCapability string) (any, error) {
+func (a App) gatewayCall(c config.Config, command, requestID string, params any, requiredCapabilities ...string) (any, error) {
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -314,8 +314,10 @@ func (a App) gatewayCall(c config.Config, command, requestID string, params any,
 	if err != nil {
 		return nil, remote(err)
 	}
-	if requiredCapability != "" && !hasCapability(hello.Capabilities, requiredCapability) {
-		return nil, unsupported("gateway does not support " + requiredCapability + "; upgrade the gateway before using this command")
+	for _, requiredCapability := range requiredCapabilities {
+		if requiredCapability != "" && !hasCapability(hello.Capabilities, requiredCapability) {
+			return nil, unsupported("gateway does not support " + requiredCapability + "; upgrade the gateway before using this command")
+		}
 	}
 	response, err := cl.Call(ctx, request)
 	if err != nil {

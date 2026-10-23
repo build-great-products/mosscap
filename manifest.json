@@ -20,7 +20,9 @@
         "files:read",
         "files:write",
         "channels:read",
-        "channels:history"
+        "channels:history",
+        "groups:read",
+        "groups:history"
       ]
     }
   },
@@ -28,7 +30,8 @@
     "event_subscriptions": {
       "bot_events": [
         "app_mention",
-        "message.channels"
+        "message.channels",
+        "message.groups"
       ]
     },
     "socket_mode_enabled": true,

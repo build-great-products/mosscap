@@ -312,7 +312,11 @@ func writeTaskWatchLine(out io.Writer, change protocol.TaskChangeDTO, jsonOut bo
 		line = append(b, '\n')
 	} else {
 		t := change.Task
-		line = fmt.Appendf(nil, "cursor=%d change=%s task=%s version=%d state=%s source=%s text=%s\n", change.ChangeSeq, change.Change, t.TaskID, t.Version, t.State, t.SourceKind, escapeTaskWatchText(t.Text))
+		channel := ""
+		if t.SlackSource != nil {
+			channel = t.SlackSource.ChannelID
+		}
+		line = fmt.Appendf(nil, "cursor=%d change=%s task=%s version=%d state=%s source=%s channel=%s text=%s\n", change.ChangeSeq, change.Change, t.TaskID, t.Version, t.State, t.SourceKind, channel, escapeTaskWatchText(t.Text))
 	}
 	_, err := out.Write(line)
 	return err

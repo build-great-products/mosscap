@@ -29,6 +29,8 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 
 	var params any
 	capability := protocol.CapabilitySlackPagination
+	channel, _ := cmd.Flags().GetString("channel")
+	task, _ := cmd.Flags().GetString("task")
 	switch command {
 	case "history":
 		limit, _ := cmd.Flags().GetInt("limit")
@@ -37,27 +39,26 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 			limit = 50
 		}
 		cursor, _ := cmd.Flags().GetString("cursor")
-		params = protocol.SlackHistoryParams{Limit: limit, Cursor: cursor}
+		params = protocol.SlackHistoryParams{Channel: channel, Limit: limit, Cursor: cursor}
 	case "thread":
 		limit, _ := cmd.Flags().GetInt("limit")
 		if !cmd.Flags().Changed("limit") {
 			limit = 50
 		}
 		cursor, _ := cmd.Flags().GetString("cursor")
-		params = protocol.SlackThreadParams{ThreadTS: args[0], Limit: limit, Cursor: cursor}
+		params = protocol.SlackThreadParams{Channel: channel, ThreadTS: args[0], Task: task, Limit: limit, Cursor: cursor}
 	case "send":
 		text, err := a.slackTypedText(cmd)
 		if err != nil {
 			return err
 		}
 		thread, _ := cmd.Flags().GetString("thread")
-		task, _ := cmd.Flags().GetString("task")
 		files, _ := cmd.Flags().GetStringArray("file")
 		paths, err := absolutePaths(files)
 		if err != nil {
 			return err
 		}
-		params = protocol.SlackSendParams{ThreadTS: thread, Text: text, Task: task, FilePaths: paths}
+		params = protocol.SlackSendParams{Channel: channel, ThreadTS: thread, Text: text, Task: task, FilePaths: paths}
 		if len(files) > 0 {
 			capability = protocol.CapabilityFileTransfer
 		}
@@ -66,18 +67,15 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 		if err != nil {
 			return err
 		}
-		task, _ := cmd.Flags().GetString("task")
-		params = protocol.SlackEditParams{MessageTS: args[0], Text: text, Task: task}
+		params = protocol.SlackEditParams{Channel: channel, MessageTS: args[0], Text: text, Task: task}
 	case "delete":
 		reason, _ := cmd.Flags().GetString("reason")
 		if reason == "" {
 			return usage("slack delete requires MESSAGE_TS and --reason TEXT")
 		}
-		task, _ := cmd.Flags().GetString("task")
-		params = protocol.SlackDeleteParams{MessageTS: args[0], Reason: reason, Task: task}
+		params = protocol.SlackDeleteParams{Channel: channel, MessageTS: args[0], Reason: reason, Task: task}
 	case "react", "unreact":
-		task, _ := cmd.Flags().GetString("task")
-		params = protocol.SlackReactionParams{MessageTS: args[0], Emoji: args[1], Task: task}
+		params = protocol.SlackReactionParams{Channel: channel, MessageTS: args[0], Emoji: args[1], Task: task}
 	default:
 		return usage("unknown slack command " + command)
 	}
@@ -97,7 +95,7 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 	if err := checkSlackTextFrame(c, "", params, command, requestID, a.Version); err != nil {
 		return err
 	}
-	out, err := a.gatewayCall(c, "slack."+command, requestID, params, capability)
+	out, err := a.gatewayCall(c, "slack."+command, requestID, params, capability, channelCapability(channel))
 	if err != nil {
 		return mutationJSONError(err, mutation, jsonOut, requestID)
 	}
@@ -113,6 +111,12 @@ func (a App) slackTyped(command string, cmd *cobra.Command, args []string) error
 		if command == "thread" {
 			continuation += " " + shellQuote(args[0])
 		}
+		if channel != "" {
+			continuation += " --channel " + shellQuote(channel)
+		}
+		if task != "" {
+			continuation += " --task " + shellQuote(task)
+		}
 		return a.renderPage(out, jsonOut, continuation+fmt.Sprintf(" --limit %d", limit))
 	}
 	return a.renderSlackCommand(out, jsonOut, false)
@@ -123,4 +127,13 @@ func (a App) slackTypedText(cmd *cobra.Command) (string, error) {
 	textFile, _ := cmd.Flags().GetString("text-file")
 	stdin, _ := cmd.Flags().GetBool("stdin")
 	return a.readCommandTextSource(text, textFile, cmd.Flags().Changed("text"), cmd.Flags().Changed("text-file"), stdin)
+}
+
+// channelCapability is the extra gateway capability an explicit --channel
+// needs. An empty channel needs none.
+func channelCapability(channel string) string {
+	if channel == "" {
+		return ""
+	}
+	return protocol.CapabilitySlackChannels
 }

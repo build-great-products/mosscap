@@ -11,7 +11,7 @@ import (
 )
 
 func TestVerifyProvesCompleteRuntimeAuthority(t *testing.T) {
-	required := slackapi.RequiredBotScopes(false)
+	required := slackapi.RequiredBotScopes()
 	web := fake.NewWeb(
 		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		fake.Step{Operation: fake.Team, Request: "T012ABC", Result: slackapi.Team{ID: "T012ABC"}},
@@ -20,7 +20,7 @@ func TestVerifyProvesCompleteRuntimeAuthority(t *testing.T) {
 		fake.Step{Operation: fake.User, Request: "U012USR", Result: slackapi.User{ID: "U012USR", TeamID: "T012ABC"}},
 	)
 	result, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{
-		ChannelID: "C012ABC", TrustedUserIDs: []string{"U012USR"},
+		ChannelIDs: []string{"C012ABC"}, TrustedUserIDs: []string{"U012USR"},
 	})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -62,7 +62,7 @@ func TestVerifyRejectsIdentityScopeAndUserMismatch(t *testing.T) {
 				fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 				fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
 				fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
-				fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+				fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 				fake.Step{Operation: fake.User, Result: slackapi.User{ID: "U012USR", TeamID: "T012ABC", Bot: true}},
 			),
 		},
@@ -70,7 +70,7 @@ func TestVerifyRejectsIdentityScopeAndUserMismatch(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := slackapi.Verify(context.Background(), test.web, slackapi.VerificationRequest{
-				TeamID: "T012ABC", BotUserID: "U012BOT", ChannelID: "C012ABC", TrustedUserIDs: []string{"U012USR"},
+				TeamID: "T012ABC", BotUserID: "U012BOT", ChannelIDs: []string{"C012ABC"}, TrustedUserIDs: []string{"U012USR"},
 			})
 			failure := slackapi.Classify(err, slackapi.FailureRead)
 			if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != test.code {
@@ -81,45 +81,56 @@ func TestVerifyRejectsIdentityScopeAndUserMismatch(t *testing.T) {
 }
 
 func TestVerifyReportsSortedRequiredMissingScopesSafely(t *testing.T) {
-	tests := []struct {
-		name    string
-		private bool
-		want    []slackapi.Scope
-	}{
-		{
-			name: "public", want: []slackapi.Scope{
-				slackapi.ScopeAppMentionsRead, slackapi.ScopeChannelsHistory, slackapi.ScopeChannelsRead,
-				slackapi.ScopeFilesRead, slackapi.ScopeFilesWrite, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeTeamRead, slackapi.ScopeUsersRead,
-			},
-		},
-		{
-			name: "private", private: true, want: []slackapi.Scope{
-				slackapi.ScopeAppMentionsRead, slackapi.ScopeFilesRead, slackapi.ScopeFilesWrite, slackapi.ScopeGroupsHistory,
-				slackapi.ScopeGroupsRead, slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeTeamRead, slackapi.ScopeUsersRead,
-			},
-		},
+	web := fake.NewWeb(
+		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
+		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
+		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
+		fake.Step{Operation: fake.Scopes, Result: []slackapi.Scope{slackapi.ScopeChatWrite}},
+	)
+	_, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{TeamID: "T012ABC", BotUserID: "U012BOT", ChannelIDs: []string{"C012ABC"}})
+	want := []slackapi.Scope{
+		slackapi.ScopeAppMentionsRead, slackapi.ScopeChannelsHistory, slackapi.ScopeChannelsRead,
+		slackapi.ScopeFilesRead, slackapi.ScopeFilesWrite, slackapi.ScopeGroupsHistory, slackapi.ScopeGroupsRead,
+		slackapi.ScopeReactionsRead, slackapi.ScopeReactionsWrite, slackapi.ScopeTeamRead, slackapi.ScopeUsersRead,
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			web := fake.NewWeb(
-				fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
-				fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
-				fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Private: test.private, Member: true, Accessible: true}},
-				fake.Step{Operation: fake.Scopes, Result: []slackapi.Scope{slackapi.ScopeChatWrite}},
-			)
-			_, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{TeamID: "T012ABC", BotUserID: "U012BOT", ChannelID: "C012ABC"})
-			got, ok := slackapi.MissingScopesFromError(err)
-			if !ok || !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("MissingScopesFromError(%v) = %v, %t; want %v, true", err, got, ok, test.want)
-			}
-			failure := slackapi.Classify(err, slackapi.FailureRead)
-			if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != slackapi.DiagnosticMissingScope {
-				t.Fatalf("Classify = %#v", failure)
-			}
-			if strings.Contains(err.Error(), "T012ABC") || strings.Contains(err.Error(), "C012ABC") {
-				t.Fatalf("missing-scope error leaked identifiers: %q", err)
-			}
-		})
+	got, ok := slackapi.MissingScopesFromError(err)
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("MissingScopesFromError(%v) = %v, %t; want %v, true", err, got, ok, want)
+	}
+	failure := slackapi.Classify(err, slackapi.FailureRead)
+	if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != slackapi.DiagnosticMissingScope {
+		t.Fatalf("Classify = %#v", failure)
+	}
+	if strings.Contains(err.Error(), "T012ABC") || strings.Contains(err.Error(), "C012ABC") {
+		t.Fatalf("missing-scope error leaked identifiers: %q", err)
+	}
+}
+
+func TestVerifyWithoutAllowlistChecksNoChannelAndEveryAllowlistedOne(t *testing.T) {
+	web := fake.NewWeb(
+		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
+		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
+		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
+	)
+	result, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{})
+	if err != nil || len(result.Channels) != 0 {
+		t.Fatalf("empty allowlist result=%#v err=%v", result, err)
+	}
+	if err := web.AssertDone(); err != nil {
+		t.Fatal(err)
+	}
+	web = fake.NewWeb(
+		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
+		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
+		fake.Step{Operation: fake.Channel, Request: "C012ABC", Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
+		fake.Step{Operation: fake.Channel, Request: "G012PRV", Result: slackapi.Channel{ID: "G012PRV", TeamID: "T012ABC", Private: true, Member: false, Accessible: true}},
+	)
+	_, err = slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{ChannelIDs: []string{"C012ABC", "G012PRV"}})
+	if failure := slackapi.Classify(err, slackapi.FailureRead); failure.Diagnostic != slackapi.DiagnosticNotInChannel {
+		t.Fatalf("non-member allowlisted channel failure=%#v err=%v", failure, err)
+	}
+	if _, err := slackapi.Verify(context.Background(), fake.NewWeb(), slackapi.VerificationRequest{ChannelIDs: []string{"C012ABC", "C012ABC"}}); slackapi.Classify(err, slackapi.FailureRead).Diagnostic != slackapi.DiagnosticInvalidRequest {
+		t.Fatalf("duplicate allowlist err=%v", err)
 	}
 }
 

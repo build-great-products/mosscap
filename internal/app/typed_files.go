@@ -83,7 +83,7 @@ func (a App) fileGetTyped(file, output string, force bool, requestID string, jso
 }
 
 // slackFileTyped accepts exactly one already-parsed repeated --file value.
-func (a App) slackFileTyped(thread string, files []string, comment, task, requestID string, jsonOut bool) error {
+func (a App) slackFileTyped(channel, thread string, files []string, comment, task, requestID string, jsonOut bool) error {
 	if len(files) != 1 {
 		return usage("slack file requires exactly one --file")
 	}
@@ -102,11 +102,11 @@ func (a App) slackFileTyped(thread string, files []string, comment, task, reques
 	if err != nil {
 		return err
 	}
-	params := protocol.SlackFileParams{ThreadTS: thread, FilePath: paths[0], Comment: comment, Task: task}
+	params := protocol.SlackFileParams{Channel: channel, ThreadTS: thread, FilePath: paths[0], Comment: comment, Task: task}
 	if err := checkSlackTextFrame(c, "", params, "file", requestID, a.Version); err != nil {
 		return err
 	}
-	out, err := a.gatewayCall(c, "slack.file", requestID, params, protocol.CapabilityFileTransfer)
+	out, err := a.gatewayCall(c, "slack.file", requestID, params, protocol.CapabilityFileTransfer, channelCapability(channel))
 	if err != nil {
 		return mutationJSONError(err, true, jsonOut, requestID)
 	}

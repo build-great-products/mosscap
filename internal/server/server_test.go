@@ -184,7 +184,7 @@ func verifiedSlackWeb() slackapi.Web {
 		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
 		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
-		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 	)
 }
 
@@ -235,7 +235,7 @@ func TestAutomaticUntrustedReactionIsDurableAndMessageIdempotent(t *testing.T) {
 		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: envelope.TeamID, BotUserID: "U012BOT"}},
 		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: envelope.TeamID}},
 		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: envelope.ChannelID, TeamID: envelope.TeamID, Member: true, Accessible: true}},
-		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 		fake.Step{Operation: fake.Permalink, Request: permalinkRequest, Result: "https://example.invalid/message"},
 		fake.Step{Operation: fake.AddReaction, Request: reactionRequest},
 		fake.Step{Operation: fake.Permalink, Request: permalinkRequest, Result: "https://example.invalid/message"},
@@ -246,7 +246,7 @@ func TestAutomaticUntrustedReactionIsDurableAndMessageIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := testConfig(config.Paths{})
-	c.SlackAppToken, c.SlackBotToken, c.SlackChannelID = "xapp-test", "xoxb-test", envelope.ChannelID
+	c.SlackAppToken, c.SlackBotToken, c.SlackChannelAllowlist = "xapp-test", "xoxb-test", envelope.ChannelID
 	if err := rt.Start(ctx, c); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func newTaskReplySource(t *testing.T, ledger *store.Store, id string) store.Slac
 	if _, err := ledger.AddTrustedUser(ctx, "req_trust_"+id, "U12345678"); err != nil {
 		t.Fatal(err)
 	}
-	source, err := ledger.CommitSlackSourceEvent(ctx, store.SlackAdmissionPolicy{TeamID: "T012ABC", ChannelID: "C012ABC", BotUserID: "U012BOT"}, store.SlackSourceEvent{SourceEventID: "Ev-" + id, EventKind: store.SlackEventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", ThreadTS: "1699999999.000001", Text: "do this <@U012BOT>", SlackEventAtUS: 1700000000000001})
+	source, err := ledger.CommitSlackSourceEvent(ctx, store.SlackAdmissionPolicy{TeamID: "T012ABC", Channels: []string{"C012ABC"}, BotUserID: "U012BOT"}, store.SlackSourceEvent{SourceEventID: "Ev-" + id, EventKind: store.SlackEventAppMention, TeamID: "T012ABC", ChannelID: "C012ABC", UserID: "U12345678", MessageTS: "1700000000.000001", ThreadTS: "1699999999.000001", Text: "do this <@U012BOT>", SlackEventAtUS: 1700000000000001})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func newTaskReplyServer(t *testing.T, ledger *store.Store, steps ...fake.Step) (
 		{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
 		{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
-		{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+		{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 	}
 	web := fake.NewWeb(append(verification, steps...)...)
 	runtime, err := slackruntime.New(slackruntime.Options{Factory: &fakeRuntimeFactory{webs: []slackapi.Web{web}, sockets: []slackapi.Socket{fake.NewSocket(fake.SocketSession{})}}, Handler: func(context.Context, slackapi.Envelope) error { return nil }})
@@ -304,7 +304,7 @@ func newTaskReplyServer(t *testing.T, ledger *store.Store, steps ...fake.Step) (
 		t.Fatal(err)
 	}
 	c := testConfig(config.Paths{})
-	c.SlackAppToken, c.SlackBotToken, c.SlackChannelID = "xapp-test", "xoxb-test", "C012ABC"
+	c.SlackAppToken, c.SlackBotToken, c.SlackChannelAllowlist = "xapp-test", "xoxb-test", "C012ABC"
 	if err := runtime.Start(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +684,7 @@ func TestSlackReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, value := range map[string]string{
-		"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_id": "C012ABC",
+		"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_allowlist": "C012ABC",
 	} {
 		set := config.Set
 		if key == "slack_app_token" || key == "slack_bot_token" {
@@ -723,7 +723,7 @@ func TestSlackReloadRetainsFailedCandidateThenSwapsAndDrains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.TeamID != "T012ABC" || status.BotUserID != "U012BOT" || status.ChannelID != "C012ABC" || status.IdentitySource != "auth_test" {
+	if status.TeamID != "T012ABC" || status.BotUserID != "U012BOT" || len(status.Channels) != 1 || status.Channels[0] != "C012ABC" || status.IdentitySource != "auth_test" {
 		t.Fatalf("runtime identity status = %#v", status)
 	}
 	t.Cleanup(func() { s.closeSlack(); _ = ledger.Close() })

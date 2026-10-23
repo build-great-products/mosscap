@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"time"
 )
 
 // TaskChangeKind names the most recent change recorded on a task row.
@@ -24,10 +23,23 @@ var ErrTaskChangeCursorAhead = errors.New("task change cursor is ahead of this l
 // Triggers assign the sequence inside the writing transaction, so commit order
 // and sequence order agree. Only the latest change of a task is retained:
 // earlier changes since a cursor are coalesced into the current snapshot.
+// SlackSource is present for Slack-origin tasks and names their channel.
 type TaskChange struct {
-	Seq  int64
-	Kind TaskChangeKind
-	Task Task
+	Seq         int64
+	Kind        TaskChangeKind
+	Task        Task
+	SlackSource *SlackSource
+}
+
+// prefixedScanner scans leading columns before handing the remaining columns
+// to a shared row scanner.
+type prefixedScanner struct {
+	rows   *sql.Rows
+	prefix []any
+}
+
+func (p prefixedScanner) Scan(dest ...any) error {
+	return p.rows.Scan(append(append([]any(nil), p.prefix...), dest...)...)
 }
 
 // TaskChanges returns tasks whose latest change sequence is greater than after,
@@ -52,7 +64,10 @@ func (s *Store) TaskChanges(ctx context.Context, after int64, limit int) ([]Task
 	if after > head {
 		return nil, 0, ErrTaskChangeCursorAhead
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT change_seq,change_kind,task_id,version,state,text,source_kind,created_at,updated_at,done_at FROM tasks WHERE change_seq>? ORDER BY change_seq LIMIT ?", after, limit)
+	rows, err := tx.QueryContext(ctx, `SELECT t.change_seq,t.change_kind,t.task_id,t.version,t.state,t.text,t.source_kind,t.created_at,t.updated_at,t.done_at,
+		s.initial_source_event_id,s.team_id,s.channel_id,s.author_user_id,s.message_ts,s.thread_ts,s.permalink,s.latest_event_at_us,s.source_deleted_at_us,s.created_at_us,s.updated_at_us
+		FROM tasks t LEFT JOIN slack_task_sources s ON s.task_id=t.task_id
+		WHERE t.change_seq>? ORDER BY t.change_seq LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -60,17 +75,11 @@ func (s *Store) TaskChanges(ctx context.Context, after int64, limit int) ([]Task
 	var changes []TaskChange
 	for rows.Next() {
 		var c TaskChange
-		var created, updated int64
-		var done sql.NullInt64
-		if err := rows.Scan(&c.Seq, &c.Kind, &c.Task.ID, &c.Task.Version, &c.Task.State, &c.Task.Text, &c.Task.SourceKind, &created, &updated, &done); err != nil {
+		model, err := scanTaskReadModel(prefixedScanner{rows: rows, prefix: []any{&c.Seq, &c.Kind}})
+		if err != nil {
 			return nil, 0, err
 		}
-		c.Task.CreatedAt = time.UnixMicro(created).UTC()
-		c.Task.UpdatedAt = time.UnixMicro(updated).UTC()
-		if done.Valid {
-			d := time.UnixMicro(done.Int64).UTC()
-			c.Task.DoneAt = &d
-		}
+		c.Task, c.SlackSource = model.Task, model.SlackSource
 		changes = append(changes, c)
 	}
 	if err := rows.Err(); err != nil {

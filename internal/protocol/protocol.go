@@ -40,9 +40,12 @@ const (
 	CapabilitySQLitePagination    = "sqlite_pagination_v1"
 	CapabilityTaskContext         = "task_context_v1"
 	CapabilityTaskChanges         = "task_changes_v1"
+	// CapabilitySlackChannels means Slack commands accept an explicit channel
+	// and admission is not limited to one configured channel.
+	CapabilitySlackChannels = "slack_channels_v1"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext, CapabilityTaskChanges}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext, CapabilityTaskChanges, CapabilitySlackChannels}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -220,40 +223,50 @@ type TaskContextDTO struct {
 	Warnings []string              `json:"warnings,omitempty"`
 }
 
-// SlackHistoryParams and SlackThreadParams deliberately contain no workspace
-// or channel selector: every operation is pinned to the active runtime.
+// Slack command params carry an optional Channel. The workspace is always the
+// active runtime's. When Channel is empty the gateway uses the channel of the
+// related Task, then the only allowlisted channel; otherwise it is a usage
+// error. Every channel must pass the runtime's allowlist.
 type SlackHistoryParams struct {
-	Limit  int    `json:"limit,omitempty"`
-	Cursor string `json:"cursor,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+	Cursor  string `json:"cursor,omitempty"`
 }
 type SlackThreadParams struct {
+	Channel  string `json:"channel,omitempty"`
 	ThreadTS string `json:"thread_ts"`
+	Task     string `json:"task,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
 	Cursor   string `json:"cursor,omitempty"`
 }
 type SlackSendParams struct {
+	Channel   string   `json:"channel,omitempty"`
 	ThreadTS  string   `json:"thread_ts,omitempty"`
 	Text      string   `json:"text"`
 	Task      string   `json:"task,omitempty"`
 	FilePaths []string `json:"file_paths,omitempty"`
 }
 type SlackFileParams struct {
+	Channel  string `json:"channel,omitempty"`
 	ThreadTS string `json:"thread_ts,omitempty"`
 	FilePath string `json:"file_path"`
 	Comment  string `json:"comment,omitempty"`
 	Task     string `json:"task,omitempty"`
 }
 type SlackEditParams struct {
+	Channel   string `json:"channel,omitempty"`
 	MessageTS string `json:"message_ts"`
 	Text      string `json:"text"`
 	Task      string `json:"task,omitempty"`
 }
 type SlackDeleteParams struct {
+	Channel   string `json:"channel,omitempty"`
 	MessageTS string `json:"message_ts"`
 	Reason    string `json:"reason"`
 	Task      string `json:"task,omitempty"`
 }
 type SlackReactionParams struct {
+	Channel   string `json:"channel,omitempty"`
 	MessageTS string `json:"message_ts"`
 	Emoji     string `json:"emoji"`
 	Task      string `json:"task,omitempty"`
@@ -386,6 +399,7 @@ type SlackEffectDTO struct {
 	EffectID            string  `json:"effect_id"`
 	PredecessorEffectID string  `json:"predecessor_effect_id,omitempty"`
 	RelatedTaskID       string  `json:"related_task_id,omitempty"`
+	ChannelID           string  `json:"channel_id"`
 	Kind                string  `json:"kind"`
 	TargetMessageTS     string  `json:"target_message_ts,omitempty"`
 	ThreadTS            string  `json:"thread_ts,omitempty"`
@@ -427,7 +441,7 @@ type SlackRuntimeStatusDTO struct {
 	State                          string               `json:"state"`
 	TeamID                         string               `json:"team_id,omitempty"`
 	BotUserID                      string               `json:"bot_user_id,omitempty"`
-	ChannelID                      string               `json:"channel_id,omitempty"`
+	Channels                       []string             `json:"channels,omitempty"`
 	IdentitySource                 string               `json:"identity_source,omitempty"`
 	ReconnectAttempt               int                  `json:"reconnect_attempt"`
 	BackoffMilliseconds            int64                `json:"backoff_milliseconds"`
@@ -694,31 +708,31 @@ func ValidateParams(command string, raw json.RawMessage) error {
 			return errors.New("invalid task list")
 		}
 	case *SlackHistoryParams:
-		if p.Limit < 0 || p.Limit > slackapi.MaxReadLimit || !validSlackCursor(p.Cursor) {
+		if !validChannel(p.Channel) || p.Limit < 0 || p.Limit > slackapi.MaxReadLimit || !validSlackCursor(p.Cursor) {
 			return errors.New("invalid Slack history parameters")
 		}
 	case *SlackThreadParams:
-		if !validTimestamp(p.ThreadTS) || p.Limit < 0 || p.Limit > slackapi.MaxReadLimit || !validSlackCursor(p.Cursor) {
+		if !validChannel(p.Channel) || !validTask(p.Task) || !validTimestamp(p.ThreadTS) || p.Limit < 0 || p.Limit > slackapi.MaxReadLimit || !validSlackCursor(p.Cursor) {
 			return errors.New("invalid Slack thread parameters")
 		}
 	case *SlackSendParams:
-		if (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validText(p.Text, true) || !validTask(p.Task) || !validPaths(p.FilePaths) {
+		if !validChannel(p.Channel) || (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validText(p.Text, true) || !validTask(p.Task) || !validPaths(p.FilePaths) {
 			return errors.New("invalid Slack send")
 		}
 	case *SlackFileParams:
-		if (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validPath(p.FilePath) || !validText(p.Comment, false) || !validTask(p.Task) {
+		if !validChannel(p.Channel) || (p.ThreadTS != "" && !validTimestamp(p.ThreadTS)) || !validPath(p.FilePath) || !validText(p.Comment, false) || !validTask(p.Task) {
 			return errors.New("invalid Slack file")
 		}
 	case *SlackEditParams:
-		if !validTimestamp(p.MessageTS) || !validText(p.Text, true) || !validTask(p.Task) {
+		if !validChannel(p.Channel) || !validTimestamp(p.MessageTS) || !validText(p.Text, true) || !validTask(p.Task) {
 			return errors.New("invalid Slack edit")
 		}
 	case *SlackDeleteParams:
-		if !validTimestamp(p.MessageTS) || !validReason(p.Reason) || !validTask(p.Task) {
+		if !validChannel(p.Channel) || !validTimestamp(p.MessageTS) || !validReason(p.Reason) || !validTask(p.Task) {
 			return errors.New("invalid Slack delete")
 		}
 	case *SlackReactionParams:
-		if !validTimestamp(p.MessageTS) || !validTask(p.Task) {
+		if !validChannel(p.Channel) || !validTimestamp(p.MessageTS) || !validTask(p.Task) {
 			return errors.New("invalid Slack reaction")
 		}
 		if _, err := slackapi.NormalizeEmoji(p.Emoji); err != nil {
@@ -850,6 +864,9 @@ func validReason(value string) bool {
 	return value != "" && len(value) <= 4096 && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
 func validTask(value string) bool { return value == "" || validTaskSelector(value) }
+func validChannel(value string) bool {
+	return value == "" || slackapi.ValidateChannelID(value) == nil
+}
 func validTaskSelector(value string) bool {
 	return value != "" && len(value) <= 22 && validSelectorSuffix(value)
 }

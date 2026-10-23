@@ -45,7 +45,7 @@ func TestSlackVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_id": "C012ABC"} {
+	for key, value := range map[string]string{"slack_app_token": "xapp-test", "slack_bot_token": "xoxb-test", "slack_channel_allowlist": "C012ABC"} {
 		set := config.Set
 		if key == "slack_app_token" || key == "slack_bot_token" {
 			set = config.SetSecret
@@ -88,7 +88,7 @@ func TestSlackVerticalSlice(t *testing.T) {
 		fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
 		fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
 		fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
-		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes(false)},
+		fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
 		fake.Step{Operation: fake.History, Request: slackapi.HistoryRequest{ChannelID: "C012ABC", Limit: 17, Cursor: "history-cursor"}, Result: slackapi.MessagePage{NextCursor: "next-history-cursor"}},
 		fake.Step{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: "C012ABC", MessageTS: "1700000009.000001"}},
 		fake.Step{Operation: fake.PostMessage, PostCall: fake.CallScript{Fault: fake.Timeout}},

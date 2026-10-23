@@ -1,4 +1,4 @@
-// Package slackops provides configured-channel Slack reads and durable effects.
+// Package slackops provides admitted-channel Slack reads and durable effects.
 package slackops
 
 import (
@@ -20,7 +20,7 @@ const maxUploadFiles = 20
 
 var (
 	ErrUnavailable   = errors.New("Slack operations are unavailable")
-	ErrInvalidTarget = errors.New("Slack target is not in the configured channel")
+	ErrInvalidTarget = errors.New("Slack target is not an admitted channel")
 )
 
 // EffectStore is the narrow durable boundary used by Service.
@@ -74,30 +74,55 @@ func (e *FailureError) Error() string {
 	return fmt.Sprintf("Slack operation failed (%s)", e.Diagnostic)
 }
 
-// Service is pinned to one verified runtime snapshot's Web client and target.
-// The mutex serializes prepare/claim decisions in one process; ClaimSlackEffect
-// remains the cross-process submission authority.
+// Scope is the authority of one verified runtime snapshot: its workspace and
+// the channel allowlist. An empty allowlist admits every channel the bot is a
+// member of; Slack itself enforces membership.
+type Scope struct {
+	TeamID   string
+	Channels []string
+}
+
+// Allows reports whether channelID in teamID is within the scope.
+func (s Scope) Allows(teamID, channelID string) bool {
+	if teamID != s.TeamID || slackapi.ValidateChannelID(channelID) != nil {
+		return false
+	}
+	if len(s.Channels) == 0 {
+		return true
+	}
+	for _, allowed := range s.Channels {
+		if allowed == channelID {
+			return true
+		}
+	}
+	return false
+}
+
+// Service is pinned to one verified runtime snapshot's Web client and scope.
+// Every operation names its channel, which must be within the scope. The mutex
+// serializes prepare/claim decisions in one process; ClaimSlackEffect remains
+// the cross-process submission authority.
 type Service struct {
 	store        EffectStore
 	web          slackapi.Web
 	files        slackapi.FileTransfer
-	target       store.SlackEffectTarget
+	scope        Scope
 	maximumBytes int64
 	maximumFiles int
 	openSource   sourceOpener
 	mu           sync.Mutex
 }
 
-func New(s EffectStore, web slackapi.Web, target store.SlackEffectTarget) *Service {
-	return &Service{store: s, web: web, target: target}
+func New(s EffectStore, web slackapi.Web, scope Scope) *Service {
+	return &Service{store: s, web: web, scope: scope}
 }
 
 // NewWithFileTransfer adds the separately injectable, bounded upload adapter
 // to a normal Slack operation service. Existing text/reaction callers remain
 // on New; file uploads are unavailable until this constructor is used.
-func NewWithFileTransfer(s EffectStore, web slackapi.Web, files slackapi.FileTransfer, target store.SlackEffectTarget, maximumBytes int64, maximumFiles int) *Service {
+func NewWithFileTransfer(s EffectStore, web slackapi.Web, files slackapi.FileTransfer, scope Scope, maximumBytes int64, maximumFiles int) *Service {
 	return &Service{
-		store: s, web: web, files: files, target: target,
+		store: s, web: web, files: files, scope: scope,
 		maximumBytes: maximumBytes, maximumFiles: maximumFiles,
 		openSource: func(path string, limit int64) (uploadSource, error) {
 			source, err := fileio.OpenSource(path, limit)
@@ -109,8 +134,8 @@ func NewWithFileTransfer(s EffectStore, web slackapi.Web, files slackapi.FileTra
 	}
 }
 
-// History returns one configured-channel page. A zero limit defaults to 50.
-func (s *Service) History(ctx context.Context, limit int, cursor string) (slackapi.MessagePage, error) {
+// History returns one page of an admitted channel. A zero limit defaults to 50.
+func (s *Service) History(ctx context.Context, channelID string, limit int, cursor string) (slackapi.MessagePage, error) {
 	if limit == 0 {
 		limit = 50
 	}
@@ -120,15 +145,19 @@ func (s *Service) History(ctx context.Context, limit int, cursor string) (slacka
 	if err := s.ready(); err != nil {
 		return slackapi.MessagePage{}, err
 	}
-	page, err := s.web.History(ctx, slackapi.HistoryRequest{ChannelID: s.target.ChannelID, Limit: limit, Cursor: cursor})
+	if !s.Allows(s.scope.TeamID, channelID) {
+		return slackapi.MessagePage{}, ErrInvalidTarget
+	}
+	page, err := s.web.History(ctx, slackapi.HistoryRequest{ChannelID: channelID, Limit: limit, Cursor: cursor})
 	if err != nil {
 		return slackapi.MessagePage{}, readError(err)
 	}
 	return page, nil
 }
 
-// Thread returns one configured-channel replies page. A zero limit defaults to 50.
-func (s *Service) Thread(ctx context.Context, threadTS string, limit int, cursor string) (slackapi.MessagePage, error) {
+// Thread returns one replies page in an admitted channel. A zero limit
+// defaults to 50.
+func (s *Service) Thread(ctx context.Context, channelID, threadTS string, limit int, cursor string) (slackapi.MessagePage, error) {
 	ts, err := slackapi.ParseTimestamp(threadTS)
 	if err != nil {
 		return slackapi.MessagePage{}, err
@@ -142,29 +171,42 @@ func (s *Service) Thread(ctx context.Context, threadTS string, limit int, cursor
 	if err := s.ready(); err != nil {
 		return slackapi.MessagePage{}, err
 	}
-	page, err := s.web.Replies(ctx, slackapi.RepliesRequest{ChannelID: s.target.ChannelID, ThreadTS: ts, Limit: limit, Cursor: cursor})
+	if !s.Allows(s.scope.TeamID, channelID) {
+		return slackapi.MessagePage{}, ErrInvalidTarget
+	}
+	page, err := s.web.Replies(ctx, slackapi.RepliesRequest{ChannelID: channelID, ThreadTS: ts, Limit: limit, Cursor: cursor})
 	if err != nil {
 		return slackapi.MessagePage{}, readError(err)
 	}
 	return page, nil
 }
 
-// MatchesTarget reports whether a durable source belongs to this active Slack
-// workspace/channel. It prevents a reply from being redirected after reload.
-func (s *Service) MatchesTarget(teamID, channelID string) bool {
-	return s != nil && s.target.TeamID == teamID && s.target.ChannelID == channelID
+// Allows reports whether a durable source or target belongs to this active
+// Slack workspace and channel scope. It prevents work from being redirected to
+// a workspace or channel that a reload removed.
+func (s *Service) Allows(teamID, channelID string) bool {
+	return s != nil && s.scope.Allows(teamID, channelID)
 }
+
+// TeamID is the verified workspace of this service.
+func (s *Service) TeamID() string { return s.scope.TeamID }
+
+// Channels returns the channel allowlist; empty admits every member channel.
+func (s *Service) Channels() []string { return append([]string(nil), s.scope.Channels...) }
 
 // Execute durably prepares, claims, and executes one public Slack mutation.
 // It never retries a submitted effect, including after an uncertain response.
-func (s *Service) Execute(ctx context.Context, requestID string, intent store.SlackEffectIntent) (store.SlackEffect, error) {
+func (s *Service) Execute(ctx context.Context, requestID, channelID string, intent store.SlackEffectIntent) (store.SlackEffect, error) {
 	if err := s.ready(); err != nil {
 		return store.SlackEffect{}, err
 	}
-	if err := s.preflight(ctx, intent); err != nil {
+	if !s.Allows(s.scope.TeamID, channelID) {
+		return store.SlackEffect{}, ErrInvalidTarget
+	}
+	if err := s.preflight(ctx, channelID, intent); err != nil {
 		return store.SlackEffect{}, err
 	}
-	return s.executePrepared(ctx, requestID, intent)
+	return s.executePrepared(ctx, requestID, channelID, intent)
 }
 
 // Retry creates a linked prepared effect through the store then executes it.
@@ -178,6 +220,9 @@ func (s *Service) Retry(ctx context.Context, requestID, predecessor, reason stri
 	prior, err := s.store.GetSlackEffect(ctx, predecessor)
 	if err != nil {
 		return store.SlackEffect{}, err
+	}
+	if !s.Allows(prior.TeamID, prior.ChannelID) {
+		return prior, ErrInvalidTarget
 	}
 	var sources []preparedUploadSource
 	if prior.Kind == store.SlackEffectFileUpload {
@@ -216,9 +261,12 @@ func (s *Service) Retry(ctx context.Context, requestID, predecessor, reason stri
 // ExecuteFileUpload securely opens and hashes every ordered input before it
 // commits the exact file_upload intent. No Slack request can precede that
 // transaction, and no completion can follow a changed source.
-func (s *Service) ExecuteFileUpload(ctx context.Context, requestID string, intent store.SlackFileUploadIntent) (store.SlackEffect, error) {
+func (s *Service) ExecuteFileUpload(ctx context.Context, requestID, channelID string, intent store.SlackFileUploadIntent) (store.SlackEffect, error) {
 	if err := s.readyUpload(); err != nil {
 		return store.SlackEffect{}, err
+	}
+	if !s.Allows(s.scope.TeamID, channelID) {
+		return store.SlackEffect{}, ErrInvalidTarget
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -228,7 +276,7 @@ func (s *Service) ExecuteFileUpload(ctx context.Context, requestID string, inten
 	}
 	defer closePreparedSources(sources)
 	intent.Files = uploadFiles(sources)
-	result, err := s.store.PrepareSlackFileUpload(ctx, requestID, s.target, intent)
+	result, err := s.store.PrepareSlackFileUpload(ctx, requestID, store.SlackEffectTarget{TeamID: s.scope.TeamID, ChannelID: channelID}, intent)
 	if err != nil {
 		return store.SlackEffect{}, err
 	}
@@ -276,10 +324,10 @@ func (s *Service) Recover(ctx context.Context) (int64, error) {
 	}
 }
 
-func (s *Service) executePrepared(ctx context.Context, requestID string, intent store.SlackEffectIntent) (store.SlackEffect, error) {
+func (s *Service) executePrepared(ctx context.Context, requestID, channelID string, intent store.SlackEffectIntent) (store.SlackEffect, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result, err := s.store.PrepareSlackEffect(ctx, requestID, s.target, intent)
+	result, err := s.store.PrepareSlackEffect(ctx, requestID, store.SlackEffectTarget{TeamID: s.scope.TeamID, ChannelID: channelID}, intent)
 	if err != nil {
 		return store.SlackEffect{}, err
 	}
@@ -303,6 +351,9 @@ func (s *Service) executeExisting(ctx context.Context, effect store.SlackEffect)
 func (s *Service) executeExistingLocked(ctx context.Context, effect store.SlackEffect) (store.SlackEffect, error) {
 	if effect.State != store.SlackEffectPrepared {
 		return effect, terminalError(effect)
+	}
+	if !s.Allows(effect.TeamID, effect.ChannelID) {
+		return effect, ErrInvalidTarget
 	}
 	if effect.Kind == store.SlackEffectFileUpload {
 		if err := s.readyUpload(); err != nil {
@@ -356,7 +407,7 @@ func (s *Service) claimAndUpload(ctx context.Context, effect store.SlackEffect, 
 	}
 
 	readers := make([]*sourceReader, len(sources))
-	request := slackapi.UploadRequest{ChannelID: s.target.ChannelID, ThreadTS: slackapi.Timestamp(claimed.ThreadTS), InitialComment: claimed.Text, Files: make([]slackapi.UploadSource, len(sources))}
+	request := slackapi.UploadRequest{ChannelID: claimed.ChannelID, ThreadTS: slackapi.Timestamp(claimed.ThreadTS), InitialComment: claimed.Text, Files: make([]slackapi.UploadSource, len(sources))}
 	for index, prepared := range sources {
 		reader := newSourceReader(prepared.source)
 		readers[index] = reader
@@ -422,7 +473,7 @@ func (s *Service) claimAndCall(ctx context.Context, effect store.SlackEffect) (s
 	return completed, terminalError(completed)
 }
 
-func (s *Service) preflight(ctx context.Context, intent store.SlackEffectIntent) error {
+func (s *Service) preflight(ctx context.Context, channelID string, intent store.SlackEffectIntent) error {
 	if intent.Kind == store.SlackEffectSend && intent.ThreadTS == "" {
 		return nil
 	}
@@ -434,17 +485,17 @@ func (s *Service) preflight(ctx context.Context, intent store.SlackEffectIntent)
 	if err != nil {
 		return err
 	}
-	_, err = s.web.Permalink(ctx, slackapi.PermalinkRequest{ChannelID: s.target.ChannelID, MessageTS: parsed})
+	_, err = s.web.Permalink(ctx, slackapi.PermalinkRequest{ChannelID: channelID, MessageTS: parsed})
 	if err != nil {
 		return readError(err)
 	}
 	return nil
 }
 func (s *Service) preflightEffect(ctx context.Context, effect store.SlackEffect) error {
-	if effect.TeamID != s.target.TeamID || effect.ChannelID != s.target.ChannelID {
+	if !s.Allows(effect.TeamID, effect.ChannelID) {
 		return ErrInvalidTarget
 	}
-	return s.preflight(ctx, store.SlackEffectIntent{Kind: effect.Kind, TargetMessageTS: effect.TargetMessageTS, ThreadTS: effect.ThreadTS})
+	return s.preflight(ctx, effect.ChannelID, store.SlackEffectIntent{Kind: effect.Kind, TargetMessageTS: effect.TargetMessageTS, ThreadTS: effect.ThreadTS})
 }
 
 func (s *Service) call(ctx context.Context, effect store.SlackEffect) store.SlackEffectOutcome {
@@ -452,19 +503,19 @@ func (s *Service) call(ctx context.Context, effect store.SlackEffect) store.Slac
 	var result slackapi.MessageResult
 	switch effect.Kind {
 	case store.SlackEffectSend:
-		result, err = s.web.PostMessage(ctx, slackapi.PostMessageRequest{ChannelID: s.target.ChannelID, ThreadTS: slackapi.Timestamp(effect.ThreadTS), Text: effect.Text, ClientMessageID: effect.IdempotencyKey})
+		result, err = s.web.PostMessage(ctx, slackapi.PostMessageRequest{ChannelID: effect.ChannelID, ThreadTS: slackapi.Timestamp(effect.ThreadTS), Text: effect.Text, ClientMessageID: effect.IdempotencyKey})
 	case store.SlackEffectEdit:
-		result, err = s.web.UpdateMessage(ctx, slackapi.UpdateMessageRequest{ChannelID: s.target.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS), Text: effect.Text})
+		result, err = s.web.UpdateMessage(ctx, slackapi.UpdateMessageRequest{ChannelID: effect.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS), Text: effect.Text})
 	case store.SlackEffectDelete:
-		err = s.web.DeleteMessage(ctx, slackapi.DeleteMessageRequest{ChannelID: s.target.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS)})
+		err = s.web.DeleteMessage(ctx, slackapi.DeleteMessageRequest{ChannelID: effect.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS)})
 	case store.SlackEffectReact:
-		err = s.web.AddReaction(ctx, slackapi.ReactionRequest{ChannelID: s.target.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS), Emoji: effect.Emoji})
+		err = s.web.AddReaction(ctx, slackapi.ReactionRequest{ChannelID: effect.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS), Emoji: effect.Emoji})
 	case store.SlackEffectUnreact:
-		err = s.web.RemoveReaction(ctx, slackapi.ReactionRequest{ChannelID: s.target.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS), Emoji: effect.Emoji})
+		err = s.web.RemoveReaction(ctx, slackapi.ReactionRequest{ChannelID: effect.ChannelID, MessageTS: slackapi.Timestamp(effect.TargetMessageTS), Emoji: effect.Emoji})
 	default:
 		err = slackapi.NewExternalError(slackapi.ReasonInvalidResponse, slackapi.DiagnosticInvalidRequest, "", nil)
 	}
-	if err == nil && (effect.Kind == store.SlackEffectSend || effect.Kind == store.SlackEffectEdit) && (result.ChannelID != s.target.ChannelID || !result.MessageTS.Valid()) {
+	if err == nil && (effect.Kind == store.SlackEffectSend || effect.Kind == store.SlackEffectEdit) && (result.ChannelID != effect.ChannelID || !result.MessageTS.Valid()) {
 		err = slackapi.NewExternalError(slackapi.ReasonInvalidResponse, slackapi.DiagnosticMalformedResponse, "", nil)
 	}
 	if err == nil {
@@ -493,11 +544,13 @@ func (s *Service) readyUpload() error {
 }
 
 func (s *Service) validTarget() error {
-	if err := slackapi.ValidateTeamID(s.target.TeamID); err != nil {
+	if err := slackapi.ValidateTeamID(s.scope.TeamID); err != nil {
 		return ErrUnavailable
 	}
-	if err := slackapi.ValidateChannelID(s.target.ChannelID); err != nil {
-		return ErrUnavailable
+	for _, channelID := range s.scope.Channels {
+		if err := slackapi.ValidateChannelID(channelID); err != nil {
+			return ErrUnavailable
+		}
 	}
 	return nil
 }

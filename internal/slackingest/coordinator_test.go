@@ -3,6 +3,7 @@ package slackingest
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/store"
 )
 
-var policy = store.SlackAdmissionPolicy{TeamID: "T12345678", ChannelID: "C12345678", BotUserID: "U99999999"}
+var policy = store.SlackAdmissionPolicy{TeamID: "T12345678", Channels: []string{"C12345678"}, BotUserID: "U99999999"}
 
 type fixedClock struct{ at time.Time }
 
@@ -52,7 +53,7 @@ func (s *fakeStore) call(t *testing.T) commitCall {
 
 func envelope(id string) (slackapi.Envelope, *fake.AckRecorder) {
 	ack, recorder := fake.NewAckRecorder(nil)
-	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: policy.TeamID, ChannelID: policy.ChannelID, UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U99999999>", Ack: ack}, recorder
+	return slackapi.Envelope{EnvelopeID: "env-" + id, EventID: "Ev-" + id, Kind: slackapi.EventAppMention, TeamID: policy.TeamID, ChannelID: policy.Channels[0], UserID: "U12345678", MessageTS: "1700000000.000001", EventTS: "1700000001.000001", Text: "do this <@U99999999>", Ack: ack}, recorder
 }
 
 func TestHandleCommitsBeforeOneShotAcknowledgementAndNormalizes(t *testing.T) {
@@ -67,7 +68,7 @@ func TestHandleCommitsBeforeOneShotAcknowledgementAndNormalizes(t *testing.T) {
 		t.Fatalf("ack count=%d", recorder.Calls())
 	}
 	call := s.call(t)
-	if call.policy != policy || call.event.SourceEventID != e.EventID || call.event.ThreadTS != string(e.MessageTS) || call.event.ReceivedAt != time.Unix(1700000000, 0).UTC() || call.event.SlackEventAtUS != 1700000001000001 {
+	if !reflect.DeepEqual(call.policy, policy) || call.event.SourceEventID != e.EventID || call.event.ThreadTS != string(e.MessageTS) || call.event.ReceivedAt != time.Unix(1700000000, 0).UTC() || call.event.SlackEventAtUS != 1700000001000001 {
 		t.Fatalf("call=%+v", call)
 	}
 	obs := c.Observations()

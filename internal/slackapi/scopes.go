@@ -43,11 +43,12 @@ func (s Scope) Valid() bool {
 	return true
 }
 
-// RequiredBotScopes returns the exact bot-scope set for the configured
-// channel type. Socket Mode's app-level connections:write scope is verified
-// separately because it belongs to a different token.
-func RequiredBotScopes(privateChannel bool) []Scope {
-	required := []Scope{
+// RequiredBotScopes returns the exact bot-scope set. Mosscap admits work from
+// every public and private channel the bot is a member of, so both channel
+// families are required. Socket Mode's app-level connections:write scope is
+// verified separately because it belongs to a different token.
+func RequiredBotScopes() []Scope {
+	return []Scope{
 		ScopeAppMentionsRead,
 		ScopeChatWrite,
 		ScopeReactionsRead,
@@ -56,13 +57,11 @@ func RequiredBotScopes(privateChannel bool) []Scope {
 		ScopeTeamRead,
 		ScopeFilesRead,
 		ScopeFilesWrite,
+		ScopeChannelsRead,
+		ScopeChannelsHistory,
+		ScopeGroupsRead,
+		ScopeGroupsHistory,
 	}
-	if privateChannel {
-		required = append(required, ScopeGroupsRead, ScopeGroupsHistory)
-	} else {
-		required = append(required, ScopeChannelsRead, ScopeChannelsHistory)
-	}
-	return required
 }
 
 // MissingScopes validates the granted set and returns required scopes not

@@ -619,25 +619,27 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 			result = protocol.EmptyParams{}
 		}
 	case "slack.history", "slack.thread":
-		var op interface {
-			History(context.Context, int, string) (slackapi.MessagePage, error)
-			Thread(context.Context, string, int, string) (slackapi.MessagePage, error)
-		}
+		var op *slackops.Service
 		var release func()
 		op, release, err = s.ops()
 		if err == nil {
 			defer release()
 		}
 		resultType = "slack_message_page"
+		var channel string
 		if err == nil && r.Command == "slack.history" {
 			var p protocol.SlackHistoryParams
 			_ = json.Unmarshal(r.Params, &p)
-			result, err = op.History(ctx, p.Limit, p.Cursor)
+			if channel, err = s.resolveChannel(ctx, op, p.Channel, ""); err == nil {
+				result, err = op.History(ctx, channel, p.Limit, p.Cursor)
+			}
 		}
 		if err == nil && r.Command == "slack.thread" {
 			var p protocol.SlackThreadParams
 			_ = json.Unmarshal(r.Params, &p)
-			result, err = op.Thread(ctx, p.ThreadTS, p.Limit, p.Cursor)
+			if channel, err = s.resolveChannel(ctx, op, p.Channel, p.Task); err == nil {
+				result, err = op.Thread(ctx, channel, p.ThreadTS, p.Limit, p.Cursor)
+			}
 		}
 	case "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
 		var op *slackops.Service
@@ -645,17 +647,24 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		op, release, err = s.ops()
 		if err == nil {
 			defer release()
+			var channel string
 			if r.Command == "slack.file" || r.Command == "slack.send" && hasUploadFiles(r.Params) {
 				var intent store.SlackFileUploadIntent
-				intent, err = fileUploadIntent(r.Command, r)
+				intent, channel, err = fileUploadIntent(r.Command, r)
 				if err == nil {
-					result, err = op.ExecuteFileUpload(ctx, r.RequestID, intent)
+					channel, err = s.resolveChannel(ctx, op, channel, intent.RelatedTaskID)
+				}
+				if err == nil {
+					result, err = op.ExecuteFileUpload(ctx, r.RequestID, channel, intent)
 				}
 			} else {
 				var intent store.SlackEffectIntent
-				intent, err = effectIntent(r.Command, r)
+				intent, channel, err = effectIntent(r.Command, r)
 				if err == nil {
-					result, err = op.Execute(ctx, r.RequestID, intent)
+					channel, err = s.resolveChannel(ctx, op, channel, intent.RelatedTaskID)
+				}
+				if err == nil {
+					result, err = op.Execute(ctx, r.RequestID, channel, intent)
 				}
 			}
 		}
@@ -793,12 +802,12 @@ func (s *Server) taskContext(ctx context.Context, p protocol.TaskContextParams) 
 		return out, nil
 	}
 	defer release()
-	if !op.MatchesTarget(model.SlackSource.TeamID, model.SlackSource.ChannelID) {
+	if !op.Allows(model.SlackSource.TeamID, model.SlackSource.ChannelID) {
 		out.Thread.Status, out.Thread.DiagnosticCode = "unavailable", "slack_source_unavailable"
 		out.Warnings = []string{"Slack thread was unavailable"}
 		return out, nil
 	}
-	page, readErr := op.Thread(ctx, model.SlackSource.ThreadTS, limit, "")
+	page, readErr := op.Thread(ctx, model.SlackSource.ChannelID, model.SlackSource.ThreadTS, limit, "")
 	if readErr != nil {
 		out.Thread.Status, out.Thread.DiagnosticCode = "unavailable", string(slackapi.Classify(readErr, slackapi.FailureRead).Diagnostic)
 		out.Warnings = []string{"Slack thread was unavailable"}
@@ -836,10 +845,10 @@ func (s *Server) taskReply(ctx context.Context, requestID string, p protocol.Tas
 			return protocol.TaskReplyDTO{}, opErr
 		}
 		defer release()
-		if !op.MatchesTarget(source.TeamID, source.ChannelID) {
+		if !op.Allows(source.TeamID, source.ChannelID) {
 			return protocol.TaskReplyDTO{}, slackops.ErrUnavailable
 		}
-		effect, err = op.Execute(ctx, requestID, intent)
+		effect, err = op.Execute(ctx, requestID, source.ChannelID, intent)
 		if err != nil {
 			return protocol.TaskReplyDTO{}, err
 		}
@@ -1142,6 +1151,10 @@ func errorResponse(id, version string, err error) protocol.Response {
 		var purge *store.PurgeError
 		_ = errors.As(err, &purge)
 		return protocol.Response{ProtocolVersion: protocol.Version, RequestID: id, ServerVersion: version, Error: &protocol.Error{Code: "purge_interrupted", Category: "unavailable", Message: "metadata purge interrupted; retry safely", Retriable: true, Progress: &protocol.PurgeProgressDTO{Removed: purgeCountsDTO(purge.Progress.Removed)}}}
+	case errors.Is(err, slackops.ErrInvalidTarget):
+		code, category = "channel_not_admitted", "usage"
+	case errors.Is(err, ErrChannelRequired):
+		code, category = "channel_required", "usage"
 	case errors.Is(err, slackops.ErrUnavailable), errors.Is(err, slackruntime.ErrClosed):
 		code, category = "slack_unavailable", "unavailable"
 	default:
@@ -1227,7 +1240,11 @@ func taskDTO(t store.Task) protocol.TaskDTO {
 func taskChangesDTO(changes []store.TaskChange, after, head int64) protocol.TaskChangesDTO {
 	out := protocol.TaskChangesDTO{Changes: make([]protocol.TaskChangeDTO, len(changes)), NextAfter: after, Head: head}
 	for i, c := range changes {
-		out.Changes[i] = protocol.TaskChangeDTO{ChangeSeq: c.Seq, Change: string(c.Kind), Task: taskDTO(c.Task)}
+		task := taskDTO(c.Task)
+		if c.SlackSource != nil {
+			task.SlackSource = slackSourceDTO(*c.SlackSource)
+		}
+		out.Changes[i] = protocol.TaskChangeDTO{ChangeSeq: c.Seq, Change: string(c.Kind), Task: task}
 		out.NextAfter = c.Seq
 	}
 	return out
@@ -1299,7 +1316,7 @@ func slackEffectDTOs(effects []store.SlackEffect) []protocol.SlackEffectDTO {
 }
 
 func slackEffectDTO(e store.SlackEffect) protocol.SlackEffectDTO {
-	out := protocol.SlackEffectDTO{EffectID: e.ID, PredecessorEffectID: e.PredecessorEffectID, RelatedTaskID: e.RelatedTaskID, Kind: string(e.Kind), TargetMessageTS: e.TargetMessageTS, ThreadTS: e.ThreadTS, State: string(e.State), AttemptCount: e.AttemptCount, PreparedAt: stamp(e.PreparedAt), ResponseMessageTS: e.ResponseMessageTS, DiagnosticCode: string(e.DiagnosticCode)}
+	out := protocol.SlackEffectDTO{EffectID: e.ID, PredecessorEffectID: e.PredecessorEffectID, RelatedTaskID: e.RelatedTaskID, ChannelID: e.ChannelID, Kind: string(e.Kind), TargetMessageTS: e.TargetMessageTS, ThreadTS: e.ThreadTS, State: string(e.State), AttemptCount: e.AttemptCount, PreparedAt: stamp(e.PreparedAt), ResponseMessageTS: e.ResponseMessageTS, DiagnosticCode: string(e.DiagnosticCode)}
 	if e.SubmittedAt != nil {
 		v := stamp(*e.SubmittedAt)
 		out.SubmittedAt = &v

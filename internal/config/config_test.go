@@ -48,7 +48,7 @@ func TestDefaultCompleteFixedPathsAndTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"version", "slack_app_token", "slack_bot_token", "slack_channel_id", "slack_reconnect_initial_backoff", "slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size", "maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame"} {
+	for _, key := range []string{"version", "slack_app_token", "slack_bot_token", "slack_channel_allowlist", "slack_reconnect_initial_backoff", "slack_reconnect_max_backoff", "slack_reconnect_jitter", "sqlite_busy_timeout", "maximum_file_size", "maximum_files_per_slack_operation", "temporary_download_lifetime", "local_protocol_maximum_frame"} {
 		if !strings.Contains(string(b), "\n"+key+" =") {
 			t.Errorf("template lacks top-level %s", key)
 		}
@@ -76,6 +76,7 @@ func TestLoadStrictLegacyDiagnosticsAndNoEnvironmentSecrets(t *testing.T) {
 		{"secrets", "version = 1\nsecrets_file = \"/x\"\n", "put Slack tokens in config.toml"},
 		{"obsolete team identity", "version = 1\nslack_team_id = \"T012ABC\"\n", "identity is derived from authenticated Slack tokens"},
 		{"obsolete bot identity", "version = 1\nslack_bot_user_id = \"U012BOT\"\n", "identity is derived from authenticated Slack tokens"},
+		{"obsolete single channel", "version = 1\nslack_channel_id = \"C012ABC\"\n", "replace it with slack_channel_allowlist"},
 		{"obsolete delivery lease", "version = 1\ndelivery_lease = \"60s\"\n", "Pi delivery was removed"},
 		{"obsolete leader expiry", "version = 1\nleader_expiry = \"30s\"\n", "Pi delivery was removed"},
 	} {
@@ -129,7 +130,7 @@ func TestValidateConstraints(t *testing.T) {
 	}{
 		{"app-token", func(c *Config) { c.SlackAppToken = "bad" }},
 		{"bot-token", func(c *Config) { c.SlackBotToken = "xapp-nope" }},
-		{"channel", func(c *Config) { c.SlackChannelID = "D123" }},
+		{"channel", func(c *Config) { c.SlackChannelAllowlist = "D123" }},
 		{"backoff-order", func(c *Config) { c.SlackReconnectInitialBackoff = "61s" }},
 		{"busy", func(c *Config) { c.SQLiteBusyTimeout = "0s" }},
 		{"file-size", func(c *Config) { c.MaximumFileSize = 0 }},
@@ -146,7 +147,7 @@ func TestValidateConstraints(t *testing.T) {
 		})
 	}
 	base.SlackAppToken, base.SlackBotToken = "xapp-token", "xoxb-token"
-	base.SlackChannelID = "C123"
+	base.SlackChannelAllowlist = "C123,G456"
 	if err := Validate(base); err != nil {
 		t.Fatalf("valid complete Slack config: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestValidateConstraints(t *testing.T) {
 
 func TestSetPreservesFormattingAndOnlyChangesValue(t *testing.T) {
 	loc, c := setupConfig(t)
-	original := "# leading comment\r\nversion = 1\r\nslack_app_token = \"\" # token stays private\r\nslack_bot_token = \"\"\r\nslack_channel_id = \"\"\r\nslack_reconnect_initial_backoff = \"1s\"\r\nslack_reconnect_max_backoff = \"60s\"\r\nslack_reconnect_jitter = true\r\nsqlite_busy_timeout = \"5s\"\r\nmaximum_file_size = 104857600\r\nmaximum_files_per_slack_operation = 20\r\ntemporary_download_lifetime = \"24h\"\r\nlocal_protocol_maximum_frame = 1048576 # frame\r\n# trailing comment\r\n"
+	original := "# leading comment\r\nversion = 1\r\nslack_app_token = \"\" # token stays private\r\nslack_bot_token = \"\"\r\nslack_channel_allowlist = \"\"\r\nslack_reconnect_initial_backoff = \"1s\"\r\nslack_reconnect_max_backoff = \"60s\"\r\nslack_reconnect_jitter = true\r\nsqlite_busy_timeout = \"5s\"\r\nmaximum_file_size = 104857600\r\nmaximum_files_per_slack_operation = 20\r\ntemporary_download_lifetime = \"24h\"\r\nlocal_protocol_maximum_frame = 1048576 # frame\r\n# trailing comment\r\n"
 	if err := os.WriteFile(loc.Path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}

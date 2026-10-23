@@ -12,7 +12,7 @@ import (
 	"github.com/stayradiated/mosscap/internal/clock"
 )
 
-var sourceTestPolicy = SlackAdmissionPolicy{TeamID: "T12345678", ChannelID: "C12345678", BotUserID: "U99999999"}
+var sourceTestPolicy = SlackAdmissionPolicy{TeamID: "T12345678", Channels: []string{"C12345678"}, BotUserID: "U99999999"}
 
 func sourceTestEvent(id string, kind SlackSourceEventKind, order int64) SlackSourceEvent {
 	return SlackSourceEvent{
@@ -20,7 +20,7 @@ func sourceTestEvent(id string, kind SlackSourceEventKind, order int64) SlackSou
 		EnvelopeID:     "env-" + id,
 		EventKind:      kind,
 		TeamID:         sourceTestPolicy.TeamID,
-		ChannelID:      sourceTestPolicy.ChannelID,
+		ChannelID:      sourceTestPolicy.Channels[0],
 		UserID:         "U12345678",
 		MessageTS:      "1700000000.000001",
 		Text:           "do this <@U99999999>  \r\nnext\t",
@@ -439,5 +439,28 @@ func TestSlackRepositoryRejectsSchemaValidLocalTaskSource(t *testing.T) {
 	}
 	if _, err := s.FindSlackSource(ctx, "T12345678", "C12345678", "1700000099.000001"); !errors.Is(err, ErrSlackInvariant) {
 		t.Fatalf("identity source invariant=%v", err)
+	}
+}
+
+func TestSlackAdmissionWithoutAllowlistAdmitsEveryChannelSeparately(t *testing.T) {
+	s := testStore(t)
+	trustSourceTestUser(t, s)
+	ctx := context.Background()
+	open := SlackAdmissionPolicy{TeamID: sourceTestPolicy.TeamID, BotUserID: sourceTestPolicy.BotUserID}
+	for i, channel := range []string{"C12345678", "C87654321", "G12345678"} {
+		event := sourceTestEvent(fmt.Sprintf("Ev-open-%d", i), SlackEventAppMention, 100+int64(i))
+		// The same message timestamp in different channels is a different source.
+		event.ChannelID = channel
+		result, err := s.CommitSlackSourceEvent(ctx, open, event)
+		if err != nil || result.AdmissionResult != SlackAdmitted {
+			t.Fatalf("%s result=%+v err=%v", channel, result, err)
+		}
+		source, err := s.GetSlackSource(ctx, result.TaskID)
+		if err != nil || source.ChannelID != channel {
+			t.Fatalf("%s source=%+v err=%v", channel, source, err)
+		}
+	}
+	if _, err := s.CommitSlackSourceEvent(ctx, SlackAdmissionPolicy{TeamID: "T12345678", BotUserID: "U99999999", Channels: []string{"D12345678"}}, sourceTestEvent("Ev-bad-policy", SlackEventAppMention, 200)); err == nil {
+		t.Fatal("accepted a DM channel in the allowlist")
 	}
 }

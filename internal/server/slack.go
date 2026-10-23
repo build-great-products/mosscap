@@ -113,8 +113,7 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 		_ = rt.Close()
 		return nil, nil, "", err
 	}
-	policy := store.SlackAdmissionPolicy{TeamID: snapshot.TeamID, ChannelID: snapshot.ChannelID, BotUserID: snapshot.BotUserID}
-	target := store.SlackEffectTarget{TeamID: snapshot.TeamID, ChannelID: snapshot.ChannelID}
+	policy := store.SlackAdmissionPolicy{TeamID: snapshot.TeamID, Channels: append([]string(nil), snapshot.Channels...), BotUserID: snapshot.BotUserID}
 	coordinator = slackingest.NewWithOptions(ledger, policy, nil, slackingest.Options{
 		BeforeAcknowledge: func(ctx context.Context, event store.SlackSourceEvent, result store.SlackEventResult) error {
 			if result.AdmissionResult == store.SlackAdmitted {
@@ -128,6 +127,7 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 			if result.AdmissionResult != store.SlackIgnoredUntrusted {
 				return nil
 			}
+			target := store.SlackEffectTarget{TeamID: event.TeamID, ChannelID: event.ChannelID}
 			_, err := ledger.PrepareSlackEffect(ctx, automaticUntrustedReactionRequestID(event.TeamID, event.ChannelID, event.MessageTS), target, store.SlackEffectIntent{
 				Kind:            store.SlackEffectReact,
 				TargetMessageTS: event.MessageTS,
@@ -167,11 +167,11 @@ func executeAutomaticUntrustedReaction(ctx context.Context, rt *slackruntime.Run
 		return store.SlackEffect{}, err
 	}
 	defer snapshot.Release()
-	if envelope.TeamID != snapshot.TeamID || envelope.ChannelID != snapshot.ChannelID {
+	service := slackops.New(ledger, snapshot.Web, slackops.Scope{TeamID: snapshot.TeamID, Channels: snapshot.Channels})
+	if !service.Allows(envelope.TeamID, envelope.ChannelID) {
 		return store.SlackEffect{}, slackops.ErrInvalidTarget
 	}
-	service := slackops.New(ledger, snapshot.Web, store.SlackEffectTarget{TeamID: snapshot.TeamID, ChannelID: snapshot.ChannelID})
-	return service.Execute(ctx, automaticUntrustedReactionRequestID(envelope.TeamID, envelope.ChannelID, string(envelope.MessageTS)), store.SlackEffectIntent{
+	return service.Execute(ctx, automaticUntrustedReactionRequestID(envelope.TeamID, envelope.ChannelID, string(envelope.MessageTS)), envelope.ChannelID, store.SlackEffectIntent{
 		Kind:            store.SlackEffectReact,
 		TargetMessageTS: string(envelope.MessageTS),
 		Emoji:           untrustedSenderReaction,
@@ -273,9 +273,9 @@ func (s *Server) ops() (*slackops.Service, func(), error) {
 	}
 	if files, ok := snap.Web.(slackapi.FileTransfer); ok {
 		c := s.snapshot()
-		return slackops.NewWithFileTransfer(s.store, snap.Web, files, store.SlackEffectTarget{TeamID: snap.TeamID, ChannelID: snap.ChannelID}, int64(c.MaximumFileSize), c.MaximumFilesPerSlackOperation), snap.Release, nil
+		return slackops.NewWithFileTransfer(s.store, snap.Web, files, slackops.Scope{TeamID: snap.TeamID, Channels: snap.Channels}, int64(c.MaximumFileSize), c.MaximumFilesPerSlackOperation), snap.Release, nil
 	}
-	return slackops.New(s.store, snap.Web, store.SlackEffectTarget{TeamID: snap.TeamID, ChannelID: snap.ChannelID}), snap.Release, nil
+	return slackops.New(s.store, snap.Web, slackops.Scope{TeamID: snap.TeamID, Channels: snap.Channels}), snap.Release, nil
 }
 func (s *Server) slackStatus(ctx context.Context) (*protocol.SlackRuntimeStatusDTO, error) {
 	counts, err := s.store.SlackEffectCounts(ctx)
@@ -293,7 +293,7 @@ func (s *Server) slackStatus(ctx context.Context) (*protocol.SlackRuntimeStatusD
 		if err == nil {
 			out.TeamID = snapshot.TeamID
 			out.BotUserID = snapshot.BotUserID
-			out.ChannelID = snapshot.ChannelID
+			out.Channels = append([]string(nil), snapshot.Channels...)
 			out.IdentitySource = "auth_test"
 			snapshot.Release()
 		}
@@ -450,49 +450,51 @@ func hasUploadFiles(raw []byte) bool {
 	return json.Unmarshal(raw, &p) == nil && len(p.FilePaths) != 0
 }
 
-func fileUploadIntent(command string, p protocol.Request) (store.SlackFileUploadIntent, error) {
+func fileUploadIntent(command string, p protocol.Request) (store.SlackFileUploadIntent, string, error) {
 	var intent store.SlackFileUploadIntent
+	var channel string
 	var paths []string
 	switch command {
 	case "slack.file":
 		var x protocol.SlackFileParams
 		if err := jsonUnmarshal(p.Params, &x); err != nil {
-			return intent, err
+			return intent, "", err
 		}
-		intent.ThreadTS, intent.Text, intent.RelatedTaskID, paths = x.ThreadTS, x.Comment, x.Task, []string{x.FilePath}
+		intent.ThreadTS, intent.Text, intent.RelatedTaskID, paths, channel = x.ThreadTS, x.Comment, x.Task, []string{x.FilePath}, x.Channel
 	case "slack.send":
 		var x protocol.SlackSendParams
 		if err := jsonUnmarshal(p.Params, &x); err != nil {
-			return intent, err
+			return intent, "", err
 		}
-		intent.ThreadTS, intent.Text, intent.RelatedTaskID, paths = x.ThreadTS, x.Text, x.Task, x.FilePaths
+		intent.ThreadTS, intent.Text, intent.RelatedTaskID, paths, channel = x.ThreadTS, x.Text, x.Task, x.FilePaths, x.Channel
 	default:
-		return intent, errors.New("unsupported command")
+		return intent, "", errors.New("unsupported command")
 	}
 	intent.Files = make([]store.SlackUploadFile, len(paths))
 	for i, path := range paths {
 		intent.Files[i].SourcePath = path
 	}
-	return intent, nil
+	return intent, channel, nil
 }
 
-func effectIntent(command string, p protocol.Request) (store.SlackEffectIntent, error) {
+func effectIntent(command string, p protocol.Request) (store.SlackEffectIntent, string, error) {
 	var i store.SlackEffectIntent
+	var channel string
 	switch command {
 	case "slack.send":
 		var x protocol.SlackSendParams
 		if err := jsonUnmarshal(p.Params, &x); err != nil {
-			return i, err
+			return i, "", err
 		}
-		i = store.SlackEffectIntent{Kind: store.SlackEffectSend, ThreadTS: x.ThreadTS, Text: x.Text, RelatedTaskID: x.Task}
+		i, channel = store.SlackEffectIntent{Kind: store.SlackEffectSend, ThreadTS: x.ThreadTS, Text: x.Text, RelatedTaskID: x.Task}, x.Channel
 	case "slack.edit":
 		var x protocol.SlackEditParams
 		jsonUnmarshal(p.Params, &x)
-		i = store.SlackEffectIntent{Kind: store.SlackEffectEdit, TargetMessageTS: x.MessageTS, Text: x.Text, RelatedTaskID: x.Task}
+		i, channel = store.SlackEffectIntent{Kind: store.SlackEffectEdit, TargetMessageTS: x.MessageTS, Text: x.Text, RelatedTaskID: x.Task}, x.Channel
 	case "slack.delete":
 		var x protocol.SlackDeleteParams
 		jsonUnmarshal(p.Params, &x)
-		i = store.SlackEffectIntent{Kind: store.SlackEffectDelete, TargetMessageTS: x.MessageTS, OperatorReason: x.Reason, RelatedTaskID: x.Task}
+		i, channel = store.SlackEffectIntent{Kind: store.SlackEffectDelete, TargetMessageTS: x.MessageTS, OperatorReason: x.Reason, RelatedTaskID: x.Task}, x.Channel
 	case "slack.react", "slack.unreact":
 		var x protocol.SlackReactionParams
 		jsonUnmarshal(p.Params, &x)
@@ -500,10 +502,35 @@ func effectIntent(command string, p protocol.Request) (store.SlackEffectIntent, 
 		if command == "slack.unreact" {
 			k = store.SlackEffectUnreact
 		}
-		i = store.SlackEffectIntent{Kind: k, TargetMessageTS: x.MessageTS, Emoji: x.Emoji, RelatedTaskID: x.Task}
+		i, channel = store.SlackEffectIntent{Kind: k, TargetMessageTS: x.MessageTS, Emoji: x.Emoji, RelatedTaskID: x.Task}, x.Channel
 	default:
-		return i, errors.New("unsupported command")
+		return i, "", errors.New("unsupported command")
 	}
-	return i, nil
+	return i, channel, nil
+}
+
+// ErrChannelRequired means a Slack command named no channel and none could be
+// derived from its task or a single-channel allowlist.
+var ErrChannelRequired = errors.New("Slack channel is required: pass --channel, or --task for a Slack task")
+
+// resolveChannel chooses the channel of a Slack command: the explicit one, else
+// the related task's source channel, else the only allowlisted channel.
+func (s *Server) resolveChannel(ctx context.Context, op *slackops.Service, channel, taskSelector string) (string, error) {
+	if channel != "" {
+		return channel, nil
+	}
+	if taskSelector != "" {
+		source, err := s.store.GetSlackSource(ctx, taskSelector)
+		if err == nil {
+			return source.ChannelID, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return "", err
+		}
+	}
+	if channels := op.Channels(); len(channels) == 1 {
+		return channels[0], nil
+	}
+	return "", ErrChannelRequired
 }
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }

@@ -3,12 +3,22 @@ package slackapi
 import "context"
 
 // Verify proves that the active bot token belongs to the configured workspace
-// and bot, that the configured target is a writable member channel, that all
-// required bot scopes are granted, and that configured trusted identities are
-// active humans in that workspace. Returned errors contain no supplied IDs.
+// and bot, that every allowlisted channel is a writable member channel, that
+// all required bot scopes are granted, and that configured trusted identities
+// are active humans in that workspace. Returned errors contain no supplied IDs.
 func Verify(ctx context.Context, web Web, request VerificationRequest) (VerificationResult, error) {
-	if web == nil || ValidateChannelID(request.ChannelID) != nil {
+	if web == nil || len(request.ChannelIDs) > MaxFiles {
 		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
+	}
+	seenChannels := make(map[string]struct{}, len(request.ChannelIDs))
+	for _, channelID := range request.ChannelIDs {
+		if ValidateChannelID(channelID) != nil {
+			return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
+		}
+		if _, exists := seenChannels[channelID]; exists {
+			return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
+		}
+		seenChannels[channelID] = struct{}{}
 	}
 	if (request.TeamID != "" && ValidateTeamID(request.TeamID) != nil) || (request.BotUserID != "" && ValidateUserID(request.BotUserID) != nil) {
 		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
@@ -51,22 +61,26 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 		return VerificationResult{}, NewVerificationError(DiagnosticTeamMismatch)
 	}
 
-	channel, err := web.Channel(ctx, request.ChannelID)
-	if err != nil {
-		return VerificationResult{}, err
-	}
-	if channel.ID != request.ChannelID || channel.TeamID != teamID {
-		return VerificationResult{}, NewVerificationError(DiagnosticTeamMismatch)
-	}
-	if err := VerifyChannel(channel); err != nil {
-		return VerificationResult{}, err
+	channels := make([]Channel, 0, len(request.ChannelIDs))
+	for _, channelID := range request.ChannelIDs {
+		channel, err := web.Channel(ctx, channelID)
+		if err != nil {
+			return VerificationResult{}, err
+		}
+		if channel.ID != channelID || channel.TeamID != teamID {
+			return VerificationResult{}, NewVerificationError(DiagnosticTeamMismatch)
+		}
+		if err := VerifyChannel(channel); err != nil {
+			return VerificationResult{}, err
+		}
+		channels = append(channels, channel)
 	}
 
 	scopes, err := web.Scopes(ctx)
 	if err != nil {
 		return VerificationResult{}, err
 	}
-	missing, err := MissingScopes(scopes, RequiredBotScopes(channel.Private))
+	missing, err := MissingScopes(scopes, RequiredBotScopes())
 	if err != nil {
 		return VerificationResult{}, NewExternalError(ReasonInvalidResponse, DiagnosticMalformedResponse, "", nil)
 	}
@@ -77,7 +91,7 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 	result := VerificationResult{
 		Identity: cloneAuthIdentity(identity),
 		Team:     team,
-		Channel:  channel,
+		Channels: channels,
 		Scopes:   append([]Scope(nil), scopes...),
 		Users:    make([]User, 0, len(request.TrustedUserIDs)),
 	}
