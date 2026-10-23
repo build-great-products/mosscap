@@ -38,7 +38,7 @@ func TestAdditiveCapabilitiesAreAdvertisedWithoutProtocolBump(t *testing.T) {
 	if Version != 1 {
 		t.Fatalf("additive commands unexpectedly changed protocol version to %d", Version)
 	}
-	for _, capability := range []string{CapabilityTrustedUsers, CapabilityConfigReload} {
+	for _, capability := range []string{CapabilityTrustedUsers, CapabilityConfigReload, CapabilityTaskChanges} {
 		found := false
 		for _, advertised := range ServerCapabilities {
 			found = found || advertised == capability
@@ -304,4 +304,20 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 		p = p[:1]
 	}
 	return r.r.Read(p)
+}
+
+func TestTaskChangesParamsAreStrictAndBounded(t *testing.T) {
+	for raw, valid := range map[string]bool{
+		`{"after":0}`:              true,
+		`{"after":42,"limit":100}`: true,
+		`{"after":-1}`:             false,
+		`{"after":0,"limit":101}`:  false,
+		`{"after":0,"limit":-1}`:   false,
+		`{"after":0,"extra":true}`: false,
+		`{"after":"1"}`:            false,
+	} {
+		if err := ValidateParams("task.changes", json.RawMessage(raw)); (err == nil) != valid {
+			t.Errorf("%s valid=%v err=%v", raw, valid, err)
+		}
+	}
 }

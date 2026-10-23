@@ -39,12 +39,13 @@ const (
 	CapabilityTaskReply           = "task_reply_v1"
 	CapabilitySQLitePagination    = "sqlite_pagination_v1"
 	CapabilityTaskContext         = "task_context_v1"
+	CapabilityTaskChanges         = "task_changes_v1"
 	// CapabilityPiDeliveryMVP is deliberately defined but not advertised until
 	// the gateway owns every delivery route and disconnect cleanup (T1).
 	CapabilityPiDeliveryMVP = "pi_delivery_mvp"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext, CapabilityTaskChanges}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -171,6 +172,31 @@ type TaskListParams struct {
 	IncludeDone bool    `json:"include_done,omitempty"`
 	Limit       int     `json:"limit,omitempty"`
 	Cursor      string  `json:"cursor,omitempty"`
+}
+
+// TaskChangesParams pages the durable task change feed after a sequence
+// cursor. After is 0 to read from the beginning of retained tasks.
+type TaskChangesParams struct {
+	After int64 `json:"after"`
+	Limit int   `json:"limit,omitempty"`
+}
+
+// TaskChangeDTO is a current task snapshot keyed by its latest change.
+// Change is created, edited, or state; earlier changes since the cursor are
+// coalesced into this snapshot.
+type TaskChangeDTO struct {
+	ChangeSeq int64   `json:"change_seq"`
+	Change    string  `json:"change"`
+	Task      TaskDTO `json:"task"`
+}
+
+// TaskChangesDTO returns changes in sequence order. NextAfter is the last
+// returned sequence (or the request cursor when empty); Head is the newest
+// committed sequence in the same snapshot.
+type TaskChangesDTO struct {
+	Changes   []TaskChangeDTO `json:"changes"`
+	NextAfter int64           `json:"next_after"`
+	Head      int64           `json:"head"`
 }
 
 // TaskContextParams requests one bounded live thread page alongside durable task evidence.
@@ -717,6 +743,8 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &TaskSelector{}
 	case "task.context":
 		target = &TaskContextParams{}
+	case "task.changes":
+		target = &TaskChangesParams{}
 	case "task.update":
 		target = &TaskUpdateParams{}
 	case "task.transition":
@@ -770,6 +798,10 @@ func ValidateParams(command string, raw json.RawMessage) error {
 	case *TaskContextParams:
 		if !validTaskSelector(p.Task) || p.ThreadLimit < 0 || p.ThreadLimit > 100 {
 			return errors.New("invalid task context")
+		}
+	case *TaskChangesParams:
+		if p.After < 0 || p.Limit < 0 || p.Limit > 100 {
+			return errors.New("invalid task changes")
 		}
 	case *TaskUpdateParams:
 		if !validTaskSelector(p.Task) || p.Text == "" {
@@ -934,7 +966,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
+	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.changes", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release", "delivery.open", "delivery.poll", "delivery.inserting", "delivery.persisted", "delivery.rejected", "delivery.close", "delivery.list", "delivery.inspect", "delivery.requeue":
 		return true
 	}
 	return false

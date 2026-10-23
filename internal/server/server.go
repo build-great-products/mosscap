@@ -870,6 +870,16 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 		var next string
 		tasks, next, err = s.store.List(ctx, p.State, p.IncludeDone, p.Limit, p.Cursor)
 		result = protocol.TaskListDTO{Tasks: taskDTOs(tasks), NextCursor: next}
+	case "task.changes":
+		var p protocol.TaskChangesParams
+		_ = json.Unmarshal(r.Params, &p)
+		resultType = "task_changes"
+		var changes []store.TaskChange
+		var head int64
+		changes, head, err = s.store.TaskChanges(ctx, p.After, p.Limit)
+		if err == nil {
+			result = taskChangesDTO(changes, p.After, head)
+		}
 	case "task.update":
 		var p protocol.TaskUpdateParams
 		_ = json.Unmarshal(r.Params, &p)
@@ -1332,6 +1342,8 @@ func errorResponse(id, version string, err error) protocol.Response {
 		code, category = "request_id_conflict", "conflict"
 	case errors.Is(err, store.ErrCursorExpired):
 		code, category = "cursor_expired", "conflict"
+	case errors.Is(err, store.ErrTaskChangeCursorAhead):
+		code, category = "cursor_ahead", "conflict"
 	case func() bool { var purge *store.PurgeError; return errors.As(err, &purge) }():
 		var purge *store.PurgeError
 		_ = errors.As(err, &purge)
@@ -1495,6 +1507,14 @@ func taskDTO(t store.Task) protocol.TaskDTO {
 		done = &d
 	}
 	return protocol.TaskDTO{TaskID: t.ID, Version: t.Version, State: string(t.State), Text: t.Text, SourceKind: t.SourceKind, CreatedAt: stamp(t.CreatedAt), UpdatedAt: stamp(t.UpdatedAt), DoneAt: done}
+}
+func taskChangesDTO(changes []store.TaskChange, after, head int64) protocol.TaskChangesDTO {
+	out := protocol.TaskChangesDTO{Changes: make([]protocol.TaskChangeDTO, len(changes)), NextAfter: after, Head: head}
+	for i, c := range changes {
+		out.Changes[i] = protocol.TaskChangeDTO{ChangeSeq: c.Seq, Change: string(c.Kind), Task: taskDTO(c.Task)}
+		out.NextAfter = c.Seq
+	}
+	return out
 }
 func mutationDTO(m store.MutationResult) protocol.TaskMutationDTO {
 	return protocol.TaskMutationDTO{TaskID: m.TaskID, Version: m.Version, State: string(m.State), Changed: m.Changed, CreatedAt: stamp(m.CreatedAt), UpdatedAt: stamp(m.UpdatedAt)}
