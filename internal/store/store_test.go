@@ -82,7 +82,7 @@ func TestOpenRejectsGappedMigrationHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=7 WHERE version=2"); err != nil {
+	if _, err := s.DB().Exec("UPDATE schema_migrations SET version=8 WHERE version=2"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -476,7 +476,7 @@ func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.
 	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('slack_task_sources','slack_source_events','slack_effects','files')").Scan(&slackTables); err != nil {
 		t.Fatal(err)
 	}
-	if version != SchemaVersion || migrations != 6 || requests != 1 || slackTables != 4 {
+	if version != SchemaVersion || migrations != SchemaVersion || requests != 1 || slackTables != 4 {
 		t.Fatalf("upgrade state version=%d migrations=%d requests=%d Slack tables=%d", version, migrations, requests, slackTables)
 	}
 	tasks, _, err := s.List(ctx, nil, true, 10, "")
@@ -556,7 +556,7 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.DB().Exec("PRAGMA user_version=7"); err != nil {
+		if _, err := s.DB().Exec("PRAGMA user_version=8"); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.Close(); err != nil {

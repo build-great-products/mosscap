@@ -90,7 +90,7 @@ func TestOpenUpgradesExactSchemaV2ToV5AndPreservesLedger(t *testing.T) {
 	if err := s.DB().QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || migrations != 6 {
+	if version != SchemaVersion || migrations != SchemaVersion {
 		t.Fatalf("migration state version=%d rows=%d", version, migrations)
 	}
 	got, err := s.Get(ctx, "tsk_v2")
@@ -163,8 +163,11 @@ func TestSlackMigrationChecksumsAndColumns(t *testing.T) {
 	if MigrationChecksum(6) == "" || len(MigrationChecksum(6)) != 64 || MigrationChecksum(6) == MigrationChecksum(5) {
 		t.Fatalf("v6 checksum=%q", MigrationChecksum(6))
 	}
-	if MigrationChecksum(7) != "" {
-		t.Fatalf("unknown checksum=%q", MigrationChecksum(7))
+	if MigrationChecksum(7) == "" || len(MigrationChecksum(7)) != 64 || MigrationChecksum(7) == MigrationChecksum(6) {
+		t.Fatalf("v7 checksum=%q", MigrationChecksum(7))
+	}
+	if MigrationChecksum(8) != "" {
+		t.Fatalf("unknown checksum=%q", MigrationChecksum(8))
 	}
 
 	s := testStore(t)
