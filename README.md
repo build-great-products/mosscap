@@ -2,7 +2,7 @@
 
 **Durable Slack work for a long-running agent session.**
 
-Mosscap connects one trusted Slack channel to an agent session such as Claude Code. Eligible Slack mentions and local requests become durable tasks in SQLite. The agent follows them with `mosscap task watch`, which prints one line per task event, and handles each task with explicit CLI commands.
+Mosscap connects the Slack channels its bot is a member of to an agent session such as Claude Code. Eligible Slack mentions and local requests become durable tasks in SQLite. The agent follows them with `mosscap task watch`, which prints one line per task event, and handles each task with explicit CLI commands.
 
 Mosscap does not start, supervise, or prompt the agent. A person (or a supervisor) runs the agent and points its background monitor at `task watch`.
 
@@ -22,7 +22,7 @@ Go CLI ──────┘              │
 
 The current v1 workflow includes:
 
-- single-workspace, single-channel Slack Socket Mode admission;
+- single-workspace Slack Socket Mode admission from every channel the bot is a member of, optionally narrowed by an allowlist;
 - a live SQLite-backed allowlist of trusted Slack user IDs;
 - local and Slack-origin tasks with `open`, `working`, and `done` states;
 - `task watch`, a one-line-per-event task stream with a durable resume cursor;
@@ -39,12 +39,18 @@ Requirements are Go and `just`.
 ```sh
 just build
 ./bin/mosscap setup
-./bin/mosscap config set slack_channel_id C01234567
 ./bin/mosscap config secret set slack_app_token
 ./bin/mosscap config secret set slack_bot_token
 ```
 
-Import [`manifest.json`](manifest.json) into a Slack development app, create an app-level Socket Mode token with `connections:write`, install the app in the intended workspace, and invite it to the configured channel. The manifest targets a public channel with `message.channels`, `channels:read`, and `channels:history`. For a private `G...` channel, use `message.groups`, `groups:read`, and `groups:history` instead. Do not add administrative, DM, slash-command, interactivity, or broad channel-join permissions.
+Import [`manifest.json`](manifest.json) into a Slack development app, create an app-level Socket Mode token with `connections:write`, install the app in the intended workspace, and invite it to each channel that should give it work. The manifest covers public (`message.channels`, `channels:read`, `channels:history`) and private (`message.groups`, `groups:read`, `groups:history`) channels; the gateway verifies every listed scope at startup. Do not add administrative, DM, slash-command, interactivity, or broad channel-join permissions.
+
+By default the gateway admits mentions from every channel the bot is a member of. To narrow that, set a comma-separated allowlist of channel IDs; each listed channel must be one the bot belongs to:
+
+```sh
+./bin/mosscap config set slack_channel_allowlist C0BAQM6JEAJ,C0CC6JQ4A2U
+./bin/mosscap config set slack_channel_allowlist ""   # every member channel
+```
 
 Start the gateway in the foreground:
 
@@ -52,7 +58,7 @@ Start the gateway in the foreground:
 ./bin/mosscap gateway run
 ```
 
-Upgrading from a release with Pi delivery: remove `delivery_lease`, `leader_heartbeat`, and `leader_expiry` from `config.toml` (the gateway names each obsolete key it finds). The ledger migrates on first start and drops its Pi delivery records.
+Upgrading from a release with Pi delivery or a single channel: remove `delivery_lease`, `leader_heartbeat`, and `leader_expiry` from `config.toml`, and replace `slack_channel_id = "C..."` with `slack_channel_allowlist = "C..."` (same ID keeps single-channel admission) or `slack_channel_allowlist = ""` (every member channel). The gateway names each obsolete key it finds. The ledger migrates on first start and drops its Pi delivery records; existing tasks and effects already record their channel, so nothing is backfilled.
 
 ## Trust and tasks
 
@@ -64,7 +70,7 @@ mosscap trust add U01234567
 mosscap trust remove U01234567
 ```
 
-Admission also requires the configured workspace and channel, a human sender, and a literal direct mention of the bot. A trusted Slack user can direct a fully capable local agent; these checks are authorization gates, not a sandbox.
+Admission also requires the authenticated workspace, a channel the bot is a member of (and that passes the allowlist, when one is set), a human sender, and a literal direct mention of the bot. Messages that do not mention the bot are ignored without a reaction, whoever sends them; a mention from an untrusted user gets `:no_entry:`. A trusted Slack user can direct a fully capable local agent; these checks are authorization gates, not a sandbox.
 
 Task state remains locally authoritative. Slack-origin tasks also show a lifecycle reaction on their source message that mirrors task state:
 
@@ -101,10 +107,11 @@ Default output is compact human-readable cards, rows, and labelled details; use 
 `mosscap task watch` is how an agent receives work. It stays connected to the gateway and prints one line per task event on stdout until interrupted:
 
 ```text
-cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=slack text=<@U012BOT> review the release\nthanks
+cursor=7 change=created task=AbCdEfGhIjKlMnOpQrStUv version=1 state=open source=slack channel=C0BAQM6JEAJ text=<@U012BOT> review the release\nthanks
 ```
 
 - `change` is `created`, `edited` (content version changed, for example a Slack edit), or `state` (the task re-entered `open`).
+- `channel` is the task's Slack channel ID, empty for local tasks.
 - `text` is the last field, never truncated, with backslash, newlines, tabs, and other control characters escaped so one event is always one line.
 - `--json` prints one JSON object per line instead: `{"change_seq":7,"change":"created","task":{...}}`, where `task` is the same DTO as `task show --json`.
 - `--state-changes` also reports transitions to `working` and `done`.
@@ -131,6 +138,22 @@ mosscap task reply AbCdEfGhIjKlMnOpQrStUv --stdin --done <<'REPLY'
 Done: the release checklist passes.
 REPLY
 ```
+
+## Slack commands and channels
+
+Every `mosscap slack ...` command works in one channel. Name it with `--channel C...`; otherwise the channel comes from `--task` (a Slack task's own channel), and failing that from a single-entry allowlist. With several possible channels and neither flag, the command fails with `channel_required`. A channel outside the allowlist fails with `channel_not_admitted`.
+
+```sh
+mosscap slack history --channel C0BAQM6JEAJ --limit 20
+mosscap slack thread 1700000000.000001 --task AbCdEfGh
+mosscap slack send --task AbCdEfGh --thread 1700000000.000001 --stdin <<'REPLY'
+Long multiline reply.
+REPLY
+mosscap slack file --channel C0CC6JQ4A2U --thread 1700000000.000001 --file ./demo.mp4
+mosscap slack react 1700000000.000001 white_check_mark --task AbCdEfGh
+```
+
+`task reply` and `task context` always use the task's own channel and thread.
 
 ## Files and exceptional outcomes
 

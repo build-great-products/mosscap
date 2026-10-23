@@ -41,7 +41,7 @@ A watcher writes nothing: printing a line proves nothing about what an agent did
 
 ### Slack
 
-Mosscap is configured for exactly one channel. Workspace and bot identity are derived from Slack authentication. Work is admitted only when a non-bot sender is in the live trusted-user set and directly mentions the bot in the configured channel.
+Mosscap serves one workspace and every channel its bot is a member of, optionally narrowed by a configured allowlist. Workspace and bot identity are derived from Slack authentication. Work is admitted only when a non-bot sender in the live trusted-user set directly mentions the bot in an admitted channel. Each task, effect, and watch line carries its channel, and every Slack command names one channel (explicitly, from its task, or from a single-entry allowlist).
 
 Slack reads and writes are explicit. Each write records a durable intent before network submission. Slack content and task state are independent, except for the explicit `task reply --done` composition, which marks done only after a confirmed reply.
 
@@ -101,4 +101,4 @@ Tokens and authorization headers must not enter SQLite, protocol results, or log
 
 ## Non-goals
 
-Mosscap does not start, prompt, or supervise an agent, run headless agent pools, infer task state from conversation, retain historical task text, automatically retry uncertain external actions, permanently archive transferred bytes, support multiple Slack destinations, or claim end-to-end exactly-once execution.
+Mosscap does not start, prompt, or supervise an agent, run headless agent pools, infer task state from conversation, retain historical task text, automatically retry uncertain external actions, permanently archive transferred bytes, support more than one Slack workspace or direct messages, or claim end-to-end exactly-once execution.

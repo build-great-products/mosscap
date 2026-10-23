@@ -11,7 +11,7 @@ The former numbered phases were implementation milestones. They are not product 
 Mosscap must provide:
 
 - one foreground Go gateway and short-lived CLI clients;
-- one Slack Socket Mode workspace/channel connection;
+- one Slack Socket Mode workspace connection that admits work from every channel the bot is a member of, optionally narrowed by a channel allowlist;
 - admission of direct bot mentions from a live SQLite-backed trusted-user set;
 - local and Slack-origin tasks with explicit state transitions;
 - commit-before-ack Slack source deduplication;
@@ -24,7 +24,7 @@ Mosscap must provide:
 - a private versioned local protocol; and
 - explicit inspection, retry, and metadata purge operations.
 
-Mosscap does not need to start, supervise, or prompt an agent, support more than one Slack destination, retain historical task text, archive file bytes, infer task state from conversation, retry uncertain external work automatically, provide a browser UI, or guarantee end-to-end exactly-once execution.
+Mosscap does not need to start, supervise, or prompt an agent, support more than one Slack workspace or direct messages, retain historical task text, archive file bytes, infer task state from conversation, retry uncertain external work automatically, provide a browser UI, or guarantee end-to-end exactly-once execution.
 
 ## 2. Authority and persistence
 
@@ -49,13 +49,13 @@ $XDG_STATE_HOME/mosscap/tmp/
 
 Fallbacks are `~/.config` and `~/.local/state`. Configuration and state roots must be owner-only directories. Sensitive files must be owner-only regular files; unsafe ownership, modes, symlinks, hard links, or escaped state paths must fail closed.
 
-`config.toml` contains Slack app and bot tokens, the channel ID, and all scalar limits/timeouts. Workspace/team and bot-user IDs are derived and verified through Slack authentication, not configured manually. Tokens must be set through the private config file, redacted from output, and excluded from SQLite, logs, and protocol results.
+`config.toml` contains Slack app and bot tokens, the optional channel allowlist (`slack_channel_allowlist`, comma-separated `C...`/`G...` IDs, empty for every member channel), and all scalar limits/timeouts. Workspace/team and bot-user IDs are derived and verified through Slack authentication, not configured manually. Tokens must be set through the private config file, redacted from output, and excluded from SQLite, logs, and protocol results.
 
-Keys of removed features (for example `delivery_lease`, `leader_heartbeat`, and `leader_expiry`) must be rejected with guidance to remove them.
+Keys of removed features (`delivery_lease`, `leader_heartbeat`, `leader_expiry`) must be rejected with guidance to remove them. The former `slack_channel_id` must be rejected with guidance to replace it with `slack_channel_allowlist`.
 
 `config set` must update one known non-secret value atomically while preserving unrelated comments and formatting. `config secret set` must accept only known Slack token fields and avoid printing their values. Editing stages a candidate; it does not change the running snapshot.
 
-On startup and `gateway reload`, the gateway must validate the complete candidate and verify Slack identity/channel access before activation. Activation is all-or-nothing. Failed reload must leave the prior runtime and connection usable.
+On startup and `gateway reload`, the gateway must validate the complete candidate and verify Slack identity, required scopes for both public and private channels, and access to every allowlisted channel before activation. An empty allowlist verifies no channel up front. Activation is all-or-nothing. Failed reload must leave the prior runtime and connection usable.
 
 The trusted-user set lives in SQLite, may be empty, and changes immediately after a successful `trust add` or `trust remove` commit. An empty set admits no Slack work.
 
@@ -69,15 +69,17 @@ Creation yields `open`. Explicit transitions may move between all three states; 
 
 An initial Slack message is admitted only when all of these hold:
 
-- it belongs to the authenticated workspace and configured channel;
-- the sender is a non-bot user in the current trusted-user set; and
-- its current text literally mentions the authenticated bot user.
+- it belongs to the authenticated workspace and to a `C...` or `G...` channel that passes the allowlist (any channel Slack delivers events for when the allowlist is empty, which is every channel the bot is a member of);
+- its current text literally mentions the authenticated bot user; and
+- the sender is a non-bot user in the current trusted-user set.
+
+Every task records its channel. The same message timestamp in two channels is two distinct sources.
 
 For each identifiable envelope, the gateway must deduplicate and commit the admission result before acknowledging Slack. A commit failure must not be acknowledged. Mosscap makes no receipt claim while disconnected from Socket Mode.
 
 An admitted message creates at most one task. A meaningful newer source edit replaces current text/attachment metadata and increments version. Stale edits must not roll content backward. Source deletion preserves task text and state while recording deletion metadata. Incoming attachments are metadata-only until explicitly retrieved.
 
-Configured-channel events rejected as untrusted must prepare a deduplicated `no_entry` reaction before acknowledgement. Failure or ambiguity of that reaction must remain inspectable and must not admit the event.
+Mention is evaluated before trust: a message that does not mention the bot is `ignored_unmentioned` whatever its sender. An admissible-channel event that mentions the bot but is rejected as untrusted must prepare a deduplicated `no_entry` reaction before acknowledgement. Failure or ambiguity of that reaction must remain inspectable and must not admit the event.
 
 ## 4a. Lifecycle reactions
 
@@ -102,10 +104,10 @@ Each event is the task's current snapshot at its latest change sequence. Changes
 The default line is:
 
 ```text
-cursor=SEQ change=created|edited|state task=TASK_ID version=N state=open|working|done source=local|slack text=ESCAPED
+cursor=SEQ change=created|edited|state task=TASK_ID version=N state=open|working|done source=local|slack channel=CHANNEL_ID text=ESCAPED
 ```
 
-`text` is the last field and is never truncated. It escapes backslash as `\\`, newline as `\n`, carriage return as `\r`, tab as `\t`, and every other control character and U+2028/U+2029 as `\uXXXX`; other printable Unicode is retained. With `--json`, each line is one `TaskChangeDTO` object (`change_seq`, `change`, and a `task` with the `TaskDTO` shape), and the cursor is `change_seq`.
+`channel` is the Slack channel of a Slack task and empty for a local task. `text` is the last field and is never truncated. It escapes backslash as `\\`, newline as `\n`, carriage return as `\r`, tab as `\t`, and every other control character and U+2028/U+2029 as `\uXXXX`; other printable Unicode is retained. With `--json`, each line is one `TaskChangeDTO` object (`change_seq`, `change`, and a `task` with the `TaskDTO` shape including `slack_source` for Slack tasks), and the cursor is `change_seq`.
 
 By default a live event is emitted when a task is created, when its content version changes, or when it enters `open`. `--state-changes` also emits transitions to `working` and `done`. Filtered changes still advance the cursor.
 
@@ -117,7 +119,7 @@ Watching must not change task state or add Slack reactions. A watcher should cla
 
 ## 6. Slack operations and effects
 
-Every Slack command implicitly targets the configured channel. No operation may accept an alternate workspace or channel selector. Targeted writes must verify the target belongs to that channel.
+Every Slack command targets the active workspace and exactly one channel. The channel is the explicit `--channel`, else the related `--task`'s source channel, else the only allowlisted channel; otherwise the command fails with `channel_required`. A channel outside a non-empty allowlist, or a non-`C`/`G` ID, fails with `channel_not_admitted` before any intent is recorded. No operation accepts an alternate workspace. Slack enforces bot membership. Targeted writes preflight the target message in that channel. Each effect records its channel, and recovery and retry use the effect's own channel, which must still be admitted. Clients must see `slack_channels_v1` before sending a channel.
 
 Reads are bounded and do not create effects or change task state. Writes commit an exact effect intent before their single network submission.
 
@@ -164,7 +166,7 @@ mosscap gateway run|reload|status
 mosscap doctor
 mosscap trust list|add|remove
 mosscap task create|list|show|context|watch|update|open|working|done|reply
-mosscap slack history|thread|send|file|edit|delete|react|unreact
+mosscap slack history|thread|send|file|edit|delete|react|unreact   (each accepts --channel; thread and writes accept --task)
 mosscap effect list|inspect|retry
 mosscap file show|get
 mosscap purge
