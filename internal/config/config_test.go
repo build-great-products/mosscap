@@ -72,7 +72,7 @@ func TestLoadStrictLegacyDiagnosticsAndNoEnvironmentSecrets(t *testing.T) {
 	for _, tc := range []struct{ name, contents, want string }{
 		{"unknown", "version = 1\nunknown = 1\n", "unknown key"},
 		{"paths", "version = 1\n[paths]\nstate_dir = \"/x\"\n", "obsolete \"paths\""},
-		{"trust", "version = 1\ntrusted_user_ids = []\n", "trust lives in SQLite"},
+		{"trust", "version = 1\ntrusted_user_ids = []\n", "trusted users were removed"},
 		{"secrets", "version = 1\nsecrets_file = \"/x\"\n", "put Slack tokens in config.toml"},
 		{"obsolete team identity", "version = 1\nslack_team_id = \"T012ABC\"\n", "identity is derived from authenticated Slack tokens"},
 		{"obsolete bot identity", "version = 1\nslack_bot_user_id = \"U012BOT\"\n", "identity is derived from authenticated Slack tokens"},

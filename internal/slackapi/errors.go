@@ -129,8 +129,7 @@ func verificationRejectionCode(code DiagnosticCode) bool {
 	case DiagnosticInvalidAuth, DiagnosticTokenRevoked, DiagnosticMissingScope,
 		DiagnosticTeamMismatch, DiagnosticBotMismatch, DiagnosticChannelNotFound,
 		DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel,
-		DiagnosticNotInChannel, DiagnosticUserNotFound, DiagnosticInvalidRequest,
-		DiagnosticRejected:
+		DiagnosticNotInChannel, DiagnosticInvalidRequest, DiagnosticRejected:
 		return true
 	default:
 		return false
@@ -213,8 +212,6 @@ func VerificationAdvice(code DiagnosticCode) string {
 		return "Check allowlisted channel access and invite the bot to that channel, then restart or gateway reload."
 	case DiagnosticChannelArchived, DiagnosticChannelReadOnly, DiagnosticUnsupportedChannel:
 		return "Configure a writable public or private channel where the bot is a member, then restart or gateway reload."
-	case DiagnosticUserNotFound:
-		return "Review trusted users: each must be an active human in the configured workspace, then restart or gateway reload."
 	case DiagnosticInvalidRequest:
 		return "Check the configured Slack IDs and runtime configuration, then restart or gateway reload."
 	case DiagnosticSocketConnectionLimit:

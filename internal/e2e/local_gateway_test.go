@@ -53,6 +53,11 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		}
 		return output
 	}
+	runCommand := func(args ...string) ([]byte, error) {
+		cmd := exec.Command(binary, args...)
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
 	run("setup", "--json")
 	loc, err := config.DefaultLocation()
 	if err != nil {
@@ -202,37 +207,14 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 	if err := os.WriteFile(configPath, validConfig, 0600); err != nil {
 		t.Fatal(err)
 	}
-	var trusted struct {
-		SlackUserIDs []string `json:"slack_user_ids"`
-	}
-	if output := run("trust", "list", "--json"); json.Unmarshal(output, &trusted) != nil || len(trusted.SlackUserIDs) != 0 {
-		t.Fatalf("initial trust list: %s", output)
-	}
-	firstTrust := mutation(run("trust", "add", "U01234567", "--request-id", "gate-trust-add", "--json"))
-	if firstTrust["trusted"] != true || firstTrust["changed"] != true {
-		t.Fatalf("trust add result: %v", firstTrust)
-	}
-	if replay := mutation(run("trust", "add", "U01234567", "--request-id", "gate-trust-add", "--json")); !sameJSON(firstTrust, replay) {
-		t.Fatalf("trust add replay changed result: first=%v replay=%v", firstTrust, replay)
-	}
 	created := mutation(run("task", "create", "--text", "survives restart", "--request-id", "gate-create", "--json"))
 	taskID := created["task_id"].(string)
 	transitioned := mutation(run("task", "working", taskID, "--request-id", "gate-working", "--json"))
 	stop(gateway)
 
 	gateway = start()
-	trusted = struct {
-		SlackUserIDs []string `json:"slack_user_ids"`
-	}{}
-	if output := run("trust", "list", "--json"); json.Unmarshal(output, &trusted) != nil || len(trusted.SlackUserIDs) != 1 || trusted.SlackUserIDs[0] != "U01234567" {
-		t.Fatalf("trust list after restart: %s", output)
-	}
-	removed := mutation(run("trust", "remove", "U01234567", "--request-id", "gate-trust-remove", "--json"))
-	if removed["trusted"] != false || removed["changed"] != true {
-		t.Fatalf("trust remove result: %v", removed)
-	}
-	if replay := mutation(run("trust", "remove", "U01234567", "--request-id", "gate-trust-remove", "--json")); !sameJSON(removed, replay) {
-		t.Fatalf("trust remove replay changed result: first=%v replay=%v", removed, replay)
+	if output, err := runCommand("trust", "list", "--json"); err == nil {
+		t.Fatalf("removed trust command still runs: %s", output)
 	}
 	if replay := mutation(run("task", "create", "--text", "survives restart", "--request-id", "gate-create", "--json")); !sameJSON(created, replay) {
 		t.Fatalf("create replay changed result: first=%v replay=%v", created, replay)
@@ -273,7 +255,7 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var tasks, events, requests, trustedUsers int
+	var tasks, events, requests, trustTables int
 	if err := db.QueryRowContext(context.Background(), "SELECT count(*) FROM tasks").Scan(&tasks); err != nil {
 		t.Fatal(err)
 	}
@@ -283,11 +265,11 @@ func TestBuiltBinaryRestartReplayGate(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM mutation_requests").Scan(&requests); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT count(*) FROM trusted_users").Scan(&trustedUsers); err != nil {
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='trusted_users'").Scan(&trustTables); err != nil {
 		t.Fatal(err)
 	}
-	if tasks != 1 || events != 1 || requests != 6 || trustedUsers != 0 {
-		t.Fatalf("durable counts tasks=%d events=%d requests=%d trusted=%d, want 1,1,6,0", tasks, events, requests, trustedUsers)
+	if tasks != 1 || events != 1 || requests != 4 || trustTables != 0 {
+		t.Fatalf("durable counts tasks=%d events=%d requests=%d trust tables=%d, want 1,1,4,0", tasks, events, requests, trustTables)
 	}
 }
 

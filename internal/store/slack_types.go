@@ -11,13 +11,19 @@ import (
 type SlackAdmissionResult string
 
 const (
-	SlackAdmitted           SlackAdmissionResult = "admitted"
-	SlackUpdated            SlackAdmissionResult = "updated"
-	SlackDeleted            SlackAdmissionResult = "deleted"
-	SlackDuplicate          SlackAdmissionResult = "duplicate"
-	SlackIgnoredWorkspace   SlackAdmissionResult = "ignored_workspace"
-	SlackIgnoredChannel     SlackAdmissionResult = "ignored_channel"
-	SlackIgnoredUntrusted   SlackAdmissionResult = "ignored_untrusted"
+	SlackAdmitted         SlackAdmissionResult = "admitted"
+	SlackUpdated          SlackAdmissionResult = "updated"
+	SlackDeleted          SlackAdmissionResult = "deleted"
+	SlackDuplicate        SlackAdmissionResult = "duplicate"
+	SlackIgnoredWorkspace SlackAdmissionResult = "ignored_workspace"
+	// SlackIgnoredChannel is recorded only by releases that had a channel
+	// allowlist. It is kept so a redelivery of such an event replays its
+	// original result.
+	SlackIgnoredChannel SlackAdmissionResult = "ignored_channel"
+	// SlackIgnoredNotAuthor records an edit whose sender is not the author of
+	// the admitted source. The stored value keeps the name it had when it also
+	// meant an untrusted sender, because the ledger fixes the set of results.
+	SlackIgnoredNotAuthor   SlackAdmissionResult = "ignored_untrusted"
 	SlackIgnoredUnmentioned SlackAdmissionResult = "ignored_unmentioned"
 	SlackIgnoredBot         SlackAdmissionResult = "ignored_bot"
 	SlackIgnoredStale       SlackAdmissionResult = "ignored_stale"
@@ -43,8 +49,6 @@ var ErrSlackInvariant = errors.New("Slack repository invariant violated")
 // SlackAdmissionPolicy is the immutable configuration snapshot attached to an
 // event receipt. Channels is the optional allowlist; empty admits any channel
 // Slack delivers events for, which is every channel the bot is a member of.
-// User trust is deliberately not included: it is read from the current
-// trusted_users table in the same transaction as admission.
 type SlackAdmissionPolicy struct {
 	TeamID    string   `json:"team_id"`
 	Channels  []string `json:"channels,omitempty"`

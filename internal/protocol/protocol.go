@@ -27,7 +27,6 @@ const (
 	CapabilityDoctor              = "doctor"
 	CapabilityLocalTasks          = "local_tasks"
 	CapabilityRequestDedup        = "request_dedup"
-	CapabilityTrustedUsers        = "trusted_users"
 	CapabilityConfigReload        = "config_reload"
 	CapabilitySlackRuntime        = "slack_runtime"
 	CapabilitySlackReads          = "slack_reads"
@@ -45,7 +44,7 @@ const (
 	CapabilitySlackChannels = "slack_channels_v1"
 )
 
-var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityTrustedUsers, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext, CapabilityTaskChanges, CapabilitySlackChannels}
+var ServerCapabilities = []string{CapabilityStatus, CapabilityDoctor, CapabilityLocalTasks, CapabilityRequestDedup, CapabilityConfigReload, CapabilitySlackRuntime, CapabilitySlackReads, CapabilitySlackPagination, CapabilitySlackEffects, CapabilitySlackSourceMetadata, CapabilityFileTransfer, CapabilityMetadataPurge, CapabilityTaskReply, CapabilitySQLitePagination, CapabilityTaskContext, CapabilityTaskChanges, CapabilitySlackChannels}
 
 var (
 	ErrEmptyFrame    = errors.New("protocol: empty frame")
@@ -131,11 +130,6 @@ type MetadataPurgeDTO struct {
 // work committed before the interrupted batch, never speculative deletions.
 type PurgeProgressDTO struct {
 	Removed PurgeCountsDTO `json:"removed"`
-}
-
-// TrustMutationParams identifies one immutable Slack user.
-type TrustMutationParams struct {
-	SlackUserID string `json:"slack_user_id"`
 }
 
 type TaskSelector struct {
@@ -479,26 +473,6 @@ type TaskListDTO struct {
 	NextCursor string    `json:"next_cursor,omitempty"`
 }
 
-// TrustedUserListDTO contains lexicographically sorted immutable Slack user
-// IDs and any presentation-only usernames resolved from the active runtime.
-type TrustedUserListParams struct {
-	Limit  int    `json:"limit,omitempty"`
-	Cursor string `json:"cursor,omitempty"`
-}
-
-type TrustedUserListDTO struct {
-	SlackUserIDs   []string          `json:"slack_user_ids"`
-	SlackUserNames map[string]string `json:"slack_user_names,omitempty"`
-	NextCursor     string            `json:"next_cursor,omitempty"`
-}
-
-// TrustMutationDTO reports the resulting authorization state for one Slack user.
-type TrustMutationDTO struct {
-	SlackUserID string `json:"slack_user_id"`
-	Trusted     bool   `json:"trusted"`
-	Changed     bool   `json:"changed"`
-}
-
 // ConfigReloadDTO deliberately contains no configuration values or secrets.
 // SlackNetworkVerificationDeferred is true for a local-only gateway that did
 // not make Slack network verification part of reload activation.
@@ -589,8 +563,6 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &HelloParams{}
 	case "status.get", "doctor.run", "config.reload":
 		target = &EmptyParams{}
-	case "trust.list":
-		target = &TrustedUserListParams{}
 	case "metadata.purge":
 		target = &MetadataPurgeParams{}
 	case "slack.history":
@@ -619,8 +591,6 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		target = &FileGetParams{}
 	case "file.release":
 		target = &FileReleaseParams{}
-	case "trust.add", "trust.remove":
-		target = &TrustMutationParams{}
 	case "task.create":
 		target = &TaskCreateParams{}
 	case "task.list":
@@ -664,14 +634,6 @@ func ValidateParams(command string, raw json.RawMessage) error {
 		}
 		if _, err := ParsePurgeCutoff(p.Cutoff); err != nil {
 			return errors.New("invalid metadata purge cutoff")
-		}
-	case *TrustedUserListParams:
-		if p.Limit < 0 || p.Limit > 100 || (p.Cursor != "" && !validSlackUserID(p.Cursor)) {
-			return errors.New("invalid trusted-user list")
-		}
-	case *TrustMutationParams:
-		if !validSlackUserID(p.SlackUserID) {
-			return errors.New("invalid Slack user ID")
 		}
 	case *TaskCreateParams:
 		if p.Text == "" {
@@ -817,7 +779,7 @@ func decodeStrict(b []byte, v any) error {
 }
 func validCommand(c string) bool {
 	switch c {
-	case "hello", "status.get", "doctor.run", "trust.list", "trust.add", "trust.remove", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.changes", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release":
+	case "hello", "status.get", "doctor.run", "config.reload", "metadata.purge", "task.create", "task.list", "task.get", "task.context", "task.changes", "task.update", "task.transition", "task.reply", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "file.release":
 		return true
 	}
 	return false

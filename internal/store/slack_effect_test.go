@@ -199,7 +199,7 @@ func TestSlackEffectPrepareBusyAndCancellationLeaveNoPartialRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := blocker.Exec("INSERT INTO trusted_users(slack_user_id) VALUES('U12345678')"); err != nil {
+	if _, err := blocker.Exec("UPDATE schema_migrations SET applied_at=applied_at WHERE version=1"); err != nil {
 		_ = blocker.Rollback()
 		t.Fatal(err)
 	}

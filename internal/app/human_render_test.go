@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-
-	"github.com/stayradiated/mosscap/internal/protocol"
 )
 
 func TestHumanRenderGoldenCardsAndRows(t *testing.T) {
@@ -57,18 +55,6 @@ func TestHumanRenderStatusLabelsGatewayAndSlackAccurately(t *testing.T) {
 	}
 	if got, want := out.String(), "Gateway  reachable\nSlack    disconnected\n"; got != want {
 		t.Fatalf("status = %q, want %q", got, want)
-	}
-}
-
-func TestTrustedUserNamesEscapeTerminalControls(t *testing.T) {
-	var out bytes.Buffer
-	a := App{Out: &out}
-	users := protocol.TrustedUserListDTO{SlackUserIDs: []string{"U1"}, SlackUserNames: map[string]string{"U1": "name\x1b[2J"}}
-	if err := a.renderTrustedUsers(users, false); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out.String(), "\x1b") || !strings.Contains(out.String(), `@name\u001b[2J`) {
-		t.Fatalf("unsafe trusted-user output: %q", out.String())
 	}
 }
 

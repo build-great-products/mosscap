@@ -134,14 +134,11 @@ type Channel struct {
 // VerificationRequest is the immutable identity and authority expected by a
 // prepared runtime. ChannelIDs is the optional channel allowlist; each listed
 // channel must be a writable member channel. An empty list admits every
-// channel the bot belongs to and verifies none up front. TrustedUserIDs may be
-// empty; when supplied each user must be an active, non-bot member of the
-// configured workspace.
+// channel the bot belongs to and verifies none up front.
 type VerificationRequest struct {
-	TeamID         string
-	BotUserID      string
-	ChannelIDs     []string
-	TrustedUserIDs []string
+	TeamID     string
+	BotUserID  string
+	ChannelIDs []string
 }
 
 // VerificationResult contains only safe, proven configuration facts.
@@ -150,5 +147,4 @@ type VerificationResult struct {
 	Team     Team
 	Channels []Channel
 	Scopes   []Scope
-	Users    []User
 }

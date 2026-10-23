@@ -303,7 +303,7 @@ func unknownKeyError(key string) error {
 		return fmt.Errorf("decode config: obsolete %q: paths are fixed by XDG_CONFIG_HOME and XDG_STATE_HOME; remove it", key)
 	}
 	if key == "trusted_user_ids" || strings.HasSuffix(key, ".trusted_user_ids") {
-		return fmt.Errorf("decode config: obsolete %q: trust lives in SQLite; use `mosscap trust add`", key)
+		return fmt.Errorf("decode config: obsolete %q: trusted users were removed and every workspace member may send work; remove it", key)
 	}
 	if key == "slack_channel_id" {
 		return fmt.Errorf("decode config: obsolete %q: replace it with slack_channel_allowlist, set to the same ID to keep single-channel admission or to \"\" to admit every channel the bot is a member of", key)

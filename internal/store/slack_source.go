@@ -30,8 +30,7 @@ type normalizedSlackSourceEvent struct {
 	identityMalformed bool
 }
 
-// CommitSlackSourceEvent evaluates policy and current database trust, then
-// commits an event and any task/source/file changes in one transaction. It
+// CommitSlackSourceEvent evaluates the admission policy, then commits an event and any task/source/file changes in one transaction. It
 // never acknowledges Slack and never exposes the transaction to callers.
 func (s *Store) CommitSlackSourceEvent(ctx context.Context, policy SlackAdmissionPolicy, event SlackSourceEvent) (SlackEventResult, error) {
 	if err := validateSlackPolicy(policy); err != nil {
@@ -329,11 +328,9 @@ func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy Slack
 			return SlackEventResult{}, err
 		}
 	}
-	// Mention is checked before trust: only a message addressed to the bot is
-	// a request, so only an addressed untrusted message is ignored_untrusted
-	// (which earns the no_entry reaction). Ordinary channel chatter is
-	// ignored_unmentioned regardless of sender. A new reply in a tracked
-	// thread is addressed to the bot without a mention: it is a follow-up.
+	// Only a message addressed to the bot is a request: a direct mention, or a
+	// new reply in a tracked thread (a follow-up). Ordinary channel chatter is
+	// ignored_unmentioned. Every human member of the workspace may send work.
 	mentioned := strings.Contains(event.Text, "<@"+policy.BotUserID+">")
 	followUp := !mentioned && reply && thread.tracked && event.EventKind == SlackEventMessage
 	if !mentioned && !followUp {
@@ -345,17 +342,6 @@ func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy Slack
 	}
 	if text == "" {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
-	}
-	var trusted bool
-	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM trusted_users WHERE slack_user_id=?)", event.UserID).Scan(&trusted); err != nil {
-		return SlackEventResult{}, err
-	}
-	if !trusted && !mentioned {
-		// Untrusted replies in a tracked thread are conversation, not requests.
-		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
-	}
-	if !trusted {
-		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUntrusted, "", "", committedAtUS)
 	}
 	taskID, err := s.ids.NewTaskID()
 	if err != nil {
@@ -432,7 +418,7 @@ func (s *Store) commitSlackEdit(ctx context.Context, tx *sql.Tx, event normalize
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredBot, source.TaskID, "", committedAtUS)
 	}
 	if event.UserID != source.AuthorUserID {
-		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUntrusted, source.TaskID, "", committedAtUS)
+		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredNotAuthor, source.TaskID, "", committedAtUS)
 	}
 	if event.text == "" {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackMalformed, source.TaskID, slackDiagnosticInvalidText, committedAtUS)
@@ -672,7 +658,7 @@ func (s *Store) SlackSourceEventCounts(ctx context.Context) (SlackSourceEventCou
 	counts := SlackSourceEventCounts{ByResult: make(map[SlackAdmissionResult]int64)}
 	for _, result := range []SlackAdmissionResult{
 		SlackAdmitted, SlackUpdated, SlackDeleted, SlackDuplicate,
-		SlackIgnoredWorkspace, SlackIgnoredChannel, SlackIgnoredUntrusted,
+		SlackIgnoredWorkspace, SlackIgnoredChannel, SlackIgnoredNotAuthor,
 		SlackIgnoredUnmentioned, SlackIgnoredBot, SlackIgnoredStale,
 		SlackIgnoredUntracked, SlackMalformed,
 	} {

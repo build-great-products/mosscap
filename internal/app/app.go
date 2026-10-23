@@ -378,43 +378,11 @@ func localDoctorChecks(loc config.Location, c config.Config, loadErr error) []do
 	return checks
 }
 
-func (a App) renderTrustedUsers(users protocol.TrustedUserListDTO, jsonOut bool) error {
-	if jsonOut {
-		return a.render(users, true)
-	}
-
-	color := colorEnabled(a.Out)
-	fmt.Fprintf(a.Out, "Trusted Slack users: %d\n\n", len(users.SlackUserIDs))
-	if len(users.SlackUserIDs) == 0 {
-		fmt.Fprintln(a.Out, "  No users are trusted.")
-		return nil
-	}
-	for _, userID := range users.SlackUserIDs {
-		bullet, formattedID := "•", userID
-		// User display names are Slack-provided text. Escape only for this
-		// terminal projection; the JSON DTO preserves the original value.
-		name := escapeTerminal(users.SlackUserNames[userID])
-		formattedName := ""
-		if name != "" {
-			formattedName = "  @" + name
-		}
-		if color {
-			bullet = "\x1b[32m" + bullet + "\x1b[0m"
-			formattedID = "\x1b[1;34m" + formattedID + "\x1b[0m"
-			if formattedName != "" {
-				formattedName = "  \x1b[36m@" + name + "\x1b[0m"
-			}
-		}
-		fmt.Fprintf(a.Out, "  %s  %s%s\n", bullet, formattedID, formattedName)
-	}
-	return nil
-}
-
 // gatewayMutation is intentionally conservative: a response lost after any
 // request that can write durable state is not safe to replay automatically.
 func gatewayMutation(command string) bool {
 	switch command {
-	case "config.reload", "metadata.purge", "trust.add", "trust.remove", "task.create", "task.update", "task.transition", "task.reply", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.retry", "file.get", "file.release":
+	case "config.reload", "metadata.purge", "task.create", "task.update", "task.transition", "task.reply", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact", "effect.retry", "file.get", "file.release":
 		return true
 	default:
 		return false

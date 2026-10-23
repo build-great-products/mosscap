@@ -65,9 +65,8 @@ func steps(groups ...[]fake.Step) []fake.Step {
 	return out
 }
 
-// newSlackHarness starts the gateway once trust is committed, so every scripted
-// envelope is evaluated against a trusted sender. Envelopes are released only
-// after trust.add commits.
+// newSlackHarness starts the gateway with a scripted Slack session. Envelopes
+// are released only after the gateway answers on its local endpoint.
 func newSlackHarness(t *testing.T, settings map[string]string, receives []fake.ReceiveStep, script []fake.Step) *slackHarness {
 	t.Helper()
 	home := effectiveHome(t)
@@ -136,9 +135,6 @@ func newSlackHarness(t *testing.T, settings map[string]string, receives []fake.R
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	h := &slackHarness{t: t, cfg: cfg, web: web, binary: binary, env: append(os.Environ(), "HOME="+home), db: db}
-	if out := h.call("trust", "trust.add", protocol.TrustMutationParams{SlackUserID: harnessUser}); out.Error != nil {
-		t.Fatalf("trust: %#v", out.Error)
-	}
 	gate.Release()
 	return h
 }

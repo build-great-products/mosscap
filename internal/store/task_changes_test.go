@@ -90,7 +90,6 @@ func TestTaskChangesFollowCommitOrderAndCoalesceToCurrentSnapshot(t *testing.T) 
 
 func TestTaskChangesRecordSlackEditsAsEdited(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	initial := sourceTestEvent("Ev-change-initial", SlackEventAppMention, 1_000)
 	admitted, err := s.CommitSlackSourceEvent(ctx, sourceTestPolicy, initial)

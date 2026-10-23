@@ -17,15 +17,14 @@ func TestVerifyProvesCompleteRuntimeAuthority(t *testing.T) {
 		fake.Step{Operation: fake.Team, Request: "T012ABC", Result: slackapi.Team{ID: "T012ABC"}},
 		fake.Step{Operation: fake.Channel, Request: "C012ABC", Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
 		fake.Step{Operation: fake.Scopes, Result: required},
-		fake.Step{Operation: fake.User, Request: "U012USR", Result: slackapi.User{ID: "U012USR", TeamID: "T012ABC"}},
 	)
 	result, err := slackapi.Verify(context.Background(), web, slackapi.VerificationRequest{
-		ChannelIDs: []string{"C012ABC"}, TrustedUserIDs: []string{"U012USR"},
+		ChannelIDs: []string{"C012ABC"},
 	})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if result.Identity.BotUserID != "U012BOT" || len(result.Scopes) != len(required) || len(result.Users) != 1 {
+	if result.Identity.BotUserID != "U012BOT" || len(result.Scopes) != len(required) {
 		t.Fatalf("result = %#v", result)
 	}
 	if err := web.AssertDone(); err != nil {
@@ -33,7 +32,7 @@ func TestVerifyProvesCompleteRuntimeAuthority(t *testing.T) {
 	}
 }
 
-func TestVerifyRejectsIdentityScopeAndUserMismatch(t *testing.T) {
+func TestVerifyRejectsIdentityAndScopeMismatch(t *testing.T) {
 	tests := []struct {
 		name string
 		web  *fake.Web
@@ -56,21 +55,11 @@ func TestVerifyRejectsIdentityScopeAndUserMismatch(t *testing.T) {
 				fake.Step{Operation: fake.Scopes, Result: []slackapi.Scope{slackapi.ScopeChatWrite}},
 			),
 		},
-		{
-			name: "trusted bot", code: slackapi.DiagnosticUserNotFound,
-			web: fake.NewWeb(
-				fake.Step{Operation: fake.Auth, Result: slackapi.AuthIdentity{TeamID: "T012ABC", BotUserID: "U012BOT"}},
-				fake.Step{Operation: fake.Team, Result: slackapi.Team{ID: "T012ABC"}},
-				fake.Step{Operation: fake.Channel, Result: slackapi.Channel{ID: "C012ABC", TeamID: "T012ABC", Member: true, Accessible: true}},
-				fake.Step{Operation: fake.Scopes, Result: slackapi.RequiredBotScopes()},
-				fake.Step{Operation: fake.User, Result: slackapi.User{ID: "U012USR", TeamID: "T012ABC", Bot: true}},
-			),
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := slackapi.Verify(context.Background(), test.web, slackapi.VerificationRequest{
-				TeamID: "T012ABC", BotUserID: "U012BOT", ChannelIDs: []string{"C012ABC"}, TrustedUserIDs: []string{"U012USR"},
+				TeamID: "T012ABC", BotUserID: "U012BOT", ChannelIDs: []string{"C012ABC"},
 			})
 			failure := slackapi.Classify(err, slackapi.FailureRead)
 			if failure.Class != slackapi.FailureConclusive || failure.Diagnostic != test.code {

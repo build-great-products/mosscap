@@ -29,7 +29,6 @@ func commitFollowupEvent(t *testing.T, s *Store, event SlackSourceEvent) SlackEv
 
 func TestUnmentionedThreadRepliesBecomeLinkedFollowUps(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	root := sourceTestEvent("Ev-root", SlackEventAppMention, 100)
 	root.MessageTS, root.ThreadTS = followupRootTS, followupRootTS
@@ -38,7 +37,7 @@ func TestUnmentionedThreadRepliesBecomeLinkedFollowUps(t *testing.T) {
 		t.Fatalf("root=%+v", rootResult)
 	}
 
-	// A trusted, unmentioned reply in the thread is admitted as its own task.
+	// An unmentioned reply in the thread is admitted as its own task.
 	reply := commitFollowupEvent(t, s, followupEvent("Ev-perfect", "1700000001.000001", followupRootTS, "U12345678", "Perfect", 101))
 	if reply.AdmissionResult != SlackAdmitted || reply.TaskID == rootResult.TaskID {
 		t.Fatalf("follow-up=%+v", reply)
@@ -70,13 +69,10 @@ func TestUnmentionedThreadRepliesBecomeLinkedFollowUps(t *testing.T) {
 
 func TestThreadRepliesThatAreNotFollowUps(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	root := sourceTestEvent("Ev-root", SlackEventAppMention, 100)
 	root.MessageTS, root.ThreadTS = followupRootTS, followupRootTS
 	commitFollowupEvent(t, s, root)
 
-	untrustedChatter := followupEvent("Ev-untrusted", "1700000001.000001", followupRootTS, "U87654321", "nice", 101)
-	untrustedMention := followupEvent("Ev-untrusted-mention", "1700000002.000001", followupRootTS, "U87654321", "<@U99999999> do it", 102)
 	untracked := followupEvent("Ev-untracked", "1700000003.000001", "1699999000.000001", "U12345678", "unrelated thread", 103)
 	topLevel := followupEvent("Ev-top", "1700000004.000001", "1700000004.000001", "U12345678", "channel chatter", 104)
 	bot := followupEvent("Ev-bot", "1700000005.000001", followupRootTS, "", "", 105)
@@ -88,8 +84,6 @@ func TestThreadRepliesThatAreNotFollowUps(t *testing.T) {
 		event SlackSourceEvent
 		want  SlackAdmissionResult
 	}{
-		{untrustedChatter, SlackIgnoredUnmentioned},
-		{untrustedMention, SlackIgnoredUntrusted},
 		{untracked, SlackIgnoredUnmentioned},
 		{topLevel, SlackIgnoredUnmentioned},
 		{bot, SlackIgnoredBot},
@@ -109,7 +103,6 @@ func TestThreadRepliesThatAreNotFollowUps(t *testing.T) {
 
 func TestRepliesInBotStartedThreadsAndAttachmentOnlyFollowUps(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	local, err := s.Create(ctx, "followup-local", "post the demo")
 	if err != nil {
@@ -146,5 +139,26 @@ func TestRepliesInBotStartedThreadsAndAttachmentOnlyFollowUps(t *testing.T) {
 	_ = pending
 	if got := commitFollowupEvent(t, s, followupEvent("Ev-pending-thread", "1700000901.000001", "1700000900.000001", "U12345678", "hello?", 102)); got.AdmissionResult != SlackIgnoredUnmentioned {
 		t.Fatalf("pending-thread reply=%+v", got)
+	}
+}
+
+// Every human member of the workspace may send work: a user nobody configured
+// can mention the bot in a thread, and a different person can follow up.
+func TestFollowUpsAndMentionsFromAnyWorkspaceMember(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	root := sourceTestEvent("Ev-anyone-root", SlackEventAppMention, 100)
+	root.MessageTS, root.ThreadTS, root.UserID = followupRootTS, followupRootTS, "U87654321"
+	rootResult := commitFollowupEvent(t, s, root)
+	if rootResult.AdmissionResult != SlackAdmitted {
+		t.Fatalf("mention from any member=%+v", rootResult)
+	}
+	reply := commitFollowupEvent(t, s, followupEvent("Ev-anyone-reply", "1700000001.000001", followupRootTS, "U55555555", "thanks, also check staging", 101))
+	if reply.AdmissionResult != SlackAdmitted {
+		t.Fatalf("follow-up from another member=%+v", reply)
+	}
+	source, err := s.GetSlackSource(ctx, reply.TaskID)
+	if err != nil || source.ParentTaskID != rootResult.TaskID || source.AuthorUserID != "U55555555" {
+		t.Fatalf("follow-up source=%+v err=%v", source, err)
 	}
 }

@@ -97,9 +97,9 @@ func TestOpenUpgradesExactSchemaV2ToV5AndPreservesLedger(t *testing.T) {
 	if err != nil || got.Text != "preserved v2 text" || got.Version != 2 || got.SourceKind != "local" {
 		t.Fatalf("preserved task=%+v err=%v", got, err)
 	}
-	users, err := s.ListTrustedUsers(ctx)
-	if err != nil || !reflect.DeepEqual(users, []string{"U12345678"}) {
-		t.Fatalf("preserved trust=%v err=%v", users, err)
+	var trustTables int
+	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='trusted_users'").Scan(&trustTables); err != nil || trustTables != 0 {
+		t.Fatalf("trusted_users survived the upgrade: %d err=%v", trustTables, err)
 	}
 	var resultJSON string
 	if err := s.DB().QueryRow("SELECT result_json FROM mutation_requests WHERE request_id='v2-request'").Scan(&resultJSON); err != nil || resultJSON != `{"preserved":true}` {

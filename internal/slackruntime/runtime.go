@@ -65,11 +65,10 @@ func (RealFactory) Build(c config.Config) (slackapi.Web, slackapi.Socket, error)
 type Handler func(context.Context, slackapi.Envelope) error
 
 type Options struct {
-	Factory        Factory
-	Handler        Handler
-	TrustedUserIDs []string
-	Jitter         slackapi.JitterSource
-	Sleep          func(context.Context, time.Duration) error
+	Factory Factory
+	Handler Handler
+	Jitter  slackapi.JitterSource
+	Sleep   func(context.Context, time.Duration) error
 }
 
 type State string
@@ -305,7 +304,7 @@ func (r *Runtime) prepare(ctx context.Context, c config.Config) (*Snapshot, erro
 		return nil, errors.New("Slack runtime factory returned incomplete clients")
 	}
 	channels := config.ChannelAllowlist(c)
-	verified, err := slackapi.Verify(ctx, web, slackapi.VerificationRequest{ChannelIDs: channels, TrustedUserIDs: append([]string(nil), r.options.TrustedUserIDs...)})
+	verified, err := slackapi.Verify(ctx, web, slackapi.VerificationRequest{ChannelIDs: channels})
 	if err != nil {
 		return nil, safeError(err)
 	}

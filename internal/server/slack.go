@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -62,41 +60,15 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 	if s.runtimeFactory == nil {
 		return nil, nil, "", errors.New("production Slack runtime factory is required")
 	}
-	trusted, err := ledger.ListTrustedUsers(ctx)
-	if err != nil {
-		return nil, nil, "", err
-	}
 	var coordinator *slackingest.Coordinator
-	var rt *slackruntime.Runtime
-	rt, err = slackruntime.New(slackruntime.Options{Factory: s.runtimeFactory, TrustedUserIDs: trusted, Handler: func(ctx context.Context, e slackapi.Envelope) error {
+	rt, err := slackruntime.New(slackruntime.Options{Factory: s.runtimeFactory, Handler: func(ctx context.Context, e slackapi.Envelope) error {
 		if coordinator == nil {
 			return errors.New("Slack admission coordinator is not ready")
 		}
 		result, handleErr := coordinator.Handle(ctx, e)
-		s.logSlackAdmission(e, result)
 		if result.AdmissionResult == store.SlackAdmitted {
 			if reactionErr := s.queueTaskReaction(ctx, result.TaskID); reactionErr != nil && s.Log != nil {
 				s.Log.Warn("automatic queued-task reaction did not confirm", "task_id", result.TaskID, "task_version", result.TaskVersion, "error", reactionErr)
-			}
-		}
-		if result.AdmissionResult == store.SlackIgnoredUntrusted {
-			effect, reactionErr := executeAutomaticUntrustedReaction(ctx, rt, ledger, e)
-			if reactionErr != nil {
-				s.Log.Warn("automatic untrusted-sender reaction did not confirm",
-					"slack_user_id", e.UserID,
-					"channel_id", e.ChannelID,
-					"source_event_id", result.SourceEventID,
-					"effect_id", effect.ID,
-					"effect_state", effect.State,
-					"error", reactionErr,
-				)
-			} else {
-				s.Log.Info("automatic untrusted-sender reaction confirmed",
-					"slack_user_id", e.UserID,
-					"channel_id", e.ChannelID,
-					"source_event_id", result.SourceEventID,
-					"effect_id", effect.ID,
-				)
 			}
 		}
 		return handleErr
@@ -124,63 +96,11 @@ func (s *Server) prepareSlack(ctx context.Context, c config.Config, ledger *stor
 				_, err = s.prepareTaskReactionIn(ctx, ledger, source, 1, queuedStage, store.SlackEffectReact, queuedTaskReaction)
 				return err
 			}
-			if result.AdmissionResult != store.SlackIgnoredUntrusted {
-				return nil
-			}
-			target := store.SlackEffectTarget{TeamID: event.TeamID, ChannelID: event.ChannelID}
-			_, err := ledger.PrepareSlackEffect(ctx, automaticUntrustedReactionRequestID(event.TeamID, event.ChannelID, event.MessageTS), target, store.SlackEffectIntent{
-				Kind:            store.SlackEffectReact,
-				TargetMessageTS: event.MessageTS,
-				Emoji:           untrustedSenderReaction,
-			})
-			return err
+			return nil
 		},
 	})
 	snapshot.Release()
 	return rt, coordinator, slackruntime.StateConnected, nil
-}
-
-// logSlackAdmission reports actionable admission failures without exposing
-// message text or raw Slack payloads.
-func (s *Server) logSlackAdmission(envelope slackapi.Envelope, result store.SlackEventResult) {
-	if result.AdmissionResult != store.SlackIgnoredUntrusted {
-		return
-	}
-	s.Log.Warn("Slack event ignored: sender is not trusted",
-		"slack_user_id", envelope.UserID,
-		"channel_id", envelope.ChannelID,
-		"source_event_id", result.SourceEventID,
-	)
-}
-
-const untrustedSenderReaction = "no_entry"
-
-// executeAutomaticUntrustedReaction records the fixed reaction through the
-// normal durable effect lifecycle. The request ID is stable per Slack message,
-// so duplicate event types, edits, and redeliveries cannot submit it twice.
-func executeAutomaticUntrustedReaction(ctx context.Context, rt *slackruntime.Runtime, ledger *store.Store, envelope slackapi.Envelope) (store.SlackEffect, error) {
-	if rt == nil {
-		return store.SlackEffect{}, slackops.ErrUnavailable
-	}
-	snapshot, err := rt.Acquire()
-	if err != nil {
-		return store.SlackEffect{}, err
-	}
-	defer snapshot.Release()
-	service := slackops.New(ledger, snapshot.Web, slackops.Scope{TeamID: snapshot.TeamID, Channels: snapshot.Channels})
-	if !service.Allows(envelope.TeamID, envelope.ChannelID) {
-		return store.SlackEffect{}, slackops.ErrInvalidTarget
-	}
-	return service.Execute(ctx, automaticUntrustedReactionRequestID(envelope.TeamID, envelope.ChannelID, string(envelope.MessageTS)), envelope.ChannelID, store.SlackEffectIntent{
-		Kind:            store.SlackEffectReact,
-		TargetMessageTS: string(envelope.MessageTS),
-		Emoji:           untrustedSenderReaction,
-	})
-}
-
-func automaticUntrustedReactionRequestID(teamID, channelID, messageTS string) string {
-	sum := sha256.Sum256([]byte(teamID + "\x00" + channelID + "\x00" + messageTS + "\x00" + untrustedSenderReaction))
-	return "internal-untrusted-reaction-" + hex.EncodeToString(sum[:])
 }
 
 // prepareFileTransfer binds lazy transfers to one verified runtime snapshot.
@@ -343,33 +263,6 @@ func (s *Server) fileTransferDoctor(ctx context.Context) []doctor.Check {
 }
 func settingsValid(settings filetransfer.Settings) bool {
 	return settings.MaximumBytes > 0 && settings.MaximumLiveFiles > 0 && settings.Lifetime > 0
-}
-
-// slackUserNames resolves presentation-only usernames from the active Slack
-// runtime. Trust remains entirely ID-based, and an unavailable lookup never
-// prevents the committed allowlist from being returned.
-func (s *Server) slackUserNames(ctx context.Context, userIDs []string) map[string]string {
-	if s.runtime == nil || len(userIDs) == 0 {
-		return nil
-	}
-	snapshot, err := s.runtime.Acquire()
-	if err != nil {
-		return nil
-	}
-	defer snapshot.Release()
-
-	names := make(map[string]string, len(userIDs))
-	for _, userID := range userIDs {
-		user, err := snapshot.Web.User(ctx, userID)
-		if err != nil || user.ID != userID || user.TeamID != snapshot.TeamID || user.Bot || user.Deactivated || slackapi.ValidateUserName(user.Name) != nil {
-			continue
-		}
-		names[userID] = user.Name
-	}
-	if len(names) == 0 {
-		return nil
-	}
-	return names
 }
 
 func (s *Server) slackDoctor(ctx context.Context) []doctor.Check {

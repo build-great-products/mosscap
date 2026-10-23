@@ -95,7 +95,6 @@ func TestVerificationDiagnosticsAreTypedAndActionable(t *testing.T) {
 		{DiagnosticTeamMismatch, "intended workspace"},
 		{DiagnosticChannelNotFound, "invite the bot"},
 		{DiagnosticChannelArchived, "writable public or private channel"},
-		{DiagnosticUserNotFound, "active human"},
 		{DiagnosticInvalidRequest, "configured Slack IDs"},
 	}
 	for _, test := range tests {

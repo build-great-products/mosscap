@@ -24,9 +24,6 @@ func TestTaskReadModelPreservesLocalTasksAndJoinsSlackMetadata(t *testing.T) {
 		t.Fatalf("local read = %#v", localRead)
 	}
 
-	if _, err := s.AddTrustedUser(ctx, "task-read-model-trust", "U12345678"); err != nil {
-		t.Fatal(err)
-	}
 	size := int64(42)
 	event := sourceTestEvent("Ev-task-read-model", SlackEventAppMention, 100)
 	event.Files = []SlackIncomingFile{
@@ -58,7 +55,6 @@ func TestTaskReadModelPreservesLocalTasksAndJoinsSlackMetadata(t *testing.T) {
 func TestTaskReadModelLatestSlackReplyEffectIsExactAndDeterministic(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	event := sourceTestEvent("Ev-task-reply-model", SlackEventAppMention, 100)
 	admitted, err := s.CommitSlackSourceEvent(ctx, sourceTestPolicy, event)
 	if err != nil {

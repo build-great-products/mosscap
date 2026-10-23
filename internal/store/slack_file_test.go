@@ -8,7 +8,6 @@ import (
 
 func TestSlackFileSelectorsAndReconciliationPreserveIdentity(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	oneSize := int64(1)
 	initial := sourceTestEvent("Ev-file-initial", SlackEventAppMention, 10)
@@ -60,7 +59,6 @@ func TestSlackFileSelectorsAndReconciliationPreserveIdentity(t *testing.T) {
 
 func TestSlackMalformedFileMetadataCreatesNoTaskOrFileAndLeaksNoCanary(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	const canary = "SECRET-FILENAME-CANARY"
 	event := sourceTestEvent("Ev-file-malformed", SlackEventMessage, 10)
@@ -86,7 +84,6 @@ func TestSlackMalformedFileMetadataCreatesNoTaskOrFileAndLeaksNoCanary(t *testin
 
 func TestSlackDuplicateFileIdentityIsMalformedBeforeAtomicAdmission(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	event := sourceTestEvent("Ev-file-duplicate", SlackEventAppMention, 10)
 	event.Files = []SlackIncomingFile{
 		{SlackFileID: "F12345678", OriginalName: "one"},

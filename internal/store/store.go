@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	SchemaVersion      = 9
+	SchemaVersion      = 10
 	ApplicationID      = 0x4d435030 // "MCP0"
 	RequestRetention   = 30 * 24 * time.Hour
 	defaultBusyTimeout = 5 * time.Second
@@ -58,6 +58,9 @@ var migration0008 []byte
 
 //go:embed migrations/0009_thread_followups.sql
 var migration0009 []byte
+
+//go:embed migrations/0010_drop_trusted_users.sql
+var migration0010 []byte
 
 var (
 	ErrIncompatibleSchema = errors.New("incompatible SQLite schema")
@@ -103,14 +106,6 @@ type MutationResult struct {
 	Changed   bool       `json:"changed"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
-}
-
-// TrustMutationResult is the current authorization state after a trust mutation.
-// It intentionally contains no trust-change history.
-type TrustMutationResult struct {
-	SlackUserID string `json:"slack_user_id"`
-	Trusted     bool   `json:"trusted"`
-	Changed     bool   `json:"changed"`
 }
 
 type StateEvent struct {
@@ -160,6 +155,8 @@ func migrationChecksum(version int) string {
 		migration = migration0008
 	case 9:
 		migration = migration0009
+	case 10:
+		migration = migration0010
 	default:
 		return ""
 	}
@@ -342,7 +339,7 @@ func (s *Store) initialize(ctx context.Context, created bool) error {
 	for _, migration := range []struct {
 		version int
 		sql     []byte
-	}{{1, migration0001}, {2, migration0002}, {3, migration0003}, {4, migration0004}, {5, migration0005}, {6, migration0006}, {7, migration0007}, {8, migration0008}, {9, migration0009}} {
+	}{{1, migration0001}, {2, migration0002}, {3, migration0003}, {4, migration0004}, {5, migration0005}, {6, migration0006}, {7, migration0007}, {8, migration0008}, {9, migration0009}, {10, migration0010}} {
 		if _, err = tx.ExecContext(ctx, string(migration.sql)); err != nil {
 			return err
 		}
@@ -380,7 +377,7 @@ func (s *Store) upgrade(ctx context.Context, fromVersion int) error {
 	if err := compatibleVersion(ctx, tx, fromVersion); err != nil {
 		return err
 	}
-	migrations := map[int][]byte{2: migration0002, 3: migration0003, 4: migration0004, 5: migration0005, 6: migration0006, 7: migration0007, 8: migration0008, 9: migration0009}
+	migrations := map[int][]byte{2: migration0002, 3: migration0003, 4: migration0004, 5: migration0005, 6: migration0006, 7: migration0007, 8: migration0008, 9: migration0009, 10: migration0010}
 	for version := fromVersion + 1; version <= SchemaVersion; version++ {
 		migration, ok := migrations[version]
 		if !ok {
@@ -501,7 +498,7 @@ func expectedSchemaFingerprints(ctx context.Context, version int) (map[string]st
 	}
 	db.SetMaxOpenConns(1)
 	defer db.Close()
-	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009}
+	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009, migration0010}
 	if version < 1 || version > len(migrations) {
 		return nil, errors.New("unknown schema version")
 	}
@@ -713,196 +710,9 @@ func (s *Store) mutate(ctx context.Context, req request, requestID string, fn fu
 	return r, nil
 }
 
-// ListTrustedUsers returns the committed Slack user-ID allowlist in lexical order.
-// Deprecated callers retain this unpaged view; gateway-facing reads use
-// ListTrustedUsersPage so no protocol response is unbounded.
-func (s *Store) ListTrustedUsers(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT slack_user_id FROM trusted_users ORDER BY slack_user_id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var users []string
-	for rows.Next() {
-		var userID string
-		if err := rows.Scan(&userID); err != nil {
-			return nil, err
-		}
-		users = append(users, userID)
-	}
-	return users, rows.Err()
-}
-
-// IsTrustedUser reads current committed authorization directly from SQLite;
-// callers must not replace this authority check with a configuration cache.
-// ListTrustedUsersPage returns a lexical ID-cursor page. Unlike resource
-// cursors, a removed trust anchor remains a valid point after which to resume.
-func (s *Store) ListTrustedUsersPage(ctx context.Context, limit int, cursor string) ([]string, string, error) {
-	if limit == 0 {
-		limit = 50
-	}
-	if limit < 1 || limit > 100 {
-		return nil, "", invalidInput("invalid trusted-user list limit")
-	}
-	if cursor != "" && !validSlackUserID(cursor) {
-		return nil, "", invalidInput("invalid trusted-user list cursor")
-	}
-	q, args := "SELECT slack_user_id FROM trusted_users", []any{}
-	if cursor != "" {
-		q += " WHERE slack_user_id>?"
-		args = append(args, cursor)
-	}
-	q += " ORDER BY slack_user_id LIMIT ?"
-	args = append(args, limit+1)
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close()
-	var users []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, "", err
-		}
-		users = append(users, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
-	}
-	next := ""
-	if len(users) > limit {
-		next = users[limit-1]
-		users = users[:limit]
-	}
-	return users, next, nil
-}
-
-func (s *Store) IsTrustedUser(ctx context.Context, userID string) (bool, error) {
-	if !validSlackUserID(userID) {
-		return false, invalidInput("invalid Slack user ID")
-	}
-	var trusted bool
-	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM trusted_users WHERE slack_user_id=?)", userID).Scan(&trusted); err != nil {
-		return false, err
-	}
-	return trusted, nil
-}
-
-// AddTrustedUser records a Slack user ID in the current allowlist.
-func (s *Store) AddTrustedUser(ctx context.Context, requestID, userID string) (TrustMutationResult, error) {
-	return s.mutateTrust(ctx, request{"trusted_user.add", hash("trusted_user.add", userID)}, requestID, userID, true)
-}
-
-// RemoveTrustedUser removes a Slack user ID from the current allowlist.
-func (s *Store) RemoveTrustedUser(ctx context.Context, requestID, userID string) (TrustMutationResult, error) {
-	return s.mutateTrust(ctx, request{"trusted_user.remove", hash("trusted_user.remove", userID)}, requestID, userID, false)
-}
-
-func validSlackUserID(userID string) bool {
-	if len(userID) < 9 || len(userID) > 64 || (userID[0] != 'U' && userID[0] != 'W') {
-		return false
-	}
-	for _, c := range userID {
-		if c < 'A' || c > 'Z' {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func (s *Store) mutateTrust(ctx context.Context, req request, requestID, userID string, trusted bool) (TrustMutationResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !identity.ValidRequestID(requestID) {
-		return TrustMutationResult{}, errors.New("invalid request ID")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return TrustMutationResult{}, err
-	}
-	defer tx.Rollback()
-	var operation, inputHash, outcome, resultType, resultJSON, errorCode, errorMessage string
-	err = tx.QueryRowContext(ctx, "SELECT operation,input_hash,outcome,coalesce(result_type,''),coalesce(result_json,''),coalesce(error_code,''),coalesce(error_message,'') FROM mutation_requests WHERE request_id=?", requestID).Scan(&operation, &inputHash, &outcome, &resultType, &resultJSON, &errorCode, &errorMessage)
-	if err == nil {
-		if operation != req.operation || inputHash != req.hash {
-			return TrustMutationResult{}, ErrRequestConflict
-		}
-		if outcome != "success" {
-			return TrustMutationResult{}, errorForCode(errorCode, errorMessage)
-		}
-		if resultType != "trust_mutation" {
-			return TrustMutationResult{}, errors.New("prior mutation result type mismatch")
-		}
-		var result TrustMutationResult
-		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-			return TrustMutationResult{}, err
-		}
-		return result, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return TrustMutationResult{}, err
-	}
-	now := s.now()
-	if !validSlackUserID(userID) {
-		err := invalidInput("invalid Slack user ID")
-		return TrustMutationResult{}, s.storeTrustError(ctx, tx, req, requestID, now, err)
-	}
-	var changed bool
-	if trusted {
-		result, err := tx.ExecContext(ctx, "INSERT INTO trusted_users(slack_user_id) VALUES(?) ON CONFLICT(slack_user_id) DO NOTHING", userID)
-		if err != nil {
-			return TrustMutationResult{}, err
-		}
-		changed, err = rowsChanged(result)
-		if err != nil {
-			return TrustMutationResult{}, err
-		}
-	} else {
-		result, err := tx.ExecContext(ctx, "DELETE FROM trusted_users WHERE slack_user_id=?", userID)
-		if err != nil {
-			return TrustMutationResult{}, err
-		}
-		changed, err = rowsChanged(result)
-		if err != nil {
-			return TrustMutationResult{}, err
-		}
-	}
-	response := TrustMutationResult{SlackUserID: userID, Trusted: trusted, Changed: changed}
-	encoded, err := json.Marshal(response)
-	if err != nil {
-		return TrustMutationResult{}, err
-	}
-	expiry := now + RequestRetention.Microseconds()
-	if _, err := tx.ExecContext(ctx, "INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,result_type,result_json,created_at,completed_at,expiry_eligible_at) VALUES(?,?,?,'success','trust_mutation',?,?,?,?)", requestID, req.operation, req.hash, string(encoded), now, now, expiry); err != nil {
-		return TrustMutationResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return TrustMutationResult{}, err
-	}
-	return response, nil
-}
-
 func rowsChanged(result sql.Result) (bool, error) {
 	n, err := result.RowsAffected()
 	return n != 0, err
-}
-
-func (s *Store) storeTrustError(ctx context.Context, tx *sql.Tx, req request, requestID string, now int64, mutationErr error) error {
-	code, ok := deterministicCode(mutationErr)
-	if !ok {
-		return mutationErr
-	}
-	expiry := now + RequestRetention.Microseconds()
-	if _, err := tx.ExecContext(ctx, "INSERT INTO mutation_requests(request_id,operation,input_hash,outcome,error_code,error_message,created_at,completed_at,expiry_eligible_at) VALUES(?,?,?,'error',?,?,?, ?,?)", requestID, req.operation, req.hash, code, mutationErr.Error(), now, now, expiry); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return mutationErr
 }
 
 func (s *Store) Get(ctx context.Context, selector string) (Task, error) {

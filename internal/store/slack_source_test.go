@@ -30,16 +30,8 @@ func sourceTestEvent(id string, kind SlackSourceEventKind, order int64) SlackSou
 	}
 }
 
-func trustSourceTestUser(t *testing.T, s *Store) {
-	t.Helper()
-	if _, err := s.AddTrustedUser(context.Background(), "trust-source-test", "U12345678"); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCommitSlackInitialIsAtomicAndCanonical(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	size := int64(17)
 	event := sourceTestEvent("Ev-initial", SlackEventAppMention, 1_700_000_000_000_001)
@@ -83,7 +75,7 @@ func TestCommitSlackInitialIsAtomicAndCanonical(t *testing.T) {
 	}
 }
 
-func TestSlackAdmissionPolicyTrustAndMalformedResultsAreDurableAndSafe(t *testing.T) {
+func TestSlackAdmissionPolicyAndMalformedResultsAreDurableAndSafe(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	tests := []struct {
@@ -93,8 +85,7 @@ func TestSlackAdmissionPolicyTrustAndMalformedResultsAreDurableAndSafe(t *testin
 	}{
 		{"workspace", func(e *SlackSourceEvent) { e.TeamID = "T87654321" }, SlackIgnoredWorkspace},
 		{"channel", func(e *SlackSourceEvent) { e.ChannelID = "G87654321" }, SlackIgnoredChannel},
-		{"untrusted", func(e *SlackSourceEvent) {}, SlackIgnoredUntrusted},
-		{"untrusted chatter", func(e *SlackSourceEvent) { e.Text = "just talking" }, SlackIgnoredUnmentioned},
+		{"chatter", func(e *SlackSourceEvent) { e.Text = "just talking" }, SlackIgnoredUnmentioned},
 		{"bot", func(e *SlackSourceEvent) { e.UserID, e.BotID, e.Text = "", "B12345678", "" }, SlackIgnoredBot},
 	}
 	for i, test := range tests {
@@ -108,7 +99,6 @@ func TestSlackAdmissionPolicyTrustAndMalformedResultsAreDurableAndSafe(t *testin
 			}
 		})
 	}
-	trustSourceTestUser(t, s)
 	unmentioned := sourceTestEvent("Ev-unmentioned", SlackEventMessage, 200)
 	unmentioned.MessageTS = "1700000010.000001"
 	unmentioned.Text = "ordinary message"
@@ -138,7 +128,6 @@ func TestSlackAdmissionPolicyTrustAndMalformedResultsAreDurableAndSafe(t *testin
 
 func TestConcurrentSlackEventDedupAndSourceIdentityProduceOneTask(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	event := sourceTestEvent("Ev-concurrent", SlackEventAppMention, 1_000)
 	const workers = 12
@@ -193,7 +182,6 @@ func TestConcurrentSlackEventDedupAndSourceIdentityProduceOneTask(t *testing.T) 
 
 func TestSlackEditStaleNoopMeaningfulAndDeletionOrdering(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	initial := sourceTestEvent("Ev-edit-initial", SlackEventAppMention, 1_000)
 	initial.Files = []SlackIncomingFile{{SlackFileID: "F12345678", OriginalName: "first.txt"}}
@@ -267,7 +255,6 @@ func TestSlackRedeliveryAccountingAndCanonicalResultSurviveRestart(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	trustSourceTestUser(t, s)
 	initial := sourceTestEvent("Ev-durable-redelivery", SlackEventAppMention, 100)
 	first, err := s.CommitSlackSourceEvent(ctx, sourceTestPolicy, initial)
 	if err != nil {
@@ -315,7 +302,6 @@ func TestSlackRedeliveryAccountingAndCanonicalResultSurviveRestart(t *testing.T)
 
 func TestSlackAdmissionFailureRollsBackTaskEventSourceAndFiles(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	if _, err := s.DB().Exec(`CREATE TRIGGER fail_slack_file BEFORE INSERT ON files BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
 		t.Fatal(err)
@@ -345,7 +331,6 @@ func TestSlackAdmissionBusyAndCancellationLeaveNoPartialLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	trustSourceTestUser(t, s)
 	event := sourceTestEvent("Ev-busy", SlackEventAppMention, 1_000)
 	event.Files = []SlackIncomingFile{{SlackFileID: "F12345678", OriginalName: "busy.txt"}}
 
@@ -445,7 +430,6 @@ func TestSlackRepositoryRejectsSchemaValidLocalTaskSource(t *testing.T) {
 
 func TestSlackAdmissionWithoutAllowlistAdmitsEveryChannelSeparately(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	open := SlackAdmissionPolicy{TeamID: sourceTestPolicy.TeamID, BotUserID: sourceTestPolicy.BotUserID}
 	for i, channel := range []string{"C12345678", "C87654321", "G12345678"} {

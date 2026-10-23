@@ -48,7 +48,7 @@ func (a App) NewCommandTree() *cobra.Command {
 		_, err := fmt.Fprintln(cmd.OutOrStdout(), a.Version)
 		return err
 	}})
-	root.AddCommand(commandBranch("config", "Inspect or stage configuration."), commandBranch("gateway", "Run or inspect the local gateway."), commandBranch("trust", "Manage trusted Slack users."), commandBranch("task", "Manage durable tasks."), commandBranch("slack", "Read and operate in admitted Slack channels."), commandBranch("effect", "Inspect durable Slack effects."), commandBranch("file", "Inspect or retrieve admitted Slack files."))
+	root.AddCommand(commandBranch("config", "Inspect or stage configuration."), commandBranch("gateway", "Run or inspect the local gateway."), commandBranch("task", "Manage durable tasks."), commandBranch("slack", "Read and operate in admitted Slack channels."), commandBranch("effect", "Inspect durable Slack effects."), commandBranch("file", "Inspect or retrieve admitted Slack files."))
 	findCommand(root, []string{"config"}).AddCommand(commandBranch("secret", "Manage private Slack credentials."))
 	root.AddCommand(a.cobraLeaf([]string{"setup"}, "Create private local configuration and state directories.", "mosscap setup [--json]", true, "", "setup", []flagSpec{boolFlag("json", "Render the result as JSON.")}, nil))
 	root.AddCommand(a.cobraLeaf([]string{"doctor"}, "Run non-destructive local and gateway diagnostics.", "mosscap doctor [--json]", true, protocol.CapabilityDoctor, "doctor", []flagSpec{boolFlag("json", "Render the report as JSON.")}, nil))
@@ -275,7 +275,7 @@ func leafDescription(short, handler string) string {
 // gateway run. Every leaf that opens the local protocol gets the shared bound.
 func gatewayCallingHandler(handler string) bool {
 	switch handler {
-	case "gateway.reload", "gateway.status", "doctor", "purge", "trust.list", "trust.add", "trust.remove", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
+	case "gateway.reload", "gateway.status", "doctor", "purge", "task.create", "task.list", "task.show", "task.context", "task.watch", "task.update", "task.open", "task.working", "task.done", "task.reply", "effect.list", "effect.inspect", "effect.retry", "file.show", "file.get", "slack.history", "slack.thread", "slack.send", "slack.file", "slack.edit", "slack.delete", "slack.react", "slack.unreact":
 		return true
 	default:
 		return false
@@ -309,13 +309,6 @@ func (a App) runTypedCobraHandler(handler string, cmd *cobra.Command, args []str
 		confirm := trackedBool(cmd, "confirm")
 		requestID, _ := cmd.Flags().GetString("request-id")
 		return a.purgeTyped(before, dryRun, confirm, trackedOccurrences(cmd, "before"), trackedOccurrences(cmd, "dry-run"), trackedOccurrences(cmd, "confirm"), requestID, jsonOut)
-	case "trust.list":
-		limit, _ := cmd.Flags().GetInt("limit")
-		cursor, _ := cmd.Flags().GetString("cursor")
-		return a.trustTyped("list", "", "", limit, cursor, jsonOut)
-	case "trust.add", "trust.remove":
-		requestID, _ := cmd.Flags().GetString("request-id")
-		return a.trustTyped(strings.TrimPrefix(handler, "trust."), args[0], requestID, 0, "", jsonOut)
 	case "task.create", "task.update", "task.reply":
 		text, _ := cmd.Flags().GetString("text")
 		textFile, _ := cmd.Flags().GetString("text-file")
@@ -394,7 +387,7 @@ func expectedArgs(handler string) int {
 			return 2
 		}
 		return 1
-	case "trust.add", "trust.remove", "task.show", "task.context", "task.update", "task.open", "task.working", "task.done", "task.reply", "slack.thread", "slack.edit", "slack.delete", "effect.inspect", "effect.retry", "file.show", "file.get":
+	case "task.show", "task.context", "task.update", "task.open", "task.working", "task.done", "task.reply", "slack.thread", "slack.edit", "slack.delete", "effect.inspect", "effect.retry", "file.show", "file.get":
 		return 1
 	default:
 		return 0
@@ -408,9 +401,6 @@ var cobraLeafSpecs = []cobraLeafSpec{
 	{[]string{"gateway", "run"}, "Run the foreground local gateway.", "mosscap gateway run", false, "", "gateway.run", nil, nil},
 	{[]string{"gateway", "reload"}, "Validate and atomically activate staged configuration.", "mosscap gateway reload [--request-id ID] [--json]", false, "config_reload", "gateway.reload", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
 	{[]string{"gateway", "status"}, "Show local gateway status.", "mosscap gateway status [--json]", true, protocol.CapabilityStatus, "gateway.status", []flagSpec{boolFlag("json", "Render the status as JSON.")}, nil},
-	{[]string{"trust", "list"}, "List trusted Slack users.", "mosscap trust list [--limit N] [--cursor SLACK_USER_ID] [--json]", true, "trusted_users", "trust.list", []flagSpec{intFlag("limit", "Maximum number of users."), stringFlag("cursor", "Resume after this Slack user ID."), boolFlag("json", "Render the list as JSON.")}, nil},
-	{[]string{"trust", "add"}, "Add a trusted Slack user.", "mosscap trust add SLACK_USER_ID [--request-id ID] [--json]", false, "trusted_users", "trust.add", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
-	{[]string{"trust", "remove"}, "Remove a trusted Slack user.", "mosscap trust remove SLACK_USER_ID [--request-id ID] [--json]", false, "trusted_users", "trust.remove", []flagSpec{stringFlag("request-id", "Durable mutation request ID."), boolFlag("json", "Render the result as JSON.")}, nil},
 	{[]string{"task", "create"}, "Create a local task.", "mosscap task create (--text TEXT|--text-file PATH|--stdin) [--request-id ID] [--json]", false, "local_tasks", "task.create", textFlags(), nil},
 	{[]string{"task", "list"}, "List durable tasks.", "mosscap task list [--state open|working|done|--all] [--limit N] [--cursor TASK_ID] [--json]", true, "local_tasks", "task.list", []flagSpec{stringFlag("state", "Filter by open, working, or done state."), boolFlag("all", "Include completed tasks."), intFlag("limit", "Maximum number of tasks."), stringFlag("cursor", "Resume after this task ID."), boolFlag("json", "Render the list as JSON.")}, nil},
 	{[]string{"task", "show"}, "Show current durable task state.", "mosscap task show TASK [--json]", true, "local_tasks", "task.show", []flagSpec{boolFlag("json", "Render the task as JSON.")}, nil},

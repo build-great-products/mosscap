@@ -38,7 +38,7 @@ func TestAdditiveCapabilitiesAreAdvertisedWithoutProtocolBump(t *testing.T) {
 	if Version != 1 {
 		t.Fatalf("additive commands unexpectedly changed protocol version to %d", Version)
 	}
-	for _, capability := range []string{CapabilityTrustedUsers, CapabilityConfigReload, CapabilityTaskChanges} {
+	for _, capability := range []string{CapabilityConfigReload, CapabilityTaskChanges} {
 		found := false
 		for _, advertised := range ServerCapabilities {
 			found = found || advertised == capability
@@ -49,14 +49,11 @@ func TestAdditiveCapabilitiesAreAdvertisedWithoutProtocolBump(t *testing.T) {
 	}
 }
 
-func TestTrustAndReloadRequestGolden(t *testing.T) {
+func TestReloadRequestGolden(t *testing.T) {
 	for _, tc := range []struct {
 		command string
 		params  string
 	}{
-		{"trust.list", `{}`},
-		{"trust.add", `{"slack_user_id":"U01234567"}`},
-		{"trust.remove", `{"slack_user_id":"U01234567"}`},
 		{"config.reload", `{}`},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
@@ -73,28 +70,20 @@ func TestTrustAndReloadRequestGolden(t *testing.T) {
 	}
 }
 
-func TestTrustAndReloadParamsStrict(t *testing.T) {
+func TestReloadParamsStrict(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		command string
 		params  string
 		valid   bool
 	}{
-		{"list empty", "trust.list", `{}`, true},
 		{"reload empty", "config.reload", `{}`, true},
 		{"task reply", "task.reply", `{"task":"abcdefghijklmnopqrstuv","text":"reply","done":true}`, true},
 		{"task reply bare selector", "task.reply", `{"task":"abcdefgh","text":"reply","done":true}`, true},
 		{"task reply missing text", "task.reply", `{"task":"abcdefghijklmnopqrstuv"}`, false},
-		{"add valid immutable ID", "trust.add", `{"slack_user_id":"U01234567"}`, true},
-		{"remove valid enterprise ID", "trust.remove", `{"slack_user_id":"W01234567"}`, true},
-		{"empty params reject fields", "trust.list", `{"extra":true}`, false},
 		{"reload reject fields", "config.reload", `{"extra":true}`, false},
-		{"missing user ID", "trust.add", `{}`, false},
-		{"unknown mutation field", "trust.remove", `{"slack_user_id":"U01234567","extra":true}`, false},
-		{"lowercase user ID", "trust.add", `{"slack_user_id":"u01234567"}`, false},
-		{"short user ID", "trust.add", `{"slack_user_id":"U0123456"}`, false},
-		{"invalid user ID punctuation", "trust.add", `{"slack_user_id":"U0123-567"}`, false},
-		{"oversized user ID", "trust.add", `{"slack_user_id":"U0123456789012345678901234567890123456789012345678901234567890123"}`, false},
+		{"removed trust list", "trust.list", `{}`, false},
+		{"removed trust add", "trust.add", `{"slack_user_id":"U01234567"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateParams(tc.command, []byte(tc.params))
@@ -105,15 +94,7 @@ func TestTrustAndReloadParamsStrict(t *testing.T) {
 	}
 }
 
-func TestTrustAndReloadResultGolden(t *testing.T) {
-	trust := TrustMutationDTO{SlackUserID: "U01234567", Trusted: true, Changed: true}
-	if got := mustJSON(t, trust); got != `{"slack_user_id":"U01234567","trusted":true,"changed":true}` {
-		t.Fatalf("trust result = %s", got)
-	}
-	users := TrustedUserListDTO{SlackUserIDs: []string{"U01234567", "U76543210"}, SlackUserNames: map[string]string{"U01234567": "george", "U76543210": "moss"}}
-	if got := mustJSON(t, users); got != `{"slack_user_ids":["U01234567","U76543210"],"slack_user_names":{"U01234567":"george","U76543210":"moss"}}` {
-		t.Fatalf("trusted-user list = %s", got)
-	}
+func TestReloadResultGolden(t *testing.T) {
 	reload := ConfigReloadDTO{Activated: true, SlackNetworkVerificationDeferred: true, ActiveConfigGeneration: 3, ActiveConfigDigest: "sha256:abc"}
 	if got := mustJSON(t, reload); got != `{"activated":true,"slack_network_verification_deferred":true,"active_config_generation":3,"active_config_digest":"sha256:abc"}` {
 		t.Fatalf("reload result = %s", got)

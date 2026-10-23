@@ -127,9 +127,6 @@ func TestSlackVerticalSlice(t *testing.T) {
 		}
 		return out
 	}
-	if out := call("trust", "trust.add", protocol.TrustMutationParams{SlackUserID: "U12345678"}); out.Error != nil {
-		t.Fatalf("trust: %#v", out.Error)
-	}
 	gate.Release()
 	waitAcks(t, acks, dupAcks, editAcks, deleteAcks)
 

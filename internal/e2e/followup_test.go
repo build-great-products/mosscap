@@ -15,56 +15,55 @@ func threadMessage(id, kind, channel, ts, threadTS, user, text string) (slackapi
 }
 
 // TestUnmentionedThreadFollowUpsReachTheWatcher drives the Slack shape the
-// orchestrator sees: a mention, then plain replies in its thread. Trusted
-// replies become linked follow-up tasks with their own reaction; untrusted
-// chatter and the bot's own messages are ignored; edits update a follow-up;
-// and a reply to a thread the bot started is a follow-up too.
+// orchestrator sees: a mention, then plain replies in its thread. Replies from
+// anyone in the workspace, not only the original requester, become linked
+// follow-up tasks with their own reaction; the bot's own messages are ignored;
+// edits update a follow-up; and a reply to a thread the bot started is a
+// follow-up too.
 func TestUnmentionedThreadFollowUpsReachTheWatcher(t *testing.T) {
 	const (
 		rootTS     = "1700000000.000001"
 		perfectTS  = "1700000010.000001"
-		chatterTS  = "1700000020.000001"
+		otherTS    = "1700000020.000001"
 		botReplyTS = "1700000030.000001"
 		botRootTS  = "1700000100.000001"
 		demoTS     = "1700000110.000001"
 	)
 	root, rootAck := threadMessage("root", "app_mention", mainChannel, rootTS, "", harnessUser, "<@U012BOT> render the deck")
 	perfect, perfectAck := threadMessage("perfect", "message", mainChannel, perfectTS, rootTS, harnessUser, "Perfect")
-	chatter, chatterAck := threadMessage("chatter", "message", mainChannel, chatterTS, rootTS, "U87654321", "looks good to me")
+	other, otherAck := threadMessage("other", "message", mainChannel, otherTS, rootTS, "U87654321", "also check staging")
 	botReply, botReplyAck := threadMessage("bot-reply", "message", mainChannel, botReplyTS, rootTS, "", "Done.")
 	botReply.BotID = "B012BOT"
 	edit, editAck := threadMessage("perfect-edit", "message_changed", mainChannel, perfectTS, rootTS, harnessUser, "Perfect, ship it")
 	edit.EventTS = "1700000040.000001"
 	demo, demoAck := threadMessage("demo", "message", mainChannel, demoTS, botRootTS, harnessUser, "Can you just put commented against all of them")
 	demoGate := fake.NewBarrier()
-	h := newSlackHarness(t, nil, []fake.ReceiveStep{{Envelope: root}, {Envelope: perfect}, {Envelope: chatter}, {Envelope: botReply}, {Envelope: edit}, {Envelope: demo, Barrier: demoGate}}, steps(
+	h := newSlackHarness(t, nil, []fake.ReceiveStep{{Envelope: root}, {Envelope: perfect}, {Envelope: other}, {Envelope: botReply}, {Envelope: edit}, {Envelope: demo, Barrier: demoGate}}, steps(
 		verificationSteps(),
 		reactionSteps(fake.AddReaction, mainChannel, rootTS, "hourglass_flowing_sand"),
 		reactionSteps(fake.AddReaction, mainChannel, perfectTS, "hourglass_flowing_sand"),
+		reactionSteps(fake.AddReaction, mainChannel, otherTS, "hourglass_flowing_sand"),
 		[]fake.Step{
 			{Operation: fake.Replies, Request: slackapi.RepliesRequest{ChannelID: mainChannel, ThreadTS: rootTS, Limit: 20}, Result: slackapi.MessagePage{Messages: []slackapi.Message{{MessageTS: rootTS, ThreadTS: rootTS, AuthorID: harnessUser, Text: "<@U012BOT> render the deck"}, {MessageTS: perfectTS, ThreadTS: rootTS, AuthorID: harnessUser, Text: "Perfect, ship it"}}}},
 			{Operation: fake.PostMessage, Result: slackapi.MessageResult{ChannelID: mainChannel, MessageTS: botRootTS}},
 		},
 		reactionSteps(fake.AddReaction, mainChannel, demoTS, "hourglass_flowing_sand"),
 	))
-	waitAcks(t, rootAck, perfectAck, chatterAck, botReplyAck, editAck)
+	waitAcks(t, rootAck, perfectAck, otherAck, botReplyAck, editAck)
 	h.waitWebRemaining(4)
 	ids := h.taskIDs()
-	if len(ids) != 2 {
-		t.Fatalf("tasks=%v; want root and one follow-up", ids)
+	if len(ids) != 3 {
+		t.Fatalf("tasks=%v; want root and two follow-ups", ids)
 	}
-	rootID, followID := ids[0], ids[1]
+	rootID, followID, otherID := ids[0], ids[1], ids[2]
 	if n := h.count("SELECT count(*) FROM slack_task_sources WHERE task_id=? AND parent_task_id=? AND thread_ts=?", followID, rootID, rootTS); n != 1 {
 		t.Fatalf("follow-up is not linked to its thread and parent")
 	}
-	if n := h.count("SELECT count(*) FROM slack_source_events WHERE admission_result='ignored_unmentioned' AND user_id='U87654321'"); n != 1 {
-		t.Fatalf("untrusted chatter results=%d", n)
+	if n := h.count("SELECT count(*) FROM slack_task_sources WHERE task_id=? AND parent_task_id=? AND author_user_id='U87654321'", otherID, rootID); n != 1 {
+		t.Fatalf("follow-up from another member is not linked to the thread's task")
 	}
 	if n := h.count("SELECT count(*) FROM slack_source_events WHERE admission_result='ignored_bot'"); n != 1 {
 		t.Fatalf("bot reply results=%d", n)
-	}
-	if n := h.count("SELECT count(*) FROM slack_effects WHERE emoji='no_entry'"); n != 0 {
-		t.Fatalf("untrusted chatter earned %d no_entry reactions", n)
 	}
 
 	// task context on the follow-up reads the whole thread.
@@ -91,15 +90,16 @@ func TestUnmentionedThreadFollowUpsReachTheWatcher(t *testing.T) {
 	waitAcks(t, demoAck)
 	h.waitWebDone()
 	ids = h.taskIDs()
-	if len(ids) != 3 {
+	if len(ids) != 4 {
 		t.Fatalf("tasks after bot-thread reply=%v", ids)
 	}
 
 	watch := startWatchProcess(t, h.binary, h.env, "--since", "0")
 	want := []string{
 		"task=" + rootID + " version=1 state=open source=slack channel=" + mainChannel + " thread=" + rootTS + " parent= text=<@U012BOT> render the deck",
+		"task=" + otherID + " version=1 state=open source=slack channel=" + mainChannel + " thread=" + rootTS + " parent=" + rootID + " text=also check staging",
 		"task=" + followID + " version=2 state=open source=slack channel=" + mainChannel + " thread=" + rootTS + " parent=" + rootID + " text=Perfect, ship it",
-		"task=" + ids[2] + " version=1 state=open source=slack channel=" + mainChannel + " thread=" + botRootTS + " parent= text=Can you just put commented against all of them",
+		"task=" + ids[3] + " version=1 state=open source=slack channel=" + mainChannel + " thread=" + botRootTS + " parent= text=Can you just put commented against all of them",
 	}
 	for i := range want {
 		if got := watch.next(t); !strings.HasSuffix(got, want[i]) {

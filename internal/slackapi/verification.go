@@ -3,9 +3,9 @@ package slackapi
 import "context"
 
 // Verify proves that the active bot token belongs to the configured workspace
-// and bot, that every allowlisted channel is a writable member channel, that
-// all required bot scopes are granted, and that configured trusted identities
-// are active humans in that workspace. Returned errors contain no supplied IDs.
+// and bot, that every allowlisted channel is a writable member channel, and
+// that all required bot scopes are granted. Returned errors contain no
+// supplied IDs.
 func Verify(ctx context.Context, web Web, request VerificationRequest) (VerificationResult, error) {
 	if web == nil || len(request.ChannelIDs) > MaxFiles {
 		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
@@ -22,19 +22,6 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 	}
 	if (request.TeamID != "" && ValidateTeamID(request.TeamID) != nil) || (request.BotUserID != "" && ValidateUserID(request.BotUserID) != nil) {
 		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
-	}
-	if len(request.TrustedUserIDs) > MaxFiles {
-		return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
-	}
-	seenUsers := make(map[string]struct{}, len(request.TrustedUserIDs))
-	for _, userID := range request.TrustedUserIDs {
-		if ValidateUserID(userID) != nil {
-			return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
-		}
-		if _, exists := seenUsers[userID]; exists {
-			return VerificationResult{}, NewVerificationError(DiagnosticInvalidRequest)
-		}
-		seenUsers[userID] = struct{}{}
 	}
 
 	identity, err := web.Auth(ctx)
@@ -93,17 +80,6 @@ func Verify(ctx context.Context, web Web, request VerificationRequest) (Verifica
 		Team:     team,
 		Channels: channels,
 		Scopes:   append([]Scope(nil), scopes...),
-		Users:    make([]User, 0, len(request.TrustedUserIDs)),
-	}
-	for _, userID := range request.TrustedUserIDs {
-		user, err := web.User(ctx, userID)
-		if err != nil {
-			return VerificationResult{}, err
-		}
-		if user.ID != userID || user.TeamID != teamID || user.Bot || user.Deactivated {
-			return VerificationResult{}, NewVerificationError(DiagnosticUserNotFound)
-		}
-		result.Users = append(result.Users, user)
 	}
 	return result, nil
 }

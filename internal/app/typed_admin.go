@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -107,56 +106,4 @@ func trackedString(cmd *cobra.Command, name string) string { return trackedFlagV
 func trackedBool(cmd *cobra.Command, name string) bool {
 	value, _ := strconv.ParseBool(trackedFlagValue(cmd, name).value)
 	return value
-}
-
-func (a App) trustTyped(command, slackUserID, requestID string, limit int, cursor string, jsonOut bool) error {
-	mutation := command != "list"
-	if mutation && requestID == "" {
-		id, err := identity.NewGenerator(nil).NewRequestID()
-		if err != nil {
-			return err
-		}
-		requestID = id
-	}
-	if !mutation {
-		requestID = "req_trust_list"
-	}
-	loc, err := config.DefaultLocation()
-	if err != nil {
-		return err
-	}
-	// Trust remains operable from its fixed endpoint independently of staged
-	// configuration edits.
-	c, err := config.Default(loc)
-	if err != nil {
-		return err
-	}
-	var params any = protocol.TrustedUserListParams{Limit: limit, Cursor: cursor}
-	gatewayCommand := "trust.list"
-	if mutation {
-		params = protocol.TrustMutationParams{SlackUserID: slackUserID}
-		gatewayCommand = "trust." + command
-	}
-	result, err := a.gatewayCall(c, gatewayCommand, requestID, params, protocol.CapabilityTrustedUsers)
-	if err != nil {
-		return mutationJSONError(err, mutation, jsonOut, requestID)
-	}
-	if mutation {
-		return a.render(map[string]any{"request_id": requestID, "result": result}, jsonOut)
-	}
-	bytes, err := json.Marshal(result)
-	if err != nil {
-		return err
-	}
-	var users protocol.TrustedUserListDTO
-	if err := json.Unmarshal(bytes, &users); err != nil {
-		return err
-	}
-	if err := a.renderTrustedUsers(users, jsonOut); err != nil || jsonOut {
-		return err
-	}
-	if limit == 0 {
-		limit = 50
-	}
-	return renderPaginationContinuation(a.Out, users, fmt.Sprintf("mosscap trust list --limit %d", limit))
 }

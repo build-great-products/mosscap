@@ -88,7 +88,7 @@ func TestNormalizeIncludesForwardedMessageInTaskText(t *testing.T) {
 }
 
 func TestHandleAcknowledgesEveryCommittedAdmissionResult(t *testing.T) {
-	results := []store.SlackAdmissionResult{store.SlackAdmitted, store.SlackUpdated, store.SlackDeleted, store.SlackDuplicate, store.SlackIgnoredWorkspace, store.SlackIgnoredChannel, store.SlackIgnoredUntrusted, store.SlackIgnoredUnmentioned, store.SlackIgnoredBot, store.SlackIgnoredStale, store.SlackIgnoredUntracked, store.SlackMalformed}
+	results := []store.SlackAdmissionResult{store.SlackAdmitted, store.SlackUpdated, store.SlackDeleted, store.SlackDuplicate, store.SlackIgnoredWorkspace, store.SlackIgnoredChannel, store.SlackIgnoredNotAuthor, store.SlackIgnoredUnmentioned, store.SlackIgnoredBot, store.SlackIgnoredStale, store.SlackIgnoredUntracked, store.SlackMalformed}
 	for _, want := range results {
 		t.Run(string(want), func(t *testing.T) {
 			e, recorder := envelope(string(want))
@@ -102,13 +102,13 @@ func TestHandleAcknowledgesEveryCommittedAdmissionResult(t *testing.T) {
 	}
 }
 
-func TestHandleUsesReturnedEmptyAndLiveTrustResults(t *testing.T) {
+func TestHandleUsesReturnedResults(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		result store.SlackAdmissionResult
-	}{{"empty trust", store.SlackIgnoredUntrusted}, {"live trust", store.SlackAdmitted}} {
+	}{{"ignored", store.SlackIgnoredUnmentioned}, {"admitted", store.SlackAdmitted}} {
 		t.Run(tc.name, func(t *testing.T) {
-			e, ack := envelope("trust")
+			e, ack := envelope("result")
 			s := &fakeStore{result: store.SlackEventResult{AdmissionResult: tc.result}}
 			got, err := New(s, policy, fixedClock{}).Handle(context.Background(), e)
 			if err != nil || got.AdmissionResult != tc.result || ack.Calls() != 1 {
@@ -120,18 +120,18 @@ func TestHandleUsesReturnedEmptyAndLiveTrustResults(t *testing.T) {
 
 func TestHandleRequiresBeforeAcknowledgeHookToSucceed(t *testing.T) {
 	e, recorder := envelope("before-ack")
-	s := &fakeStore{result: store.SlackEventResult{AdmissionResult: store.SlackIgnoredUntrusted}}
+	s := &fakeStore{result: store.SlackEventResult{AdmissionResult: store.SlackIgnoredNotAuthor}}
 	boom := errors.New("effect intent unavailable")
 	var hookedEvent store.SlackSourceEvent
 	c := NewWithOptions(s, policy, fixedClock{}, Options{BeforeAcknowledge: func(_ context.Context, event store.SlackSourceEvent, result store.SlackEventResult) error {
 		hookedEvent = event
-		if result.AdmissionResult != store.SlackIgnoredUntrusted {
+		if result.AdmissionResult != store.SlackIgnoredNotAuthor {
 			t.Fatalf("hook result=%+v", result)
 		}
 		return boom
 	}})
 	result, err := c.Handle(context.Background(), e)
-	if !errors.Is(err, boom) || result.AdmissionResult != store.SlackIgnoredUntrusted || recorder.Calls() != 0 {
+	if !errors.Is(err, boom) || result.AdmissionResult != store.SlackIgnoredNotAuthor || recorder.Calls() != 0 {
 		t.Fatalf("result=%+v err=%v acks=%d", result, err, recorder.Calls())
 	}
 	if hookedEvent.SourceEventID != e.EventID || hookedEvent.Text != e.Text {

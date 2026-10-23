@@ -10,7 +10,6 @@ import (
 
 func TestIncomingTransferCommitReplayExpiryAndDetachedIdentity(t *testing.T) {
 	s := testStore(t)
-	trustSourceTestUser(t, s)
 	ctx := context.Background()
 	event := sourceTestEvent("Ev-transfer-initial", SlackEventAppMention, 10)
 	event.Files = []SlackIncomingFile{{SlackFileID: "F12345678", OriginalName: "original.txt"}}

@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -188,7 +186,7 @@ func TestLegacyPrefixedTaskIDsRemainResolvableAndPageable(t *testing.T) {
 	}
 }
 
-func TestListCursorExpiredAndTrustCursorSurvivesRemoval(t *testing.T) {
+func TestListCursorExpired(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	created, err := s.Create(ctx, "cursor-expired", "task")
@@ -203,22 +201,6 @@ func TestListCursorExpiredAndTrustCursorSurvivesRemoval(t *testing.T) {
 	}
 	if _, _, err := s.List(ctx, nil, true, 1, created.TaskID); !errors.Is(err, ErrCursorExpired) {
 		t.Fatalf("expired cursor = %v", err)
-	}
-	for _, id := range []string{"U00000001", "U00000002", "U00000003"} {
-		if _, err := s.AddTrustedUser(ctx, "trust-"+id, id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	users, next, err := s.ListTrustedUsersPage(ctx, 2, "")
-	if err != nil || len(users) != 2 || next == "" {
-		t.Fatalf("trust first = %#v %q %v", users, next, err)
-	}
-	if _, err := s.RemoveTrustedUser(ctx, "remove-anchor", next); err != nil {
-		t.Fatal(err)
-	}
-	users, next, err = s.ListTrustedUsersPage(ctx, 2, next)
-	if err != nil || len(users) != 1 || next != "" {
-		t.Fatalf("trust resume = %#v %q %v", users, next, err)
 	}
 }
 
@@ -484,11 +466,9 @@ func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.
 	if err != nil || len(tasks) != 1 || tasks[0].Text != "preserved task" {
 		t.Fatalf("preserved tasks=%#v err=%v", tasks, err)
 	}
-	if users, err := s.ListTrustedUsers(ctx); err != nil || len(users) != 0 {
-		t.Fatalf("initial trusted users=%v err=%v", users, err)
-	}
-	if _, err := s.AddTrustedUser(ctx, "upgrade-trust", "U12345678"); err != nil {
-		t.Fatal(err)
+	var trustTables int
+	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='trusted_users'").Scan(&trustTables); err != nil || trustTables != 0 {
+		t.Fatalf("trusted_users survived the upgrade: %d err=%v", trustTables, err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -498,8 +478,8 @@ func TestOpenAtomicallyUpgradesIntactV1ThroughV2ToV3AndPreservesData(t *testing.
 		t.Fatalf("restart: %v", err)
 	}
 	defer s.Close()
-	if users, err := s.ListTrustedUsers(ctx); err != nil || len(users) != 1 || users[0] != "U12345678" {
-		t.Fatalf("restart trusted users=%v err=%v", users, err)
+	if tasks, _, err := s.List(ctx, nil, true, 10, ""); err != nil || len(tasks) != 1 {
+		t.Fatalf("restart tasks=%#v err=%v", tasks, err)
 	}
 }
 
@@ -567,86 +547,4 @@ func TestOpenRejectsUnknownAndNewerSchemas(t *testing.T) {
 			t.Fatalf("Open newer schema: %v", err)
 		}
 	})
-}
-
-func TestTrustedUsersMutationReplayConflictAndIdempotency(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	if trusted, err := s.IsTrustedUser(ctx, "U12345678"); err != nil || trusted {
-		t.Fatalf("empty authority=%t err=%v", trusted, err)
-	}
-	added, err := s.AddTrustedUser(ctx, "trust-add", "U12345678")
-	if err != nil || added != (TrustMutationResult{SlackUserID: "U12345678", Trusted: true, Changed: true}) {
-		t.Fatalf("add=%+v err=%v", added, err)
-	}
-	if trusted, err := s.IsTrustedUser(ctx, "U12345678"); err != nil || !trusted {
-		t.Fatalf("committed add authority=%t err=%v", trusted, err)
-	}
-	replay, err := s.AddTrustedUser(ctx, "trust-add", "U12345678")
-	if err != nil || replay != added {
-		t.Fatalf("add replay=%+v err=%v", replay, err)
-	}
-	if _, err := s.AddTrustedUser(ctx, "trust-add", "U87654321"); !errors.Is(err, ErrRequestConflict) {
-		t.Fatalf("add conflict=%v", err)
-	}
-	existing, err := s.AddTrustedUser(ctx, "trust-existing", "U12345678")
-	if err != nil || existing.Changed || !existing.Trusted {
-		t.Fatalf("add existing=%+v err=%v", existing, err)
-	}
-	removed, err := s.RemoveTrustedUser(ctx, "trust-remove", "U12345678")
-	if err != nil || removed != (TrustMutationResult{SlackUserID: "U12345678", Trusted: false, Changed: true}) {
-		t.Fatalf("remove=%+v err=%v", removed, err)
-	}
-	if trusted, err := s.IsTrustedUser(ctx, "U12345678"); err != nil || trusted {
-		t.Fatalf("committed removal authority=%t err=%v", trusted, err)
-	}
-	absent, err := s.RemoveTrustedUser(ctx, "trust-absent", "U12345678")
-	if err != nil || absent.Changed || absent.Trusted {
-		t.Fatalf("remove absent=%+v err=%v", absent, err)
-	}
-	if users, err := s.ListTrustedUsers(ctx); err != nil || len(users) != 0 {
-		t.Fatalf("zero trusted users=%v err=%v", users, err)
-	}
-	if _, err := s.AddTrustedUser(ctx, "bad-trust", "B12345678"); err == nil {
-		t.Fatal("accepted bot ID as trusted user")
-	}
-	if _, err := s.AddTrustedUser(ctx, "bad-trust", "B12345678"); err == nil {
-		t.Fatal("invalid ID replay did not preserve error")
-	}
-}
-
-func TestTrustedUsersAreSortedAndSerializedWithTaskWrites(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	ids := []string{"U99999999", "W12345678", "U12345678"}
-	var wg sync.WaitGroup
-	errs := make(chan error, len(ids)*2)
-	for i, userID := range ids {
-		wg.Add(2)
-		go func(i int, userID string) {
-			defer wg.Done()
-			_, err := s.AddTrustedUser(ctx, "trust-concurrent-"+strconv.Itoa(i), userID)
-			errs <- err
-		}(i, userID)
-		go func(i int) {
-			defer wg.Done()
-			_, err := s.Create(ctx, "task-concurrent-"+strconv.Itoa(i), "task")
-			errs <- err
-		}(i)
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	users, err := s.ListTrustedUsers(ctx)
-	if err != nil || !slices.Equal(users, []string{"U12345678", "U99999999", "W12345678"}) {
-		t.Fatalf("trusted users=%v err=%v", users, err)
-	}
-	var tasks int
-	if err := s.DB().QueryRow("SELECT count(*) FROM tasks").Scan(&tasks); err != nil || tasks != len(ids) {
-		t.Fatalf("tasks=%d err=%v", tasks, err)
-	}
 }

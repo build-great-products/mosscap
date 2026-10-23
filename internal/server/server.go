@@ -560,25 +560,6 @@ func (s *Server) dispatchConnection(ctx context.Context, r protocol.Request, con
 				result = metadataPurgeDTO(purge, p.Mode)
 			}
 		}
-	case "trust.list":
-		resultType = "trusted_user_list"
-		var p protocol.TrustedUserListParams
-		_ = json.Unmarshal(r.Params, &p)
-		var users []string
-		var next string
-		users, next, err = s.store.ListTrustedUsersPage(ctx, p.Limit, p.Cursor)
-		result = protocol.TrustedUserListDTO{SlackUserIDs: users, SlackUserNames: s.slackUserNames(ctx, users), NextCursor: next}
-	case "trust.add", "trust.remove":
-		var p protocol.TrustMutationParams
-		_ = json.Unmarshal(r.Params, &p)
-		resultType = "trust_mutation"
-		var mutation store.TrustMutationResult
-		if r.Command == "trust.add" {
-			mutation, err = s.store.AddTrustedUser(ctx, r.RequestID, p.SlackUserID)
-		} else {
-			mutation, err = s.store.RemoveTrustedUser(ctx, r.RequestID, p.SlackUserID)
-		}
-		result = protocol.TrustMutationDTO{SlackUserID: mutation.SlackUserID, Trusted: mutation.Trusted, Changed: mutation.Changed}
 	case "task.create":
 		var p protocol.TaskCreateParams
 		_ = json.Unmarshal(r.Params, &p)

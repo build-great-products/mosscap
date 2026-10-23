@@ -100,7 +100,7 @@ func validSkinToneSuffix(value string) bool {
 }
 
 // ValidateEnvelope enforces transport-level shape and allocation bounds. It
-// does not make trust or admission decisions.
+// does not make admission decisions.
 func ValidateEnvelope(envelope Envelope) error {
 	if !envelope.Kind.Valid() {
 		return errors.New("unsupported Slack event kind")

@@ -32,11 +32,7 @@ func TestHelpAtEveryCommandNode(t *testing.T) {
 		{"gateway", "reload", "--help"},
 		{"gateway", "status", "--help"},
 		{"doctor", "--help"},
-		{"trust", "--help"},
 		{"purge", "--help"},
-		{"trust", "list", "--help"},
-		{"trust", "add", "--help"},
-		{"trust", "remove", "--help"},
 		{"task", "--help"},
 		{"task", "create", "--help"},
 		{"task", "list", "--help"},
@@ -120,51 +116,6 @@ func TestRenderDoctorIsHumanFriendlyUnlessJSONRequested(t *testing.T) {
 	}
 	if decoded.Overall != report.Overall || len(decoded.Checks) != len(report.Checks) {
 		t.Fatalf("--json output = %+v, want %+v", decoded, report)
-	}
-}
-
-func TestRenderTrustedUsersIsHumanFriendlyUnlessJSONRequested(t *testing.T) {
-	users := protocol.TrustedUserListDTO{
-		SlackUserIDs:   []string{"U01234567", "U76543210"},
-		SlackUserNames: map[string]string{"U01234567": "george", "U76543210": "moss"},
-	}
-
-	var out bytes.Buffer
-	a := App{Out: &out}
-	if err := a.renderTrustedUsers(users, false); err != nil {
-		t.Fatal(err)
-	}
-	human := out.String()
-	for _, want := range []string{"Trusted Slack users: 2", "•  U01234567  @george", "•  U76543210  @moss"} {
-		if !strings.Contains(human, want) {
-			t.Fatalf("human trust list output missing %q: %q", want, human)
-		}
-	}
-	if json.Valid([]byte(human)) || strings.Contains(human, `"slack_user_ids"`) {
-		t.Fatalf("default trust list output is JSON: %q", human)
-	}
-	if strings.Contains(human, "\x1b[") {
-		t.Fatalf("non-terminal trust list output contains ANSI colors: %q", human)
-	}
-
-	out.Reset()
-	if err := a.renderTrustedUsers(protocol.TrustedUserListDTO{}, false); err != nil {
-		t.Fatal(err)
-	}
-	if want := "Trusted Slack users: 0\n\n  No users are trusted.\n"; out.String() != want {
-		t.Fatalf("empty trust list = %q, want %q", out.String(), want)
-	}
-
-	out.Reset()
-	if err := a.renderTrustedUsers(users, true); err != nil {
-		t.Fatal(err)
-	}
-	var decoded protocol.TrustedUserListDTO
-	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
-		t.Fatalf("--json output is invalid: %v; output=%q", err, out.String())
-	}
-	if len(decoded.SlackUserIDs) != 2 || decoded.SlackUserIDs[0] != "U01234567" || decoded.SlackUserNames["U01234567"] != "george" {
-		t.Fatalf("--json output = %+v, want %+v", decoded, users)
 	}
 }
 

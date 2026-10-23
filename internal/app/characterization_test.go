@@ -22,7 +22,6 @@ func TestCommandTreeCharacterization(t *testing.T) {
 	branches := map[string][]string{
 		"config":  {"show", "set", "secret set"},
 		"gateway": {"run", "reload", "status"},
-		"trust":   {"list", "add", "remove"},
 		"task":    {"create", "list", "show", "update", "open", "working", "done", "reply"},
 		"slack":   {"history", "thread", "send", "file", "edit", "delete", "react", "unreact"},
 		"effect":  {"list", "inspect", "retry"},
@@ -47,7 +46,6 @@ func TestCommandTreeCharacterization(t *testing.T) {
 	leaves := [][]string{
 		{"setup"}, {"config", "show"}, {"config", "set"}, {"config", "secret", "set"},
 		{"gateway", "run"}, {"gateway", "reload"}, {"gateway", "status"}, {"doctor"}, {"purge"},
-		{"trust", "list"}, {"trust", "add"}, {"trust", "remove"},
 		{"task", "create"}, {"task", "list"}, {"task", "show"}, {"task", "update"}, {"task", "open"}, {"task", "working"}, {"task", "done"}, {"task", "reply"},
 		{"slack", "history"}, {"slack", "thread"}, {"slack", "send"}, {"slack", "file"}, {"slack", "edit"}, {"slack", "delete"}, {"slack", "react"}, {"slack", "unreact"},
 		{"effect", "list"}, {"effect", "inspect"}, {"effect", "retry"}, {"file", "show"}, {"file", "get"},
@@ -80,7 +78,6 @@ func TestGatewayRequestConstructionCharacterization(t *testing.T) {
 		requestID  string
 		params     any
 	}{
-		{"trust add", []string{"trust", "add", "U01234567", "--request-id", "req_characterization_trust_add"}, protocol.CapabilityTrustedUsers, "trust.add", "req_characterization_trust_add", protocol.TrustMutationParams{SlackUserID: "U01234567"}},
 		{"purge preview", []string{"purge", "--before", "2026-01-01T00:00:00.000000Z", "--dry-run"}, protocol.CapabilityMetadataPurge, "metadata.purge", "req_purge_preview", protocol.MetadataPurgeParams{Cutoff: "2026-01-01T00:00:00.000000Z", Mode: "dry_run"}},
 		{"task create", []string{"task", "create", "--text", "write tests", "--request-id", "req_characterization_create"}, protocol.CapabilityLocalTasks, "task.create", "req_characterization_create", protocol.TaskCreateParams{Text: "write tests"}},
 		{"task update selector before flags", []string{"task", "update", "abcdefghijklmnopqrstuv", "--text", "revised", "--request-id", "req_characterization_update"}, protocol.CapabilityLocalTasks, "task.update", "req_characterization_update", protocol.TaskUpdateParams{Task: "abcdefghijklmnopqrstuv", Text: "revised"}},

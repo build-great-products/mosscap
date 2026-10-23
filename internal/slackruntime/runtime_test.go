@@ -88,7 +88,6 @@ func TestSafeErrorRendersTypedVerificationAdviceWithoutSecrets(t *testing.T) {
 		{slackapi.DiagnosticTeamMismatch, "intended workspace"},
 		{slackapi.DiagnosticChannelNotFound, "invite the bot"},
 		{slackapi.DiagnosticChannelArchived, "writable public or private channel"},
-		{slackapi.DiagnosticUserNotFound, "active human"},
 	}
 	for _, test := range tests {
 		t.Run(string(test.code), func(t *testing.T) {

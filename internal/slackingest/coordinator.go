@@ -235,7 +235,7 @@ func canonical(event store.SlackSourceEvent, result store.SlackEventResult) bool
 		return false
 	}
 	switch result.AdmissionResult {
-	case store.SlackAdmitted, store.SlackUpdated, store.SlackDeleted, store.SlackDuplicate, store.SlackIgnoredWorkspace, store.SlackIgnoredChannel, store.SlackIgnoredUntrusted, store.SlackIgnoredUnmentioned, store.SlackIgnoredBot, store.SlackIgnoredStale, store.SlackIgnoredUntracked, store.SlackMalformed:
+	case store.SlackAdmitted, store.SlackUpdated, store.SlackDeleted, store.SlackDuplicate, store.SlackIgnoredWorkspace, store.SlackIgnoredChannel, store.SlackIgnoredNotAuthor, store.SlackIgnoredUnmentioned, store.SlackIgnoredBot, store.SlackIgnoredStale, store.SlackIgnoredUntracked, store.SlackMalformed:
 		return true
 	default:
 		return false

@@ -19,7 +19,7 @@ func ledgerAtVersion(t *testing.T, version int, statements ...string) string {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009}
+	migrations := [][]byte{migration0001, migration0002, migration0003, migration0004, migration0005, migration0006, migration0007, migration0008, migration0009, migration0010}
 	for i, migration := range migrations[:version] {
 		if _, err := db.Exec(string(migration)); err != nil {
 			t.Fatal(err)
@@ -52,6 +52,29 @@ func TestOpenUpgradeV7DropsPiDeliveriesAndKeepsTasks(t *testing.T) {
 		t.Fatalf("pi_deliveries objects=%d err=%v", tables, err)
 	}
 	got, err := s.Get(context.Background(), "tsk_v7_task")
+	if err != nil || got.Text != "keep me" {
+		t.Fatalf("task after upgrade=%+v err=%v", got, err)
+	}
+}
+
+func TestOpenUpgradeV9DropsTrustedUsersAndKeepsSlackWork(t *testing.T) {
+	path := ledgerAtVersion(t, 9,
+		`INSERT INTO tasks(task_id,version,state,text,source_kind,created_at,updated_at,done_at) VALUES('tsk_v9_task',1,'open','keep me','local',1,1,NULL)`,
+		`INSERT INTO trusted_users(slack_user_id) VALUES('U12345678')`,
+	)
+	s, err := Open(context.Background(), path, Options{})
+	if err != nil {
+		t.Fatalf("Open v9: %v", err)
+	}
+	defer s.Close()
+	var tables, version int
+	if err := s.DB().QueryRow("SELECT count(*) FROM sqlite_master WHERE name='trusted_users'").Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("trusted_users objects=%d err=%v", tables, err)
+	}
+	if err := s.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	got, err := s.Get(context.Background(), "tsk_v9_task")
 	if err != nil || got.Text != "keep me" {
 		t.Fatalf("task after upgrade=%+v err=%v", got, err)
 	}
