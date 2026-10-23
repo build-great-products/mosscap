@@ -311,15 +311,19 @@ func (s *Store) commitSlackInitial(ctx context.Context, tx *sql.Tx, policy Slack
 	if event.BotID != "" || event.Subtype != "" || event.UserID == policy.BotUserID {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredBot, "", "", committedAtUS)
 	}
+	// Mention is checked before trust: only a message addressed to the bot is
+	// a request, so only an addressed untrusted message is ignored_untrusted
+	// (which earns the no_entry reaction). Ordinary channel chatter is
+	// ignored_unmentioned regardless of sender.
+	if !strings.Contains(event.Text, "<@"+policy.BotUserID+">") {
+		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
+	}
 	var trusted bool
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM trusted_users WHERE slack_user_id=?)", event.UserID).Scan(&trusted); err != nil {
 		return SlackEventResult{}, err
 	}
 	if !trusted {
 		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUntrusted, "", "", committedAtUS)
-	}
-	if !strings.Contains(event.Text, "<@"+policy.BotUserID+">") {
-		return s.commitSlackEventOnly(ctx, tx, event, SlackIgnoredUnmentioned, "", "", committedAtUS)
 	}
 	taskID, err := s.ids.NewTaskID()
 	if err != nil {

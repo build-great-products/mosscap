@@ -94,6 +94,7 @@ func TestSlackAdmissionPolicyTrustAndMalformedResultsAreDurableAndSafe(t *testin
 		{"workspace", func(e *SlackSourceEvent) { e.TeamID = "T87654321" }, SlackIgnoredWorkspace},
 		{"channel", func(e *SlackSourceEvent) { e.ChannelID = "G87654321" }, SlackIgnoredChannel},
 		{"untrusted", func(e *SlackSourceEvent) {}, SlackIgnoredUntrusted},
+		{"untrusted chatter", func(e *SlackSourceEvent) { e.Text = "just talking" }, SlackIgnoredUnmentioned},
 		{"bot", func(e *SlackSourceEvent) { e.UserID, e.BotID, e.Text = "", "B12345678", "" }, SlackIgnoredBot},
 	}
 	for i, test := range tests {
